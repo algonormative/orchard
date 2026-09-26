@@ -104,12 +104,12 @@ jobs:
           scripts/sign-macos-app.sh dist/Orchard.app
           ditto -c -k --keepParent dist/Orchard.app "dist/Orchard-${ORCHARD_RELEASE_VERSION}-macos-arm64.zip"
           (cd dist && shasum -a 256 "Orchard-${ORCHARD_RELEASE_VERSION}-macos-arm64.zip" > "Orchard-${ORCHARD_RELEASE_VERSION}-macos-arm64.zip.sha256")
-      - name: Create draft GitHub release
+      - name: Publish GitHub release
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" "dist/Orchard-${ORCHARD_RELEASE_VERSION}-macos-arm64.zip" "dist/Orchard-${ORCHARD_RELEASE_VERSION}-macos-arm64.zip.sha256" --draft --title "Orchard $ORCHARD_RELEASE_VERSION" --generate-notes
+        run: gh release create "$TAG" "dist/Orchard-${ORCHARD_RELEASE_VERSION}-macos-arm64.zip" "dist/Orchard-${ORCHARD_RELEASE_VERSION}-macos-arm64.zip.sha256" --title "Orchard $ORCHARD_RELEASE_VERSION" --generate-notes
       - name: Remove signing material
         if: always()
         run: |

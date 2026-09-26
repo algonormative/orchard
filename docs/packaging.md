@@ -2,8 +2,7 @@
 
 ## Public macOS release
 
-The first public release is being prepared; no signed download exists yet.
-Public releases will provide a signed and notarized Apple Silicon app as
+Public releases provide a signed and notarized Apple Silicon app as
 `Orchard-MAJOR.MINOR.PATCH-macos-arm64.zip`. A user can unzip it, move
 `Orchard.app` to Applications, and launch it normally on macOS 13 or newer. The
 app runs in the menu bar, so it does not create a Dock icon or a main window at
@@ -15,14 +14,14 @@ with incremental compilation disabled, to stay within the hosted runner's disk
 limit. It builds and tests only locked dependency graphs. Automated tests must
 not call provider or other metered services.
 
-Before the first release of `algonormative/orchard-workspace`:
+To configure the release workflow for `algonormative/orchard-workspace`:
 
 1. Set the Actions repository variable `ORCHARD_UPDATE_REPOSITORY` to
    `algonormative/orchard-workspace`. The value is embedded in the app's manual
    update check and the workflow rejects a mismatch with the running repository.
-2. Run the workflow manually. This executes the tests and clean-runner package
-   build without signing, then retains an explicitly `UNSIGNED` ZIP as a
-   seven-day Actions artifact. It does not create a GitHub Release.
+2. A manual workflow run executes the tests and clean-runner package build
+   without signing, then retains an explicitly `UNSIGNED` ZIP as a seven-day
+   Actions artifact. It does not create a GitHub Release.
 3. Export a Developer ID Application certificate as a password-protected `.p12`,
    base64-encode the file, and add the result as `APPLE_CERTIFICATE_P12`.
    An Apple Development identity cannot sign a public direct-download release.
@@ -30,26 +29,27 @@ Before the first release of `algonormative/orchard-workspace`:
    complete `APPLE_SIGNING_IDENTITY` shown by `security find-identity -v -p
    codesigning`, `APPLE_ID`, `APPLE_TEAM_ID`, and an
    `APPLE_APP_SPECIFIC_PASSWORD` as Actions secrets.
-5. Confirm `0.1.0` matches the version in
+5. Confirm the intended release version matches in
    `crates/orchard-desktop/Cargo.toml` and
    `crates/orchard-desktop/tauri.conf.json`.
 6. When the exact release commit is ready, create and push the annotated tag
-   `v0.1.0`.
+   matching the desktop version, such as `v1.2.3`.
 
 The tag starts `.github/workflows/macos-release.yml`. The workflow validates the
 tag and repository, runs the browser and release-mode Rust tests, imports the
 certificate into a temporary keychain, builds the app, signs its nested `br`
 binary and app bundle with hardened runtime and a secure timestamp, notarizes a
 temporary ZIP, staples and validates the ticket, and assesses the app with
-Gatekeeper. Only then does it create a draft GitHub Release with the distribution
+Gatekeeper. Only then does it publish a GitHub Release with the distribution
 ZIP and checksum. It removes temporary signing material even when a step fails.
+The manual `workflow_dispatch` path remains unsigned and cannot publish a
+release.
 
-Download both draft assets on a separate compatible Mac while authenticated to
-GitHub. Verify the checksum, install the app in Applications, launch it, create
-or open a workspace, quit from the menu, and reopen it. Publish the draft only
-after that check passes. CI signing and Gatekeeper assessment do not prove the
-complete interactive flow on another Mac, and an unsigned preflight artifact
-must never be published as a release.
+Installation of the v0.1.0 candidate on a second Mac was reported successful
+on 2026-09-26. The report did not describe the machine configuration or each
+interaction tested. CI signing and Gatekeeper assessment remain narrower than
+a complete interactive check on another Mac. See [verification.md](verification.md)
+for the dated evidence and remaining integration tests.
 
 Do not reuse a version or move a published tag. For a later release, update both
 desktop version files, commit the change, and tag that exact commit with the

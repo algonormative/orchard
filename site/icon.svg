@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Orchard mark">
+  <rect width="64" height="64" rx="18" fill="#284932"/>
+  <path d="M32 46V27m0 8c-9 0-15-6-15-14 8 0 15 5 15 14Zm0-5c0-8 6-14 15-14 0 8-6 14-15 14Z" fill="none" stroke="#d9eaa9" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M22 47h20" stroke="#d9eaa9" stroke-width="4" stroke-linecap="round"/>
+</svg>

@@ -1,29 +1,36 @@
 # Orchard
 
-Orchard is a macOS menu bar workspace for coordinating people and already-running
-agents through shared mail, Git repositories, and Beads task stores. It serves
-its browser UI and authenticated HTTP/MCP endpoints locally. Orchard does not
-launch or authenticate an agent or provider.
+Orchard is a local workspace for people and their already-running agents. Read
+conversations, work through tasks, and browse project files in one browser UI.
+The macOS menu bar app hosts the workspace and gives each workspace a connection
+point for agents. Orchard does not launch agents or sign in to their providers.
+
+[Website](https://algonormative.github.io/orchard-workspace/) ·
+[Releases](https://github.com/algonormative/orchard-workspace/releases) ·
+[Source](https://github.com/algonormative/orchard-workspace)
 
 ## Install on macOS
 
 Orchard supports Apple Silicon Macs running macOS 13 or newer.
 
-The signed and notarized v0.1.0 release candidate is ready as a GitHub draft.
-It is not public yet because installation on another Mac is still pending. When
-the release is published:
-
-1. Download `Orchard-<version>-macos-arm64.zip` and its `.sha256` file from the
+1. Download `Orchard-<version>-macos-arm64.zip` from the
    [latest GitHub Release](https://github.com/algonormative/orchard-workspace/releases/latest).
-2. Optionally verify the download with
+2. Optionally download its `.sha256` file and verify the ZIP with
    `shasum -a 256 -c Orchard-<version>-macos-arm64.zip.sha256`.
 3. Open the ZIP and drag `Orchard.app` to Applications.
 4. Open Orchard from Applications. It appears in the menu bar rather than the
-   Dock; use its menu to open the workspace.
+   Dock. Choose **Create a Workspace…** from its menu to begin.
 
-The v0.1.0 candidate is signed with a Developer ID certificate, notarized by
-Apple, and carries a stapled notarization ticket. Orchard stores its default
-data in `~/Library/Application Support/Orchard`.
+In the workspace, use Settings to copy the joining prompt or connection details
+for an agent you already run. Your agent's own harness handles its MCP setup,
+identity, permissions, and provider authentication. Orchard stores workspace
+data locally in `~/Library/Application Support/Orchard`; attached Git
+repositories stay at their existing paths. You can check for a newer version
+from **Check for Updates…** in the menu. Updates are manual: Orchard opens the
+release page and does not download or install an update for you.
+
+Release ZIPs are signed with a Developer ID certificate, notarized by Apple,
+and carry a stapled notarization ticket.
 
 ## Development
 
@@ -58,7 +65,7 @@ CARGO_TARGET_DIR=/private/tmp/orchard-ux-target \
   ORCHARD_VERSION=0.1.0 scripts/package-macos-app.sh
 ```
 
-Signing, notarization, GitHub Release setup, and the first-release checklist are
+Signing, notarization, GitHub Release setup, and the release checklist are
 documented in [docs/packaging.md](docs/packaging.md).
 
 The server-only package remains available for development and headless use:

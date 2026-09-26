@@ -2,8 +2,9 @@
 
 This began as a local macOS Apple Silicon MVP with a Rust server and browser UI.
 The current product also has a native menu bar shell. The evidence below is
-historical and scoped by date; it does not claim a signed, notarized, published,
-or clean-machine-tested release until those checks are recorded here.
+historical and scoped by date. The release candidate was signed and notarized
+later, and a second-Mac installation was subsequently reported successful.
+Those observations do not establish the remaining integration checks.
 
 ## Independently checked
 
@@ -66,7 +67,7 @@ remain tracked in `vault-rhtyl`.
 
 GitHub Actions run `35231955551` completed the v0.1.0 release workflow from
 commit `252255c`. It built, signed, notarized, and stapled the Apple Silicon app,
-then created a draft GitHub Release. The release remains unpublished pending the
+then created a draft GitHub Release. At the time, publication was pending the
 other-Mac installation check.
 
 The exact draft asset `Orchard-0.1.0-macos-arm64.zip` was downloaded to
@@ -80,16 +81,41 @@ This proves the downloaded draft contains the expected signed and stapled app
 and passes local Gatekeeper assessment. It does not prove installation, first
 launch, menu interaction, quit, or restart on another Mac.
 
-## Remaining release evidence
+## Second-Mac installation — 2026-09-26
 
-Tracked in Vault epic `vault-1qnss`, release gate `vault-1qnss.7`:
+The user reported that installation works well on a second Mac and authorized
+completion of the public release. The report did not specify the Mac model,
+macOS version, whether it was a clean machine without development runtimes, or
+which workspace, menu, quit, and restart actions were exercised. It is evidence
+for a successful installation report, not a claim that each of those checks
+passed.
+
+## Public release — 2026-09-26
+
+The v0.1.0 GitHub Release was published and the latest-release API returned it.
+The public ZIP was downloaded again and matched the SHA-256 recorded above.
+Deep strict code-signature verification, stapled-ticket validation, and
+Gatekeeper assessment passed again for that download. This confirms the
+published asset matches the checked candidate; it does not add harness or
+sleep/wake evidence.
+
+An anonymous request downloaded the release asset with HTTP 200. A live call
+through `orchard_update` returned `UpToDate` for installed version 0.1.0; with
+simulated installed version 0.0.0, it returned `UpdateAvailable` and the exact
+Apple Silicon ZIP. Five targeted update tests passed. These checks exercise the
+update library and public release endpoint, not the menu action in the app.
+
+## Remaining integration evidence
+
+Originally tracked in Vault epic `vault-1qnss`, release gate `vault-1qnss.7`:
 
 1. Connect actual Claude Code and Codex sessions to the packaged server; exchange
    a task-linked request, response, acknowledgment, and handoff, then restart and
    reconnect. Local SDK clients prove transport behavior, not harness integration.
 2. Exercise macOS sleep/wake with those clients connected.
-3. Install and run the package on a clean compatible Mac without development
-   runtimes. A sanitized-PATH test on the development machine is narrower evidence.
+3. If a clean-machine runtime-dependency claim is needed, verify it explicitly
+   on a compatible Mac without development runtimes. The reported second-Mac
+   installation and sanitized-PATH test do not establish that configuration.
 
 These tests must not be silently replaced with provider calls from automated
 tests. Communication backup/restore currently requires a stopped server and
