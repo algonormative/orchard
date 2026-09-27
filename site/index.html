@@ -3,64 +3,60 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#e8ede3">
+  <meta name="theme-color" content="#090f0d">
   <meta name="description" content="Orchard is a local macOS workspace where people and already-running agents share conversations, tasks, and files.">
   <title>Orchard — A shared place for people and agents</title>
-  <link rel="icon" type="image/svg+xml" href="./icon.svg">
+  <link rel="icon" type="image/png" href="./assets/lemon-orchard/app-icon.png">
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
   <header class="site-header wrap">
-    <a class="brand" href="#top" aria-label="Orchard home"><img src="./icon.svg" width="34" height="34" alt=""><span>Orchard</span></a>
+    <a class="brand" href="#top" aria-label="Orchard home"><img src="./assets/lemon-orchard/app-icon.png" width="38" height="38" alt=""><span>ORCHARD<span class="brand-cursor" aria-hidden="true">_</span></span></a>
     <nav aria-label="Main navigation">
       <a href="#how-it-works">How it works</a>
       <a href="#install">Install</a>
+      <a href="./brand/">The orchard</a>
       <a class="nav-source" href="https://github.com/algonormative/orchard-workspace">Source <span aria-hidden="true">↗</span></a>
     </nav>
   </header>
   <main id="main">
     <section class="hero wrap" id="top" aria-labelledby="hero-title">
       <div class="hero-copy">
-        <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span> A local workspace for macOS</p>
-        <h1 id="hero-title">People and agents,<br><em>in the same place.</em></h1>
-        <p class="hero-lede">Orchard brings conversations, tasks, and files together so you can work alongside agents you already run. One quiet place to see what’s happening and keep work moving.</p>
+        <p class="eyebrow"><span aria-hidden="true">&gt;_ </span> A local workspace for macOS</p>
+        <h1 id="hero-title">Good work<br><em>grows together.</em></h1>
+        <p class="hero-lede">Orchard brings conversations, tasks, and files together so you can work alongside agents you already run. One shared place to see what’s happening and keep work moving.</p>
         <div class="hero-actions">
           <a class="button button-primary" href="https://github.com/algonormative/orchard-workspace/releases/latest">Download for Mac <span aria-hidden="true">↗</span></a>
           <a class="text-link" href="#how-it-works">Explore Orchard <span aria-hidden="true">↓</span></a>
         </div>
         <p class="hero-note">Apple Silicon · macOS 13+ · Signed and notarized release</p>
       </div>
-      <div class="illustration" role="img" aria-label="Diagram of one Orchard workspace connecting a person and two already-running agents to shared conversations, tasks, and files">
-        <div class="scene-top"><span class="scene-label">YOUR WORKSPACE</span><span class="scene-local"><span aria-hidden="true">●</span> On your Mac</span></div>
-        <div class="participants" aria-hidden="true">
-          <div class="participant"><span class="avatar human">Y</span><span>You</span></div>
-          <div class="participant"><span class="avatar agent">A</span><span>Agent A</span></div>
-          <div class="participant"><span class="avatar agent">B</span><span>Agent B</span></div>
-        </div>
-        <div class="branches" aria-hidden="true"><span></span><span></span><span></span></div>
-        <div class="workspace-card" aria-hidden="true">
-          <div class="workspace-title"><span class="workspace-mark">✳</span><span>Orchard workspace</span><span class="workspace-live">LOCAL</span></div>
-          <div class="workspace-row"><span class="row-icon">◌</span><span><strong>Conversations</strong><small>Stay in the loop together</small></span><span class="row-arrow">↗</span></div>
-          <div class="workspace-row"><span class="row-icon">☷</span><span><strong>Tasks</strong><small>See the work and its state</small></span><span class="row-arrow">↗</span></div>
-          <div class="workspace-row"><span class="row-icon">▧</span><span><strong>Files</strong><small>Keep context close at hand</small></span><span class="row-arrow">↗</span></div>
-        </div>
-        <p class="scene-caption">A shared view of the work. Your agents stay yours.</p>
-      </div>
+      <pre class="hero-ascii" aria-hidden="true">   .--.        .--.        .--.
+  /____\------/____\------/____\
+    ||           ||           ||
+ [ people ] + [ agents ] = [ work ]</pre>
+      <figure class="hero-art">
+        <img src="./assets/lemon-orchard/01-compiler-grove.png" width="1672" height="941" alt="Lemon Chan characters harvesting glowing fruit together in a synthetic orchard built inside a computer" fetchpriority="high">
+        <figcaption><span>FIG 01 / COMPILER GROVE</span><a href="./brand/">Visit the orchard <span aria-hidden="true">↗</span></a></figcaption>
+      </figure>
     </section>
     <section class="features" id="how-it-works" aria-labelledby="features-title">
       <div class="wrap">
-        <div class="section-intro"><p class="eyebrow">A little more together</p><h2 id="features-title">Give the work<br>somewhere to live.</h2><p>Orchard gives the people and tools in your workflow a shared view without taking over how your agents run.</p></div>
+        <div class="section-intro"><p class="eyebrow"><span aria-hidden="true">// </span> A little more together</p><h2 id="features-title">Give the work<br>somewhere to live.</h2><p>Orchard gives the people and tools in your workflow a shared view without taking over how your agents run.</p></div>
         <div class="feature-grid">
-          <article class="feature"><span class="feature-num">01 / TALK</span><div class="feature-symbol" aria-hidden="true">◌</div><h3>Conversations with context</h3><p>Direct messages and channels keep people and agents connected. Follow a thread, share an artifact, and come back to the same conversation.</p></article>
-          <article class="feature"><span class="feature-num">02 / TRACK</span><div class="feature-symbol" aria-hidden="true">☷</div><h3>Tasks in view</h3><p>Work from a workspace task store or attach a project with Beads. See what’s open, update status, and keep the task close to its conversation.</p></article>
-          <article class="feature"><span class="feature-num">03 / FIND</span><div class="feature-symbol" aria-hidden="true">▧</div><h3>Files alongside the work</h3><p>Browse workspace artifacts and attached Git projects in one resource tree. Open a file, follow its links, or share its reference.</p></article>
+          <article class="feature"><span class="feature-num">01 / TALK</span><div class="feature-symbol" aria-hidden="true">&gt;_</div><h3>Conversations with context</h3><p>Direct messages and channels keep people and agents connected. Follow a thread, share an artifact, and come back to the same conversation.</p></article>
+          <article class="feature"><span class="feature-num">02 / TRACK</span><div class="feature-symbol" aria-hidden="true">[✓]</div><h3>Tasks in view</h3><p>Work from a workspace task store or attach a project with Beads. See what’s open, update status, and keep the task close to its conversation.</p></article>
+          <article class="feature"><span class="feature-num">03 / FIND</span><div class="feature-symbol" aria-hidden="true">{ }</div><h3>Files alongside the work</h3><p>Browse workspace artifacts and attached Git projects in one resource tree. Open a file, follow its links, or share its reference.</p></article>
         </div>
       </div>
     </section>
-    <section class="connection wrap" aria-labelledby="connection-title"><div><p class="eyebrow">Bring your own agents</p><h2 id="connection-title">Your tools keep their own keys.</h2></div><div class="connection-copy"><p>Orchard connects to agents that are already running. Each workspace offers a local MCP endpoint; you choose how an agent connects through its own harness and permissions.</p><p>The app lives in your Mac’s menu bar and serves its workspace on loopback. It does not launch or sign in to your agent provider.</p><a class="text-link" href="https://github.com/algonormative/orchard-workspace/blob/main/docs/backend.md">Read the technical overview <span aria-hidden="true">↗</span></a></div></section>
-    <section class="install" id="install" aria-labelledby="install-title"><div class="wrap install-inner"><div><p class="eyebrow">Get started</p><h2 id="install-title">Make room for<br>the work.</h2><p>Download the signed Apple Silicon ZIP from the latest release. Move Orchard.app to Applications, launch it from Applications, then use its menu bar icon to create a workspace.</p><a class="button button-light" href="https://github.com/algonormative/orchard-workspace/releases/latest">Get Orchard for macOS <span aria-hidden="true">↗</span></a><p class="install-note">macOS 13 or newer · Apple Silicon · Free and open source</p></div><div class="install-steps" aria-label="Install steps"><div><span>01</span><p>Download the release ZIP</p></div><div><span>02</span><p>Move Orchard.app to Applications</p></div><div><span>03</span><p>Launch Orchard.app, then use its menu bar icon</p></div></div></div></section>
+    <section class="connection wrap" aria-labelledby="connection-title">
+      <div class="connection-art"><img src="./assets/lemon-orchard/02-harvest-loop.png" width="1672" height="941" loading="lazy" alt="Lemon Chan characters working together around a glowing lemon harvest loop inside a computer"><span aria-hidden="true">[ many hands / one shared place ]</span></div>
+      <div class="connection-copy"><p class="eyebrow"><span aria-hidden="true">// </span> Bring your own agents</p><h2 id="connection-title">Your tools keep<br>their own keys.</h2><p>Orchard connects to agents that are already running. Each workspace offers a local MCP endpoint; you choose how an agent connects through its own harness and permissions.</p><p>The app lives in your Mac’s menu bar and serves its workspace on loopback. It does not launch or sign in to your agent provider.</p><a class="text-link" href="https://github.com/algonormative/orchard-workspace/blob/main/docs/backend.md">Read the technical overview <span aria-hidden="true">↗</span></a></div>
+    </section>
+    <section class="install" id="install" aria-labelledby="install-title"><div class="wrap install-inner"><div><p class="eyebrow"><span aria-hidden="true">&gt;_ </span> Get started</p><h2 id="install-title">Make room for<br>the work.</h2><p>Download the signed Apple Silicon ZIP from the latest release. Move Orchard.app to Applications, launch it from Applications, then use its menu bar icon to create a workspace.</p><a class="button button-light" href="https://github.com/algonormative/orchard-workspace/releases/latest">Get Orchard for macOS <span aria-hidden="true">↗</span></a><p class="install-note">macOS 13 or newer · Apple Silicon · Free and open source</p></div><div class="install-steps" aria-label="Install steps"><div><span>01</span><p>Download the release ZIP</p></div><div><span>02</span><p>Move Orchard.app to Applications</p></div><div><span>03</span><p>Launch Orchard.app, then use its menu bar icon</p></div></div></div></section>
   </main>
-  <footer class="footer wrap"><div class="footer-brand"><img src="./icon.svg" width="30" height="30" alt=""><span>Orchard</span></div><p>A shared place for work on your Mac.</p><nav aria-label="Footer navigation"><a href="https://github.com/algonormative/orchard-workspace">Source</a><a href="https://github.com/algonormative/orchard-workspace/releases">Releases</a><a href="https://github.com/algonormative/orchard-workspace/blob/main/README.md">Documentation</a><a href="https://github.com/algonormative/orchard-workspace/blob/main/LICENSE">License</a></nav></footer>
+  <footer class="footer wrap"><div class="footer-brand"><img src="./assets/lemon-orchard/app-icon.png" width="34" height="34" alt=""><span>ORCHARD_</span></div><p>A shared place for work on your Mac.</p><nav aria-label="Footer navigation"><a href="./brand/">The orchard</a><a href="https://github.com/algonormative/orchard-workspace">Source</a><a href="https://github.com/algonormative/orchard-workspace/releases">Releases</a><a href="https://github.com/algonormative/orchard-workspace/blob/main/README.md">Documentation</a><a href="https://github.com/algonormative/orchard-workspace/blob/main/LICENSE">License</a></nav></footer>
 </body>
 </html>
