@@ -1,4 +1,5 @@
 use base64::Engine;
+use futures_util::StreamExt;
 use orchard_workspace_host::{HostError, WorkspaceHost};
 use rmcp::{
     model::CallToolRequestParams,
@@ -16,6 +17,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
+};
 
 fn packaged_br() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -39,6 +44,286 @@ fn create_workspace(host: &WorkspaceHost, name: &str) -> (String, String, PathBu
         .to_owned();
     let root = PathBuf::from(workspace["root"].as_str().unwrap());
     (workspace_id, store_id, root)
+}
+
+async fn browser_cookie(client: &reqwest::Client, origin: &str) -> String {
+    client
+        .post(format!("{origin}/api/session"))
+        .header("Origin", origin)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn events_auth_scope_mcp_mail_tasks_reconnect_and_shutdown() {
+    let temp = TempDir::new().unwrap();
+    let host = Arc::new(WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap());
+    let (workspace_id, store_id, _) = create_workspace(&host, "Events");
+    let (other_id, _, _) = create_workspace(&host, "Other events");
+    let server = host.clone().start_server().await.unwrap();
+    let origin = format!("http://{}", server.endpoint());
+    let cookie = browser_cookie(&reqwest::Client::new(), &origin).await;
+    let no_auth = connect_async(event_request(
+        server.endpoint(),
+        &workspace_id,
+        &origin,
+        None,
+    ))
+    .await;
+    assert!(
+        matches!(no_auth, Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status() == 401)
+    );
+    let wrong_origin = connect_async(event_request(
+        server.endpoint(),
+        &workspace_id,
+        "http://evil.invalid",
+        Some(&cookie),
+    ))
+    .await;
+    assert!(
+        matches!(wrong_origin, Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status() == 403)
+    );
+    let mut wrong_host_request =
+        event_request(server.endpoint(), &workspace_id, &origin, Some(&cookie));
+    wrong_host_request
+        .headers_mut()
+        .insert("Host", HeaderValue::from_static("evil.invalid"));
+    let wrong_host = connect_async(wrong_host_request).await;
+    assert!(
+        matches!(wrong_host, Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status() == 403)
+    );
+    let (mut socket, _) = connect_async(event_request(
+        server.endpoint(),
+        &workspace_id,
+        &origin,
+        Some(&cookie),
+    ))
+    .await
+    .unwrap();
+    let (mut other_socket, _) = connect_async(event_request(
+        server.endpoint(),
+        &other_id,
+        &origin,
+        Some(&cookie),
+    ))
+    .await
+    .unwrap();
+    let hello = next_event(&mut socket).await;
+    assert_eq!(hello["type"], "hello");
+    assert_eq!(hello["workspace_id"], workspace_id);
+    assert_eq!(next_event(&mut other_socket).await["type"], "hello");
+
+    let token = host
+        .call("connection_info", json!({"workspace_id":workspace_id}))
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let uri = format!("{origin}/workspaces/{workspace_id}/mcp");
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(uri).auth_header(&token),
+    );
+    let client = ().serve(transport).await.unwrap();
+    let registered = client
+        .call_tool(mcp_call(
+            "mail_register",
+            json!({"request_id":"events-register","participant_id":"alice","name":"Alice"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(registered.is_error, Some(false));
+    let changed = next_event(&mut socket).await;
+    assert_eq!(changed["type"], "changed");
+    assert_eq!(changed["topics"], json!(["mail"]));
+    let task = host.call("task_create", json!({"workspace_id":workspace_id,"store_id":store_id,"request_id":"events-task","title":"Show in UI"})).unwrap();
+    assert!(task["task"]["id"].is_string());
+    let changed = next_event(&mut socket).await;
+    assert_eq!(changed["type"], "changed");
+    assert_eq!(changed["topics"], json!(["tasks", "mail"]));
+    let revision = changed["revision"].as_u64().unwrap();
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        next_event(&mut other_socket)
+    )
+    .await
+    .is_err());
+    host.call("workspace_archive", json!({"workspace_id":other_id}))
+        .unwrap();
+    assert_socket_closed(&mut other_socket).await;
+    drop(socket);
+    let (mut reconnected, _) = connect_async(event_request(
+        server.endpoint(),
+        &workspace_id,
+        &origin,
+        Some(&cookie),
+    ))
+    .await
+    .unwrap();
+    let hello = next_event(&mut reconnected).await;
+    assert_eq!(hello["type"], "hello");
+    assert!(hello["revision"].as_u64().unwrap() >= revision);
+    server.shutdown().await.unwrap();
+    assert_socket_closed(&mut reconnected).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn events_external_artifact_change_and_logout_close() {
+    let temp = TempDir::new().unwrap();
+    let host = Arc::new(WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap());
+    let (workspace_id, store_id, root) = create_workspace(&host, "External events");
+    let task = host.call("task_create", json!({"workspace_id":workspace_id,"store_id":store_id,"request_id":"external-task","title":"Before"})).unwrap();
+    let task_id = task["task"]["id"].as_str().unwrap().to_owned();
+    let server = host.clone().start_server().await.unwrap();
+    let origin = format!("http://{}", server.endpoint());
+    let browser = reqwest::Client::new();
+    let cookie = browser_cookie(&browser, &origin).await;
+    let (mut socket, _) = connect_async(event_request(
+        server.endpoint(),
+        &workspace_id,
+        &origin,
+        Some(&cookie),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_event(&mut socket).await["type"], "hello");
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            next_event(&mut socket)
+        )
+        .await
+        .is_err(),
+        "idle subscription sent an update"
+    );
+    for _ in 0..2 {
+        host.call("workspace_snapshot", json!({"workspace_id":workspace_id}))
+            .unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            next_event(&mut socket)
+        )
+        .await
+        .is_err(),
+        "snapshot reads caused an update"
+    );
+    let external = Command::new(packaged_br())
+        .current_dir(root.join("tasks"))
+        .arg("--db")
+        .arg(root.join("tasks/.beads/beads.db"))
+        .args(["--json", "update"])
+        .arg(&task_id)
+        .args(["--title", "After external edit"])
+        .output()
+        .unwrap();
+    assert!(
+        external.status.success(),
+        "{}",
+        String::from_utf8_lossy(&external.stderr)
+    );
+    assert_eq!(next_event(&mut socket).await["type"], "resync");
+    fs::write(root.join("artifacts/README.md"), "# External edit\n").unwrap();
+    assert_eq!(next_event(&mut socket).await["type"], "resync");
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join("nested")).unwrap();
+    fs::write(project.join("nested/field.txt"), "first").unwrap();
+    let repo = git2::Repository::init(&project).unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("nested/field.txt")).unwrap();
+    index.write().unwrap();
+    host.call(
+        "repository_attach",
+        json!({"workspace_id":workspace_id,"path":project}),
+    )
+    .unwrap();
+    assert_eq!(next_event(&mut socket).await["type"], "changed");
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+    while tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        next_event(&mut socket),
+    )
+    .await
+    .is_ok()
+    {}
+    fs::write(project.join("nested/field.txt"), "externally changed").unwrap();
+    assert_eq!(next_event(&mut socket).await["type"], "resync");
+    let logout = browser
+        .delete(format!("{origin}/api/session"))
+        .header("Origin", &origin)
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), 200);
+    assert_socket_closed(&mut socket).await;
+    server.shutdown().await.unwrap();
+}
+
+fn event_request(
+    endpoint: SocketAddr,
+    workspace_id: &str,
+    origin: &str,
+    cookie: Option<&str>,
+) -> tokio_tungstenite::tungstenite::http::Request<()> {
+    let mut request = format!("ws://{endpoint}/api/workspaces/{workspace_id}/events")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Origin", HeaderValue::from_str(origin).unwrap());
+    if let Some(cookie) = cookie {
+        request
+            .headers_mut()
+            .insert("Cookie", HeaderValue::from_str(cookie).unwrap());
+    }
+    request
+}
+
+async fn next_event<S>(socket: &mut tokio_tungstenite::WebSocketStream<S>) -> Value
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    loop {
+        let message = tokio::time::timeout(std::time::Duration::from_secs(6), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let Message::Text(text) = message {
+            return serde_json::from_str(&text).unwrap();
+        }
+    }
+}
+
+async fn assert_socket_closed<S>(socket: &mut tokio_tungstenite::WebSocketStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => continue,
+                Some(Err(error)) => panic!("WebSocket failed before close: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("WebSocket did not close within two seconds");
 }
 
 #[test]

@@ -16,15 +16,24 @@ and workspace chooser, not over a working conversation, form, or credential.
 
 The visible workspace is a resource browser. One global tree starts with Chats,
 Tasks, and Artifacts, and every selected resource opens in the single tabbed
-viewer. Tabs deduplicate canonical Orchard resource paths and close back to a
-neighbor or calm empty viewer. The tree only shows records supplied by the
+viewer. A single click opens a preview tab; the next single-clicked resource
+reuses that slot. Double-clicking, Keep Open, or a meaningful interaction in
+the viewer keeps it open. Scrolling, focus, and background updates do not.
+Tabs deduplicate canonical Orchard resource paths, can be reordered by drag or
+Move Left/Right, and offer Close, Close Others, Close Tabs to Right, and Close
+All. Closing a tab keeps its draft. The tree only shows records supplied by the
 workspace; it does not invent project hierarchies or activity.
 
-The composer is a continuous working surface. Polling updates only the selected
-conversation's scroll container and preserves a focused draft, reply context,
+The composer is a continuous working surface. Workspace events update only the selected
+conversation's scroll container and preserve a focused draft, reply context,
 and reading position. A direct view shows the owner↔participant exchange; an
 All direct messages view exposes owner-observable agent-to-agent routing with
 sender and recipient attribution. Broadcast is its own readable conversation.
+Agents and direct-message links for one participant resolve to the same
+conversation tab. Its compact identity strip shows registration and last
+contact, without claiming that a registered agent is running; the chat shows
+only owner↔participant messages. Old `/agents/{id}` and `/direct/{id}` links
+remain usable.
 Channels use `#name` and participants use `@name` everywhere they are displayed;
 those prefixes never change stored identifiers. The paperclip uploads a chosen
 file immediately and keeps its pinned resource reference with the originating
@@ -61,7 +70,9 @@ exact copied source while keeping long commands, endpoints, tokens, and fenced
 message snippets from widening the page. Secondary views have a visible exit,
 Escape support, and browser Back returns to the prior in-app context. Polling
 updates data without replacing an active form, task view, draft, reply state,
-focus, or reader scroll position.
+focus, or reader scroll position. The browser uses one authenticated workspace
+WebSocket, refetches after reconnect, and shows the connection state. A slow
+poll is used only while disconnected.
 
 Tasks open to the workspace-owned store first. Projects are added by path and
 shown by their basename; a project without a usable Beads store remains visible

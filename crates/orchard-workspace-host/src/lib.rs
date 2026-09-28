@@ -1,15 +1,18 @@
 mod beads;
 mod config;
+mod events;
 mod mcp;
+mod reconcile;
 mod resources;
 
-use axum::extract::{DefaultBodyLimit, Json, Path as AxumPath, Query, State};
+use axum::extract::{ws::WebSocketUpgrade, DefaultBodyLimit, Json, Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::{body::Body, Router};
 use beads::{BeadsAdapter, CommandFailure, CreateTask};
 use config::{AppConfig, RepositoryConfig, TaskStoreConfig, WorkspaceConfig};
+use events::EventHub;
 use fs2::FileExt;
 use git2::Repository;
 use orchard_mail_core::MailService;
@@ -84,7 +87,7 @@ pub(crate) struct HostInner {
     endpoint: Mutex<Option<SocketAddr>>,
     owner_token: String,
     owner_token_path: PathBuf,
-    browser_sessions: Mutex<HashMap<String, ()>>,
+    browser_sessions: Mutex<HashMap<String, CancellationToken>>,
 }
 
 struct WorkspaceRuntime {
@@ -94,6 +97,7 @@ struct WorkspaceRuntime {
     mail_error: Option<String>,
     mcp_router: RwLock<Option<Router>>,
     mcp_cancellation: Mutex<CancellationToken>,
+    events: Arc<EventHub>,
 }
 
 #[derive(Clone, Debug)]
@@ -109,6 +113,8 @@ pub struct ServerHandle {
     endpoint: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<Result<(), std::io::Error>>,
+    reconcile_cancellation: CancellationToken,
+    reconcile_task: JoinHandle<()>,
     host: Weak<HostInner>,
 }
 
@@ -125,10 +131,19 @@ impl ServerHandle {
     }
 
     pub async fn shutdown(mut self) -> Result<(), HostError> {
+        self.reconcile_cancellation.cancel();
+        let _ = timeout(Duration::from_secs(3), &mut self.reconcile_task).await;
+        if !self.reconcile_task.is_finished() {
+            self.reconcile_task.abort();
+        }
         let host = self.host.upgrade();
         if let Some(host) = &host {
             for runtime in host.runtimes.read().unwrap().values() {
                 runtime.mcp_cancellation.lock().unwrap().cancel();
+                runtime.events.cancellation.cancel();
+            }
+            for session in host.browser_sessions.lock().unwrap().values() {
+                session.cancel();
             }
         }
         if let Some(sender) = self.shutdown.take() {
@@ -231,6 +246,26 @@ impl WorkspaceHost {
     }
 
     pub fn call(&self, operation: &str, args: Value) -> Result<Value, String> {
+        let workspace_id = args
+            .get("workspace_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let result = self.dispatch(operation, args);
+        if let (Some(workspace_id), Some(topics)) = (workspace_id, mutation_topics(operation)) {
+            if let Ok(runtime) = self.active_runtime(&workspace_id) {
+                match &result {
+                    Ok(value) if value.get("idempotent_replay") != Some(&Value::Bool(true)) => {
+                        runtime.events.publish(topics);
+                    }
+                    Err(_) if operation.starts_with("task_") => runtime.events.publish_resync(),
+                    _ => {}
+                }
+            }
+        }
+        result
+    }
+
+    fn dispatch(&self, operation: &str, args: Value) -> Result<Value, String> {
         match operation {
             "workspace_list" => self.workspace_list(),
             "workspace_create" => self.workspace_create(args),
@@ -305,6 +340,10 @@ impl WorkspaceHost {
         let api = Router::new()
             .route("/workspaces/{workspace_id}/mcp", any(dynamic_mcp))
             .route(
+                "/api/workspaces/{workspace_id}/events",
+                axum::routing::get(api_events),
+            )
+            .route(
                 "/api/session",
                 axum::routing::get(api_session_get)
                     .post(api_session_post)
@@ -330,10 +369,17 @@ impl WorkspaceHost {
                 })
                 .await
         });
+        let reconcile_cancellation = CancellationToken::new();
+        let reconcile_task = tokio::spawn(reconcile::run(
+            Arc::downgrade(&self.inner),
+            reconcile_cancellation.clone(),
+        ));
         Ok(ServerHandle {
             endpoint,
             shutdown: Some(shutdown),
             task,
+            reconcile_cancellation,
+            reconcile_task,
             host: Arc::downgrade(&self.inner),
         })
     }
@@ -446,6 +492,7 @@ impl WorkspaceHost {
             mail_error: None,
             mcp_router: RwLock::new(None),
             mcp_cancellation: Mutex::new(CancellationToken::new()),
+            events: Arc::new(EventHub::new(id.clone())),
         });
         self.initialize_workspace_actors(&runtime, &owner_name)?;
         resources::seed_workspace_readme(&workspace)?;
@@ -496,6 +543,7 @@ impl WorkspaceHost {
         };
         if let Some(runtime) = self.inner.runtimes.write().unwrap().remove(&workspace_id) {
             runtime.mcp_cancellation.lock().unwrap().cancel();
+            runtime.events.cancellation.cancel();
         }
         Ok(json!({"workspace": workspace_view(&workspace)}))
     }
@@ -1581,6 +1629,59 @@ async fn dynamic_mcp(
     }
 }
 
+async fn api_events(
+    State(host): State<Arc<WorkspaceHost>>,
+    AxumPath(workspace_id): AxumPath<String>,
+    headers: HeaderMap,
+    uri: Uri,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    if let Err(error) = validate_origin(&host, &headers) {
+        return browser_validation_response(error);
+    }
+    if uri.query().is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"event URL must not contain a query"})),
+        )
+            .into_response();
+    }
+    if headers.contains_key(header::AUTHORIZATION) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"event socket uses the browser session cookie"})),
+        )
+            .into_response();
+    }
+    let Some(session) = browser_session_id(&headers).and_then(|id| {
+        host.inner
+            .browser_sessions
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+    }) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"login required"})),
+        )
+            .into_response();
+    };
+    let Ok(runtime) = host.active_runtime(&workspace_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"workspace unavailable"})),
+        )
+            .into_response();
+    };
+    upgrade
+        .max_frame_size(4096)
+        .max_message_size(4096)
+        .write_buffer_size(4096)
+        .max_write_buffer_size(65536)
+        .on_upgrade(move |socket| events::serve(socket, runtime.events.clone(), session))
+}
+
 #[derive(Default, Deserialize)]
 struct SessionLogin {
     #[serde(default)]
@@ -1643,7 +1744,7 @@ async fn api_session_post(
         .browser_sessions
         .lock()
         .unwrap()
-        .insert(session.clone(), ());
+        .insert(session.clone(), CancellationToken::new());
     let cookie = format!("orchard_session={session}; HttpOnly; SameSite=Strict; Path=/api");
     let mut response = Json(json!({"authenticated":true})).into_response();
     response.headers_mut().insert(
@@ -1661,7 +1762,9 @@ async fn api_session_delete(
         return browser_validation_response(error);
     }
     if let Some(session) = browser_session_id(&headers) {
-        host.inner.browser_sessions.lock().unwrap().remove(&session);
+        if let Some(cancellation) = host.inner.browser_sessions.lock().unwrap().remove(&session) {
+            cancellation.cancel();
+        }
     }
     let mut response = Json(json!({"authenticated":false})).into_response();
     response.headers_mut().insert(
@@ -2009,7 +2112,26 @@ fn load_runtime(
         mail_error,
         mcp_router: RwLock::new(None),
         mcp_cancellation: Mutex::new(CancellationToken::new()),
+        events: Arc::new(EventHub::new(workspace.id.clone())),
     })
+}
+
+fn mutation_topics(operation: &str) -> Option<&'static [&'static str]> {
+    match operation {
+        "mail_register"
+        | "mail_resume"
+        | "mail_leave"
+        | "mail_channel_create"
+        | "mail_send"
+        | "mail_acknowledge" => Some(&["mail"]),
+        "task_create" | "task_update" | "task_claim" | "task_close" => Some(&["tasks", "mail"]),
+        "repository_attach" | "repository_detach" | "task_store_attach" | "task_store_detach" => {
+            Some(&["repositories", "tasks", "artifacts"])
+        }
+        "artifact_upload" | "artifact_delete" | "artifact_commit" => Some(&["artifacts"]),
+        "resource_link" => Some(&["mail", "tasks", "artifacts"]),
+        _ => None,
+    }
 }
 
 fn active_workspace_mut<'a>(

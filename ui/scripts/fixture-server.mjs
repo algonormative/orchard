@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 
@@ -24,6 +25,7 @@ let delaySendMs = 0;
 let delayAttachMs = 0;
 let delayTasksMs = 0;
 let delayActionMs = 0;
+let delaySnapshotMs = 0;
 let uploadFailures = 0;
 let loseMailResponseOnce = false;
 const sentRequestIds = new Map();
@@ -45,11 +47,26 @@ const artifactFiles = {
   "image.png": { text: null, binary: true, byte_length: 4, mime_type: "image/png", preview_url: "/fixture/image.png", download_url: "/fixture/download/image.png" },
   "empty.txt": { text: "", byte_length: 0, mime_type: "text/plain", download_url: "/fixture/download/empty.txt" },
 };
+const initialArtifactFiles = structuredClone(artifactFiles);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const subscribers = new Set();
+let revision = 0;
+
+function frame(value) {
+  const payload = Buffer.from(JSON.stringify(value));
+  return Buffer.concat([payload.length < 126 ? Buffer.from([0x81, payload.length]) : Buffer.from([0x81, 126, payload.length >> 8, payload.length & 255]), payload]);
+}
+function emitChange(topics, workspaceId = workspace.id) {
+  revision += 1;
+  for (const client of subscribers) if (client.workspaceId === workspaceId) client.socket.write(frame({ type: "changed", workspace_id: workspaceId, revision, topics }));
+}
 
 function resetFixture() {
+  for (const client of subscribers) client.socket.end(); subscribers.clear(); revision = 0;
+  for (const path of Object.keys(artifactFiles)) delete artifactFiles[path];
+  Object.assign(artifactFiles, structuredClone(initialArtifactFiles));
   created = false; workspaces = []; recentWorkspaceIds = []; sessionsValid = true; sourceErrors = []; taskBackendAvailable = true;
-  repositories = []; delaySendMs = 0; delayAttachMs = 0; delayTasksMs = 0;
+  repositories = []; delaySendMs = 0; delayAttachMs = 0; delayTasksMs = 0; delaySnapshotMs = 0;
   delayActionMs = 0; uploadFailures = 0; resourceLinks = [];
   loseMailResponseOnce = false; sentRequestIds.clear(); freshWorkspace = false; agentJoined = false;
   tasks = [{ id: "fixture-1", task_id: "fixture-1", title: "Fixture task", status: "open", priority: 2, description: "Fixture task description" }];
@@ -108,7 +125,7 @@ const server = createServer(async (request, response) => {
     if (payload.operation === "workspace_create") { created = true; const createdWorkspace = { id: `workspace-${workspaces.length + 1}`, name: args.name || `Workspace ${workspaces.length + 1}`, ...(args.purpose ? { purpose: args.purpose } : {}) }; workspaces.push(createdWorkspace); recentWorkspaceIds = [createdWorkspace.id, ...recentWorkspaceIds.filter((id) => id !== createdWorkspace.id)].slice(0, 20); return send(response, 200, { result: { workspace: createdWorkspace } }); }
     if (payload.operation === "workspace_visit") { const selected = workspaces.find((item) => item.id === args.workspace_id); if (!selected) return send(response, 400, { error: "Unknown or archived workspace." }); recentWorkspaceIds = [selected.id, ...recentWorkspaceIds.filter((id) => id !== selected.id)].slice(0, 20); return send(response, 200, { result: { workspace_id: selected.id } }); }
     if (payload.operation === "workspace_archive") { const selected = workspaces.find((item) => item.id === args.workspace_id) || workspace; workspaces = workspaces.filter((item) => item.id !== args.workspace_id); created = workspaces.length > 0; return send(response, 200, { result: { workspace: { ...selected, archived: true } } }); }
-    if (payload.operation === "workspace_snapshot") return send(response, 200, { result: snapshot(args.workspace_id) });
+    if (payload.operation === "workspace_snapshot") { if (delaySnapshotMs) await sleep(delaySnapshotMs); return send(response, 200, { result: snapshot(args.workspace_id) }); }
     if (payload.operation === "workspace_info") return send(response, 200, { result: { workspace: workspaces.find((item) => item.id === args.workspace_id) || workspace, paths: { workspace: `/private/tmp/orchard-fixture-workspaces/${args.workspace_id}`, artifacts: `/private/tmp/orchard-fixture-workspaces/${args.workspace_id}/artifacts`, readme: `/private/tmp/orchard-fixture-workspaces/${args.workspace_id}/artifacts/README.md` } } });
     if (payload.operation === "workspace_intro") {
       const ref = { kind: "file", workspace_id: args.workspace_id, root_id: "fixture-root", path: "README.md" };
@@ -130,20 +147,21 @@ const server = createServer(async (request, response) => {
     if (payload.operation === "artifact_roots") return send(response, 200, { result: { roots: [{ id: "fixture-root", name: "Fixture artifacts", owned: true, exists: true }] } });
     if (payload.operation === "artifact_list") { const path = args.path || ""; const entries = path ? [{ name: "example.py", path: "docs/example.py", kind: "file" }, { name: "module", path: "docs/module", kind: "submodule" }] : [{ name: "README.md", path: "README.md", kind: "file" }, { name: "docs", path: "docs", kind: "directory" }, { name: "image.png", path: "image.png", kind: "file" }, { name: "empty.txt", path: "empty.txt", kind: "file" }]; return send(response, 200, { result: { entries } }); }
     if (payload.operation === "artifact_history") return send(response, 200, { result: { versions: [{ revision: "0123456789abcdef0123456789abcdef01234567", summary: "Fixture version" }] } });
-    if (payload.operation === "resource_link") { if (delayActionMs) await sleep(delayActionMs); const link = { source: args.source, target: args.target, label: args.label || "" }; resourceLinks.push(link); return send(response, 200, { result: { link } }); }
-    if (payload.operation === "artifact_upload") { if (delayAttachMs) await sleep(delayAttachMs); if (uploadFailures > 0) { uploadFailures -= 1; return send(response, 503, { error: "Fixture upload failed once" }); } const revision = "0123456789abcdef0123456789abcdef01234567"; artifactFiles[args.path] = { text: Buffer.from(args.content_base64 || "", "base64").toString("utf8"), mime_type: "text/plain", download_url: `/fixture/download/${encodeURIComponent(args.path)}` }; return send(response, 200, { result: { resource: { ref: { kind: "file", workspace_id: args.workspace_id, root_id: "fixture-root", path: args.path, revision }, href: `/w/${args.workspace_id}/files/fixture-root?path=${encodeURIComponent(args.path)}&revision=${revision}`, title: args.path, kind: "file" }, revision } }); }
+    if (payload.operation === "resource_link") { if (delayActionMs) await sleep(delayActionMs); const link = { source: args.source, target: args.target, label: args.label || "" }; resourceLinks.push(link); emitChange(["artifacts"], args.workspace_id); return send(response, 200, { result: { link } }); }
+    if (payload.operation === "artifact_upload") { if (delayAttachMs) await sleep(delayAttachMs); if (uploadFailures > 0) { uploadFailures -= 1; return send(response, 503, { error: "Fixture upload failed once" }); } const revision = "0123456789abcdef0123456789abcdef01234567"; artifactFiles[args.path] = { text: Buffer.from(args.content_base64 || "", "base64").toString("utf8"), mime_type: "text/plain", download_url: `/fixture/download/${encodeURIComponent(args.path)}` }; emitChange(["artifacts"], args.workspace_id); return send(response, 200, { result: { resource: { ref: { kind: "file", workspace_id: args.workspace_id, root_id: "fixture-root", path: args.path, revision }, href: `/w/${args.workspace_id}/files/fixture-root?path=${encodeURIComponent(args.path)}&revision=${revision}`, title: args.path, kind: "file" }, revision } }); }
     if (payload.operation === "repository_attach") {
       if (delayAttachMs) await sleep(delayAttachMs);
       const isPlain = args.path.includes("plain");
       const repository = { id: `project-${repositories.length + 1}`, path: args.path, name: args.path.split("/").filter(Boolean).at(-1), task_store_id: isPlain ? null : projectStore.id, task_status: isPlain ? "none" : "linked", task_error: null };
       repositories = [...repositories, repository];
+      emitChange(["repositories", "tasks", "artifacts"], args.workspace_id);
       return send(response, 200, { result: { repository, task_store: isPlain ? null : projectStore, attached: true, task_store_attached: !isPlain } });
     }
     if (payload.operation === "tasks_list") { if (delayTasksMs) await sleep(delayTasksMs); return send(response, 200, { result: { tasks } }); }
-    if (payload.operation === "task_create") { const task = { id: `fixture-${tasks.length + 1}`, task_id: `fixture-${tasks.length + 1}`, title: args.title, status: "open", description: "" }; tasks.push(task); return send(response, 200, { result: { task } }); }
-    if (payload.operation === "task_update") { if (delayActionMs) await sleep(delayActionMs); const task = tasks.find((entry) => entry.id === args.task_id); if (task) task.status = args.status; return send(response, 200, { result: { task } }); }
-    if (payload.operation === "task_claim") { const task = tasks.find((entry) => entry.id === args.task_id); if (!task || task.status !== "open" || task.assignee) return send(response, 409, { error: "Task is not available to claim" }); task.assignee = args.participant_id; return send(response, 200, { result: { task } }); }
-    if (payload.operation === "task_close") { const task = tasks.find((entry) => entry.id === args.task_id); if (task) task.status = "closed"; return send(response, 200, { result: { task } }); }
+    if (payload.operation === "task_create") { const task = { id: `fixture-${tasks.length + 1}`, task_id: `fixture-${tasks.length + 1}`, title: args.title, status: "open", description: "" }; tasks.push(task); emitChange(["tasks"], args.workspace_id); return send(response, 200, { result: { task } }); }
+    if (payload.operation === "task_update") { if (delayActionMs) await sleep(delayActionMs); const task = tasks.find((entry) => entry.id === args.task_id); if (task) task.status = args.status; emitChange(["tasks"], args.workspace_id); return send(response, 200, { result: { task } }); }
+    if (payload.operation === "task_claim") { const task = tasks.find((entry) => entry.id === args.task_id); if (!task || task.status !== "open" || task.assignee) return send(response, 409, { error: "Task is not available to claim" }); task.assignee = args.participant_id; emitChange(["tasks"], args.workspace_id); return send(response, 200, { result: { task } }); }
+    if (payload.operation === "task_close") { const task = tasks.find((entry) => entry.id === args.task_id); if (task) task.status = "closed"; emitChange(["tasks"], args.workspace_id); return send(response, 200, { result: { task } }); }
     if (payload.operation === "task_show") return send(response, 200, { result: { task: tasks.find((entry) => entry.id === args.task_id) } });
     if (payload.operation === "task_dependencies") return send(response, 200, { result: { dependencies: [] } });
     if (payload.operation === "mail_history") return send(response, 200, { result: history(args) });
@@ -152,7 +170,7 @@ const server = createServer(async (request, response) => {
       const existing = sentRequestIds.get(args.request_id);
       if (existing) return JSON.stringify(existing.args) === JSON.stringify(args) ? send(response, 200, { result: { message: existing.message } }) : send(response, 409, { error: "Request ID reused with different content" });
       const sent = { id: `sent-${messages.length}`, sender_id: args.sender_id, destination: args.destination, body: args.body, kind: args.kind, thread_id: args.thread_id, refs: args.refs };
-      messages.push(sent); sentRequestIds.set(args.request_id, { args, message: sent });
+      messages.push(sent); sentRequestIds.set(args.request_id, { args, message: sent }); emitChange(["mail"], args.workspace_id);
       if (loseMailResponseOnce) { loseMailResponseOnce = false; return send(response, 503, { error: "Message accepted, but response was lost" }); }
       return send(response, 200, { result: { message: sent } });
     }
@@ -166,15 +184,38 @@ const server = createServer(async (request, response) => {
     return send(response, 200, { ok: true });
   }
   if (url.pathname === "/fixture/reset" && request.method === "POST") { resetFixture(); return send(response, 200, { ok: true }); }
-  if (url.pathname === "/fixture/delay" && request.method === "POST") { const value = await bodyOf(request); delaySendMs = Number(value.send || 0); delayAttachMs = Number(value.attach || 0); delayTasksMs = Number(value.tasks || 0); delayActionMs = Number(value.action || 0); return send(response, 200, { ok: true }); }
+  if (url.pathname === "/fixture/delay" && request.method === "POST") { const value = await bodyOf(request); delaySendMs = Number(value.send || 0); delayAttachMs = Number(value.attach || 0); delayTasksMs = Number(value.tasks || 0); delayActionMs = Number(value.action || 0); delaySnapshotMs = Number(value.snapshot || 0); return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/fail-upload-once" && request.method === "POST") { uploadFailures = 1; return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/lose-mail-response-once" && request.method === "POST") { loseMailResponseOnce = true; return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/fresh-workspace" && request.method === "POST") { freshWorkspace = true; return send(response, 200, { ok: true }); }
-  if (url.pathname === "/fixture/agent-contact" && request.method === "POST") { agentJoined = true; return send(response, 200, { ok: true }); }
-  if (url.pathname === "/fixture/revoke" && request.method === "POST") { sessionsValid = false; return send(response, 200, { revoked: true }); }
+  if (url.pathname === "/fixture/agent-contact" && request.method === "POST") { agentJoined = true; emitChange(["mail"]); return send(response, 200, { ok: true }); }
+  if (url.pathname === "/fixture/external-change" && request.method === "POST") {
+    const value = await bodyOf(request);
+    if (value.task_status) tasks[0].status = value.task_status;
+    if (value.file_text) artifactFiles["README.md"] = { ...artifactFiles["README.md"], text: value.file_text };
+    if (value.message) messages.push({ id: `external-${messages.length}`, sender_id: "alice", destination: { kind: "channel", id: "general" }, body: value.message, kind: "message" });
+    emitChange(value.topics || ["tasks", "mail"], value.workspace_id || workspace.id);
+    return send(response, 200, { ok: true });
+  }
+  if (url.pathname === "/fixture/revoke" && request.method === "POST") { sessionsValid = false; for (const client of subscribers) client.socket.end(); subscribers.clear(); return send(response, 200, { revoked: true }); }
   if (url.pathname === "/fixture/source-error" && request.method === "POST") { sourceErrors = [{ source: "task_store", error: "Fixture backend is unavailable" }]; return send(response, 200, { errors: sourceErrors }); }
   if (url.pathname === "/fixture/task-backend-down" && request.method === "POST") { taskBackendAvailable = false; return send(response, 200, { available: false }); }
   return staticFile(url.pathname, response);
 });
 
 server.listen(port, "127.0.0.1", () => console.log(`Orchard fixture http://127.0.0.1:${port}`));
+server.on("upgrade", (request, socket) => {
+  const url = new URL(request.url, `http://${request.headers.host}`);
+  const match = /^\/api\/workspaces\/([^/]+)\/events$/.exec(url.pathname);
+  const workspaceId = match ? decodeURIComponent(match[1]) : "";
+  const origin = `http://${request.headers.host}`;
+  if (!sessionsValid || !request.headers.cookie?.includes("orchard_session=fixture") || request.headers.origin !== origin || !workspaces.some((item) => item.id === workspaceId) || !request.headers["sec-websocket-key"]) {
+    socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"); socket.destroy(); return;
+  }
+  const accept = createHash("sha1").update(`${request.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  const client = { socket, workspaceId }; subscribers.add(client);
+  socket.write(frame({ type: "hello", workspace_id: workspaceId, revision }));
+  socket.on("close", () => subscribers.delete(client));
+  socket.on("error", () => subscribers.delete(client));
+});

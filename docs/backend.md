@@ -174,6 +174,32 @@ The executable supplies an embedded static router to
   canonical resource permalink.
 - `GET /api/workspaces/{workspace_id}/artifact/download?...` serves a bounded
   authenticated download or a magic-verified safe raster preview.
+- `GET /api/workspaces/{workspace_id}/events` upgrades to a browser WebSocket.
+  It requires an active session cookie plus the exact loopback Host and Origin;
+  URL query parameters and bearer credentials are rejected.
+
+The event socket sends `{"type":"hello","workspace_id":"...","revision":N}`
+on every connection. A persisted owner or MCP mutation sends a small
+`{"type":"changed","workspace_id":"...","revision":N,"topics":["mail"]}`
+invalidation; topics can also include `tasks`, `artifacts`, and `repositories`.
+The browser refetches the affected HTTP views. Revisions are process-local and
+are not a replay cursor: reconnect always refetches current state. A lagged
+subscriber or externally observed edit receives `{"type":"resync",...}` and
+refetches current state. Each workspace has a 32-message broadcast queue;
+slow socket writes are bounded, and ping/pong detects broken connections.
+Logout, workspace archive, and server shutdown close affected sockets.
+
+One host-owned reconciliation task runs every two seconds, independent of
+subscriber count. It checks Mail Git HEAD; the latest Beads audit event through
+a read-only SQLite query plus JSONL metadata; up to 2,048 owned artifact
+entries; and attached repository
+Git HEAD/index plus up to 2,048 tracked file metadata entries per repository.
+It never calls Mail or Beads read APIs and never computes browser snapshots.
+At a scan cap, with an attached worktree, or with a Beads store, a 60-second
+fallback resync covers unseen nested, untracked, or imported changes. Beads
+JSONL import can replace issues without appending an audit event. External
+edits can therefore take up to about a minute to appear when they are outside
+the bounded scan.
 
 Every browser POST and DELETE requires the exact Origin and Host for
 `http://127.0.0.1:<persisted-port>`; missing, foreign, and opaque origins and

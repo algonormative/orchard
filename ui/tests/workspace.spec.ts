@@ -28,6 +28,103 @@ test("first launch is calm and exitable", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Create workspace", exact: true })).toBeVisible();
 });
 
+test("collection routes load directly and survive reload", async ({ page }) => {
+  await unlock(page);
+  for (const [route, title] of [["~tasks", "Tasks"], ["~agents", "Agents"], ["~directs", "All direct messages"]]) {
+    await page.goto(`/w/workspace-1/${route}`);
+    await expect(page.getByRole("tab", { name: title, exact: true })).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole("tab", { name: title, exact: true })).toBeVisible();
+  }
+});
+
+test("preview tabs reuse, keep on interaction or double click, reorder and close groups", async ({ page }) => {
+  await unlock(page);
+  const chats = await openTree(page, "Chats");
+  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await expect(page.locator('.tab-item[data-preview="true"]')).toHaveCount(1);
+  await chats.getByRole("button", { name: "@Alice", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "#general", exact: true })).toHaveCount(0);
+  await page.getByLabel("Message").fill("An unsent draft");
+  await expect(page.locator('.tab-item[data-preview="true"]')).toHaveCount(0);
+  await chats.getByRole("button", { name: "#general", exact: true }).dblclick();
+  await expect(page.locator('.tab-item[data-preview="true"]')).toHaveCount(0);
+  await page.getByRole("button", { name: "Tab options for #general" }).click();
+  await page.getByRole("menuitem", { name: "Move Left" }).click();
+  await expect(page.getByRole("tab").first()).toHaveText("#general");
+  await page.getByRole("button", { name: "Tab options for #general" }).click();
+  await page.getByRole("menuitem", { name: "Close Others" }).click();
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  await chats.getByRole("button", { name: "@Alice", exact: true }).click();
+  await expect(page.getByLabel("Message")).toHaveValue("An unsent draft");
+});
+
+test("tab button double click keeps preview and menu close history stays in sync", async ({ page }) => {
+  await unlock(page);
+  const chats = await openTree(page, "Chats");
+  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await page.getByRole("tab", { name: "#general", exact: true }).dblclick();
+  await expect(page.locator('.tab-item[data-preview="true"]')).toHaveCount(0);
+  await chats.getByRole("button", { name: "@Alice", exact: true }).click();
+  await page.getByRole("button", { name: "Tab options for @Alice" }).click();
+  await page.getByRole("menuitem", { name: "Close Others" }).click();
+  await expect(page.getByRole("tab", { name: "@Alice", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page).toHaveURL(/\/direct\/alice$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/channels\/general$/);
+  await expect(page.getByRole("tab", { name: "#general", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#thread")).toContainText("General fixture message");
+  await page.getByRole("button", { name: "Tab options for #general" }).click();
+  await page.getByRole("menuitem", { name: "Close", exact: true }).click();
+  await expect(page.locator("#conversation")).toContainText("Choose a resource");
+  await page.goBack();
+  await expect(page).toHaveURL(/\/channels\/general$/);
+  await expect(page.getByRole("tab", { name: "#general", exact: true })).toHaveAttribute("aria-selected", "true");
+});
+
+test("agent and direct permalinks share one owner conversation", async ({ page }) => {
+  await unlock(page);
+  await page.goto("/w/workspace-1/agents/alice");
+  await expect(page.getByRole("tab", { name: "@Alice", exact: true })).toHaveCount(1);
+  await expect(page.locator(".agent-context")).toContainText("Last contact");
+  await expect(page.locator("#thread")).toContainText("Owner to Alice");
+  await expect(page.locator("#thread")).not.toContainText("Agent to agent");
+  await page.goto("/w/workspace-1/direct/alice");
+  await expect(page.getByRole("tab", { name: "@Alice", exact: true })).toHaveCount(1);
+  await expect(page.locator(".agent-context")).toContainText("Registered");
+});
+
+test("live event refreshes a visible task and chat without touching draft", async ({ page, request }) => {
+  await unlock(page);
+  await expect(page.locator("#connection-status")).toHaveAttribute("data-state", "connected");
+  await page.getByLabel("Message").fill("Keep this draft");
+  await request.post("/fixture/external-change", { data: { message: "External live message", topics: ["mail"] } });
+  await expect(page.locator("#thread")).toContainText("External live message");
+  await expect(page.getByLabel("Message")).toHaveValue("Keep this draft");
+  await openTree(page, "Tasks"); await page.getByRole("button", { name: "Fixture task", exact: true }).first().click();
+  await request.post("/fixture/external-change", { data: { task_status: "blocked", topics: ["tasks"] } });
+  await expect(page.locator(".task-metadata")).toContainText("Blocked");
+});
+
+test("overlapping live topics drain after delayed snapshots and ongoing events do not starve", async ({ page, request }) => {
+  await unlock(page);
+  await expect(page.locator("#connection-status")).toHaveAttribute("data-state", "connected");
+  await openTree(page, "Artifacts");
+  await page.getByRole("button", { name: /Fixture artifacts/ }).click();
+  await page.getByRole("button", { name: "README.md", exact: true }).click();
+  await request.post("/fixture/delay", { data: { snapshot: 220 } });
+  await request.post("/fixture/external-change", { data: { message: "Overlapping mail", topics: ["mail"] } });
+  await page.waitForTimeout(110);
+  await request.post("/fixture/external-change", { data: { file_text: "# Refreshed artifact", topics: ["artifacts"] } });
+  await expect(page.locator("#conversation")).toContainText("Refreshed artifact");
+  await request.post("/fixture/delay", { data: {} });
+  const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await expect(page.locator("#thread")).toContainText("Overlapping mail");
+  const stream = (async () => { for (let index = 0; index < 14; index += 1) { await request.post("/fixture/external-change", { data: { message: `stream-${index}`, topics: ["mail"] } }); await new Promise((resolve) => setTimeout(resolve, 50)); } })();
+  await expect(page.locator("#thread")).toContainText("stream-0", { timeout: 450 });
+  await stream;
+});
+
 test("global tree opens chats, task defaults, artifacts, and tabs", async ({ page }) => {
   await unlock(page);
   const chats = await openTree(page, "Chats");
@@ -43,6 +140,8 @@ test("global tree opens chats, task defaults, artifacts, and tabs", async ({ pag
   await expect(page.locator("#conversation")).toContainText("Workspace tasks");
   await page.getByRole("button", { name: "Fixture task", exact: true }).first().click();
   await expect(page.getByRole("tab", { name: "Fixture task", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Tab options for Fixture task" }).click();
+  await page.getByRole("menuitem", { name: "Keep Open" }).click();
   await openTree(page, "Artifacts");
   await page.getByRole("button", { name: /Fixture artifacts/ }).click();
   await page.getByRole("button", { name: "README.md", exact: true }).click();
@@ -83,7 +182,7 @@ test("typed attachments and resource links produce navigable backlinks", async (
   await page.getByRole("button", { name: "docs/example.py", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Backlinks", exact: true })).toBeVisible();
   const chats = await openTree(page, "Chats");
-  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await chats.getByRole("button", { name: /^#general/ }).click();
   await page.getByLabel("Message").fill("Typed attachment");
   const failedUpload = page.waitForResponse((response) => response.url().endsWith("/api/call") && response.request().postDataJSON().operation === "artifact_upload");
   await page.locator('input[type="file"]').setInputFiles({ name: "message-note.txt", mimeType: "text/plain", buffer: Buffer.from("fixture attachment\n") });
@@ -238,7 +337,7 @@ test("uncertain mail retains original payload while newer draft and navigation c
   await expect(page.locator(".mail-delivery-warning")).toBeVisible();
   await composer.fill("Edited body stays");
   await chats.getByRole("button", { name: "@Alice", exact: true }).click();
-  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await chats.getByRole("button", { name: /^#general/ }).click();
   await expect(composer).toHaveValue("Edited body stays");
   await page.getByRole("button", { name: "Retry original message", exact: true }).click();
   await expect(page.locator(".mail-delivery-warning")).toHaveCount(0);

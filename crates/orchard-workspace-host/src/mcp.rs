@@ -37,7 +37,10 @@ impl ToolBackend for CombinedBackend {
             | "workspace_intro" | "workspace_status" | "workspace_alerts" => {
                 call_from_mcp(&self.host, &self.workspace_id, name, args)
             }
-            _ => self.mail.call(name, args),
+            _ if self.mail.tools().iter().any(|tool| tool.name == name) => {
+                call_from_mcp(&self.host, &self.workspace_id, name, args)
+            }
+            _ => Err(format!("unknown workspace tool {name:?}")),
         }
     }
 }

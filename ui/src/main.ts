@@ -34,6 +34,7 @@ const state: {
   onboarding: Map<string, "invite" | "contact" | "dismissed">;
   taskFilter: "all" | "open" | "in_progress" | "blocked" | "closed";
   workspaceRequest: number;
+  snapshotRequest: number;
   conversationRequest: number;
   seenMessageIds: Set<string>;
   unread: Map<string, number>;
@@ -46,12 +47,20 @@ const state: {
   threadScroll?: number;
   composerFocused?: boolean;
   poll?: number;
+  socket?: WebSocket;
+  reconnect?: number;
+  refreshTimer?: number;
+  connection: "connecting" | "connected" | "disconnected";
+  previewHref?: string;
+  tabMenu?: HTMLElement;
   tabs: AppTab[];
   activeHref?: string;
   resourceRequest: number;
   activeResource?: Descriptor;
   resourceData?: Json;
   resourceLinks?: Json;
+  agentData?: Json;
+  agentLinks?: Json;
   navigationEpoch: number;
   treeExpanded: Set<"chats" | "tasks" | "artifacts">;
   artifactRoots: Json[];
@@ -59,7 +68,7 @@ const state: {
   artifactExpanded: Set<string>;
   formReturn?: AppTab;
   newWorkspaceReturn?: Screen;
-} = { workspaces: [], recentWorkspaceIds: [], conversationKind: "channel", conversationMessages: [], drafts: new Map(), pendingMail: new Map(), replyRevision: new Map(), onboarding: new Map(), taskFilter: "all", workspaceRequest: 0, conversationRequest: 0, seenMessageIds: new Set(), unread: new Map(), screen: "workspace", detailEpoch: 0, taskRequest: 0, tabs: [], resourceRequest: 0, navigationEpoch: 0, treeExpanded: new Set(["chats", "tasks", "artifacts"]), artifactRoots: [], artifactEntries: new Map(), artifactExpanded: new Set() };
+} = { workspaces: [], recentWorkspaceIds: [], conversationKind: "channel", conversationMessages: [], drafts: new Map(), pendingMail: new Map(), replyRevision: new Map(), onboarding: new Map(), taskFilter: "all", workspaceRequest: 0, snapshotRequest: 0, conversationRequest: 0, seenMessageIds: new Set(), unread: new Map(), screen: "workspace", detailEpoch: 0, taskRequest: 0, tabs: [], resourceRequest: 0, navigationEpoch: 0, connection: "disconnected", treeExpanded: new Set(["chats", "tasks", "artifacts"]), artifactRoots: [], artifactEntries: new Map(), artifactExpanded: new Set() };
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string) => {
   const node = document.createElement(tag);
@@ -74,6 +83,29 @@ const string = (value: unknown): string => typeof value === "string" ? value : "
 const identifier = (value: unknown): string => string(object(value).id) || string(object(value).workspace_id) || string(object(value).channel_id);
 
 let sessionRefresh: Promise<boolean> | undefined;
+let tabMenuBackPending = false;
+let tabMenuAfterClose: (() => void) | undefined;
+let lastResourceClick: { href: string; at: number } | undefined;
+let liveGeneration = 0;
+const pendingRefreshTopics = new Set<string>();
+let refreshFlight: Promise<void> | undefined;
+let messagePatchPending = false;
+let artifactPatchPending = false;
+let taskPatchPending = false;
+
+function hasSelectionWithin(container: HTMLElement) {
+  const selection = window.getSelection();
+  return !!selection && !selection.isCollapsed && !!selection.anchorNode && container.contains(selection.anchorNode);
+}
+
+document.addEventListener("selectionchange", () => {
+  if (messagePatchPending) patchMessages();
+  if (artifactPatchPending && state.workspace) void refreshVisibleArtifact(state.workspace.id);
+  if (taskPatchPending) patchTaskDetailFromCache();
+});
+document.addEventListener("focusout", () => {
+  window.setTimeout(() => { if (messagePatchPending) patchMessages(); if (artifactPatchPending && state.workspace) void refreshVisibleArtifact(state.workspace.id); if (taskPatchPending) patchTaskDetailFromCache(); }, 0);
+}, true);
 
 async function ensureBrowserSession(): Promise<boolean> {
   if (sessionRefresh) return sessionRefresh;
@@ -229,6 +261,8 @@ function restoreConversationContext() {
 }
 
 window.addEventListener("popstate", (event) => {
+  if (tabMenuBackPending) { tabMenuBackPending = false; const action = tabMenuAfterClose; tabMenuAfterClose = undefined; action?.(); return; }
+  if (state.tabMenu) { state.tabMenu.remove(); state.tabMenu = undefined; return; }
   const route = object(event.state);
   const workspaceId = string(route.workspaceId);
   const screen = (string(route.screen) as Screen) || "workspace";
@@ -252,15 +286,17 @@ window.addEventListener("popstate", (event) => {
     if (resourceHref) {
       const local = state.tabs.find((tab) => tab.href === resourceHref);
       if (local) void activateTab(local, true);
-      else { const ref = parseHref(resourceHref, state.workspace.id); if (ref) void openResource(descriptor(ref, "Resource"), true); }
+      else { const collection = collectionFromHref(resourceHref, state.workspace.id); const ref = parseHref(resourceHref, state.workspace.id); if (collection) void activateTab(collection, true); else if (ref) void openResource(descriptor(ref, "Resource"), true); }
     } else renderEmptyViewer();
   }
   else renderCalmHome(true);
 });
 
 window.addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key === "ArrowRight") { event.preventDefault(); cycleTab(1); return; }
-  if ((event.metaKey || event.ctrlKey) && event.key === "ArrowLeft") { event.preventDefault(); cycleTab(-1); return; }
+  if (event.key === "Escape" && state.tabMenu) { event.preventDefault(); closeTabMenu(); return; }
+  const editing = event.target instanceof HTMLElement && (event.target.isContentEditable || !!event.target.closest("input, textarea, select, [contenteditable=true]"));
+  if (!editing && (event.metaKey || event.ctrlKey) && event.key === "ArrowRight") { event.preventDefault(); cycleTab(1); return; }
+  if (!editing && (event.metaKey || event.ctrlKey) && event.key === "ArrowLeft") { event.preventDefault(); cycleTab(-1); return; }
   if (event.key !== "Escape") return;
   if (state.screen === "settings") { openWorkspaceFromSettings(); return; }
   if (state.screen === "workspaces") { leaveWorkspaceChooser(); return; }
@@ -279,10 +315,42 @@ function collectionTab(collection: CollectionTab["collection"], workspaceId: str
   return { kind: "collection", collection, workspaceId, href: `/w/${encodeURIComponent(workspaceId)}/~${collection}`, title: collection === "tasks" ? "Tasks" : collection === "agents" ? "Agents" : "All direct messages" };
 }
 
+function collectionFromHref(href: string, workspaceId: string): CollectionTab | undefined {
+  return (["tasks", "agents", "directs"] as const).map((name) => collectionTab(name, workspaceId)).find((tab) => tab.href === href);
+}
+
+function prepareTab(tab: AppTab) {
+  const existing = state.tabs.find((item) => item.href === tab.href);
+  if (existing) return existing;
+  if (state.previewHref) {
+    const index = state.tabs.findIndex((item) => item.href === state.previewHref);
+    if (index >= 0) state.tabs.splice(index, 1);
+  }
+  state.tabs.push(tab);
+  state.previewHref = tab.href;
+  return tab;
+}
+
+function keepTab(href: string) {
+  if (state.previewHref === href) state.previewHref = undefined;
+  patchTabs();
+}
+
+function observeResourceClick(href: string) {
+  const at = Date.now();
+  if (lastResourceClick?.href === href && at - lastResourceClick.at < 500) keepTab(href);
+  lastResourceClick = { href, at };
+}
+
+function canonicalTab(tab: Descriptor): Descriptor {
+  if (tab.ref.kind !== "agent") return tab;
+  const ref: ResourceRef = { kind: "direct", workspace_id: tab.ref.workspace_id, id: tab.ref.id };
+  return descriptor(ref, participantLabel(participantName(tab.ref.id || "")));
+}
+
 async function activateTab(tab: AppTab, fromHistory = false) {
   if (isDescriptor(tab)) return openResource(tab, fromHistory);
-  const existing = state.tabs.find((item) => item.href === tab.href);
-  if (!existing) state.tabs.push(tab);
+  prepareTab(tab);
   state.activeHref = tab.href;
   state.activeResource = undefined;
   state.resourceData = undefined;
@@ -516,6 +584,7 @@ async function chooseWorkspace(id: string, fromHistory = false, replaceHistory =
   const snapshot = await call("workspace_snapshot", { workspace_id: id });
   if (request !== state.workspaceRequest) return;
   state.workspace = workspace;
+  stopLiveUpdates();
   state.navigationEpoch += 1;
   state.snapshot = snapshot;
   state.taskBackend = undefined;
@@ -552,9 +621,11 @@ async function chooseWorkspace(id: string, fromHistory = false, replaceHistory =
   if (targetScreen === "home") { renderCalmHome(true); return; }
   renderWorkspace();
   recordWorkspaceVisit(id);
+  const requestedCollection = collectionFromHref(new URL(requestedUrl).pathname, id);
   const requested = parseHref(requestedUrl, id);
-  if (!fromHistory && !requested && !enteredFromChooser) navigate("workspace", undefined, replaceHistory, workspaceRootHref(id));
-  if (requested) { void openResource(descriptor(requested, "Resource"), true); startPolling(); return; }
+  if (!fromHistory && !requested && !requestedCollection && !enteredFromChooser) navigate("workspace", undefined, replaceHistory, workspaceRootHref(id));
+  if (requestedCollection) { void activateTab(requestedCollection, true); startLiveUpdates(); return; }
+  if (requested) { void openResource(descriptor(requested, "Resource"), true); startLiveUpdates(); return; }
   if (state.selectedConversation) {
     await selectConversation(state.conversationKind, state.selectedConversation);
   } else if (mailList("channels").some((item) => identifier(item) === "general")) {
@@ -563,7 +634,7 @@ async function chooseWorkspace(id: string, fromHistory = false, replaceHistory =
     state.conversationKind = retainedKind;
     if (enteredFromChooser) navigate("workspace", undefined, replaceHistory, workspaceRootHref(id));
   }
-  startPolling();
+  startLiveUpdates();
 }
 
 function renderWorkspace() {
@@ -587,7 +658,9 @@ function renderWorkspace() {
   const noticeBar = el("p", "notice");
   noticeBar.id = "notice";
   noticeBar.dataset.tone = "info";
-  top.append(noticeBar);
+  const connection = el("span", "connection-status"); connection.id = "connection-status";
+  top.append(connection, noticeBar);
+  patchConnectionStatus();
 
   const conversations = el("aside", "sidebar resource-tree");
   conversations.id = "conversations";
@@ -595,7 +668,15 @@ function renderWorkspace() {
   const tabs = el("nav", "tabstrip"); tabs.id = "tabs"; tabs.setAttribute("aria-label", "Open resources");
   const main = el("section", "conversation");
   main.id = "conversation";
+  main.addEventListener("input", () => { if (state.activeHref) keepTab(state.activeHref); });
+  main.addEventListener("change", () => { if (state.activeHref) keepTab(state.activeHref); });
+  main.addEventListener("click", (event) => {
+    if (event.target instanceof Element && event.target.closest("button, a, input[type=file]")) {
+      if (state.activeHref) keepTab(state.activeHref);
+    }
+  }, true);
   viewer.append(tabs, main);
+  conversations.addEventListener("click", (event) => { if (event.target instanceof Element && event.target.closest("button") && state.activeHref) observeResourceClick(state.activeHref); });
   layout.append(conversations, viewer);
   root.append(top, layout);
   patchOnboarding();
@@ -629,6 +710,24 @@ function taskMetadata(task: Json) {
   const priority = typeof task.priority === "number" ? `P${task.priority}` : "Priority unavailable";
   const assignee = taskAssignee(task);
   return `${status} · ${priority} · ${assignee ? `Assigned to ${participantName(assignee)}` : "Unassigned"}`;
+}
+
+function taskRelationSections(data: Json, task: Json, ref: ResourceRef): HTMLElement[] {
+  const dependencies: Json[] = []; const dependents: Json[] = [];
+  for (const value of array(data.dependencies)) {
+    const relation = object(value); const issueId = string(relation.issue_id); const dependsOnId = string(relation.depends_on_id);
+    if (issueId && dependsOnId) (issueId === (ref.task_id || string(task.id)) ? dependencies : dependsOnId === (ref.task_id || string(task.id)) ? dependents : dependencies).push(relation);
+    else dependencies.push(relation);
+  }
+  return [["Dependencies", dependencies, "depends_on_id"], ["Dependents", dependents, "issue_id"]].flatMap(([label, values, key]) => {
+    const list = values as Json[]; if (!list.length) return [];
+    const section = el("section", "task-relations"); section.append(el("h3", "", label as string));
+    for (const relation of list) {
+      const id = string(relation[key as string]) || string(object(relation.task_ref).task_id) || string(relation.task_id) || string(relation.id);
+      if (id && ref.store_id) section.append(button(id, () => void openResource(descriptor({ kind: "task", workspace_id: ref.workspace_id, store_id: ref.store_id, task_id: id }, `Task ${id}`)), "subtle"));
+    }
+    return [section];
+  });
 }
 
 function agentContacted(): boolean {
@@ -700,6 +799,12 @@ function patchConversations() {
   };
 
   const chats = section("chats", "Chats");
+  const conversationActive = (kind: ConversationKind, id: string) => {
+    if (!state.workspace) return false;
+    if (kind === "direct" && id === "__all_direct__") return state.activeHref === collectionTab("directs", state.workspace.id).href;
+    const ref: ResourceRef = kind === "broadcast" ? { kind, workspace_id: state.workspace.id } : { kind, workspace_id: state.workspace.id, id };
+    return state.activeHref === canonicalHref(ref);
+  };
   const channels = mailList("channels").filter((channel) => !isSystemChannel(channel));
   if (!channels.length) chats.append(el("p", "muted", "No channels yet."));
   for (const channel of channels) {
@@ -708,14 +813,14 @@ function patchConversations() {
     const label = withUnread(channelLabel(string(item.name) || string(item.title) || id), `channel:${id}`);
     chats.append(button(label, async () => {
       await selectConversation("channel", id);
-    }, state.selectedConversation === id ? "selected conversation-button" : "conversation-button"));
+    }, conversationActive("channel", id) ? "selected conversation-button" : "conversation-button"));
   }
   chats.append(button("New channel", showChannelForm, "tree-action subtle"));
   const people = mailList("participants").map(object).filter((person) => identifier(person) !== "owner" && identifier(person) !== "orchard");
   if (people.length) chats.append(el("p", "tree-label", "Direct"));
-  for (const person of people) { const id = identifier(person); chats.append(button(withUnread(participantLabel(string(person.name) || id), `direct:${id}`), () => selectConversation("direct", id), state.conversationKind === "direct" && state.selectedConversation === id ? "selected conversation-button" : "conversation-button")); }
-  if (people.length) chats.append(button(withUnread("All direct messages", "direct:__all_direct__"), () => selectConversation("direct", "__all_direct__"), state.conversationKind === "direct" && state.selectedConversation === "__all_direct__" ? "selected conversation-button" : "conversation-button"));
-  chats.append(button(withUnread("Broadcast", "broadcast:broadcast"), () => selectConversation("broadcast", "broadcast"), state.conversationKind === "broadcast" ? "selected conversation-button" : "conversation-button"));
+  for (const person of people) { const id = identifier(person); chats.append(button(withUnread(participantLabel(string(person.name) || id), `direct:${id}`), () => selectConversation("direct", id), conversationActive("direct", id) ? "selected conversation-button" : "conversation-button")); }
+  if (people.length) chats.append(button(withUnread("All direct messages", "direct:__all_direct__"), () => selectConversation("direct", "__all_direct__"), conversationActive("direct", "__all_direct__") ? "selected conversation-button" : "conversation-button"));
+  chats.append(button(withUnread("Broadcast", "broadcast:broadcast"), () => selectConversation("broadcast", "broadcast"), conversationActive("broadcast", "broadcast") ? "selected conversation-button" : "conversation-button"));
   chats.append(button("Agents", () => void activateTab(collectionTab("agents", state.workspace!.id)), "tree-action subtle"), button("Connection settings", showAgentForm, "tree-action subtle"));
 
   const tasks = section("tasks", "Tasks");
@@ -743,15 +848,71 @@ function patchTabs() {
   for (const tab of state.tabs) {
     const tabButton = button(tab.title, () => void activateTab(tab), tab.href === state.activeHref ? "selected resource-tab" : "resource-tab");
     tabButton.setAttribute("role", "tab"); tabButton.setAttribute("aria-selected", String(tab.href === state.activeHref));
+    tabButton.addEventListener("click", () => observeResourceClick(tab.href));
+    tabButton.addEventListener("dblclick", () => keepTab(tab.href));
+    tabButton.addEventListener("contextmenu", (event) => { event.preventDefault(); openTabMenu(tab.href, event.clientX, event.clientY); });
     const close = button("×", () => closeTab(tab.href), "tab-close subtle"); close.setAttribute("aria-label", `Close ${tab.title}`);
-    const item = el("span", "tab-item"); item.append(tabButton, close); tabstrip.append(item);
+    const menu = button("⋯", () => { const bounds = menu.getBoundingClientRect(); openTabMenu(tab.href, bounds.left, bounds.bottom); }, "tab-menu-trigger subtle");
+    menu.setAttribute("aria-label", `Tab options for ${tab.title}`);
+    const item = el("span", "tab-item"); item.dataset.preview = String(state.previewHref === tab.href);
+    item.draggable = true;
+    item.addEventListener("dragstart", (event) => { event.dataTransfer?.setData("text/plain", tab.href); if (event.dataTransfer) event.dataTransfer.effectAllowed = "move"; });
+    item.addEventListener("dragover", (event) => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "move"; });
+    item.addEventListener("drop", (event) => { event.preventDefault(); const source = event.dataTransfer?.getData("text/plain"); if (source) moveTabTo(source, tab.href); });
+    item.append(tabButton, menu, close); tabstrip.append(item);
   }
+}
+
+function moveTabTo(source: string, target: string) {
+  const from = state.tabs.findIndex((tab) => tab.href === source);
+  const to = state.tabs.findIndex((tab) => tab.href === target);
+  if (from < 0 || to < 0 || from === to) return;
+  const [moving] = state.tabs.splice(from, 1);
+  state.tabs.splice(to, 0, moving);
+  patchTabs();
+}
+
+function closeTabMenu(afterClose?: () => void) {
+  state.tabMenu?.remove(); state.tabMenu = undefined;
+  if (object(history.state).tabMenu === true) { tabMenuBackPending = true; tabMenuAfterClose = afterClose; history.back(); }
+  else afterClose?.();
+}
+
+function openTabMenu(href: string, x: number, y: number) {
+  const tab = state.tabs.find((item) => item.href === href); if (!tab) return;
+  if (!state.tabMenu) history.pushState({ ...object(history.state), tabMenu: true }, "", window.location.href);
+  state.tabMenu?.remove();
+  const menu = el("div", "tab-menu"); menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", `Options for ${tab.title}`);
+  menu.style.position = "fixed"; menu.style.left = `${Math.min(x, innerWidth - 220)}px`; menu.style.top = `${Math.min(y, innerHeight - 260)}px`; menu.style.zIndex = "20";
+  const action = (label: string, effect: () => void, disabled = false) => { const control = button(label, () => closeTabMenu(effect), "subtle"); control.setAttribute("role", "menuitem"); control.disabled = disabled; menu.append(control); };
+  const index = state.tabs.findIndex((item) => item.href === href);
+  action("Keep Open", () => keepTab(href), state.previewHref !== href);
+  action("Move Left", () => moveTabTo(href, state.tabs[index - 1]?.href || href), index === 0);
+  action("Move Right", () => moveTabTo(href, state.tabs[index + 1]?.href || href), index === state.tabs.length - 1);
+  action("Close", () => closeTab(href));
+  action("Close Others", () => closeTabGroup((item) => item.href !== href));
+  action("Close Tabs to Right", () => closeTabGroup((_item, position) => position > index), index === state.tabs.length - 1);
+  action("Close All", () => closeTabGroup(() => true));
+  document.body.append(menu); state.tabMenu = menu;
+  window.setTimeout(() => { const outside = (event: PointerEvent) => { if (!menu.contains(event.target as Node)) { document.removeEventListener("pointerdown", outside); if (state.tabMenu === menu) closeTabMenu(); } }; document.addEventListener("pointerdown", outside); }, 0);
+  menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+}
+
+function closeTabGroup(predicate: (tab: AppTab, index: number) => boolean) {
+  const active = state.activeHref;
+  state.tabs = state.tabs.filter((tab, index) => !predicate(tab, index));
+  if (state.previewHref && !state.tabs.some((tab) => tab.href === state.previewHref)) state.previewHref = undefined;
+  state.resourceRequest += 1; state.navigationEpoch += 1;
+  const next = state.tabs.find((tab) => tab.href === active) || state.tabs.at(-1);
+  if (next?.href === active) patchTabs();
+  else if (next) void activateTab(next);
+  else { patchTabs(); if (state.workspace) navigate("workspace", undefined, false, workspaceRootHref(state.workspace.id)); renderEmptyViewer(); }
 }
 
 function descriptor(ref: ResourceRef, title: string): Descriptor { return { ref, href: canonicalHref(ref), title, kind: ref.kind }; }
 async function openResource(tab: Descriptor, fromHistory = false) {
-  const existing = state.tabs.find((item) => item.href === tab.href);
-  if (!existing) state.tabs.push(tab);
+  tab = canonicalTab(tab);
+  const existing = prepareTab(tab);
   state.activeHref = tab.href; state.activeResource = existing && isDescriptor(existing) ? existing : tab; state.navigationEpoch += 1; patchTabs();
   if (!fromHistory) history.pushState({ screen: "workspace", workspaceId: tab.ref.workspace_id, resourceHref: tab.href }, "", tab.href);
   if (tab.href === `/w/${encodeURIComponent(tab.ref.workspace_id)}/tasks`) { renderTaskCollection(); return; }
@@ -775,6 +936,7 @@ function closeTab(href: string) {
   const index = state.tabs.findIndex((tab) => tab.href === href); if (index < 0) return;
   const previousActive = state.activeHref; const wasActive = previousActive === href;
   state.tabs.splice(index, 1); const next = state.tabs[index] || state.tabs[index - 1];
+  if (state.previewHref === href) state.previewHref = undefined;
   if (!wasActive) { state.activeHref = previousActive; patchTabs(); return; }
   state.activeHref = next?.href;
   state.resourceRequest += 1; state.navigationEpoch += 1;
@@ -809,22 +971,11 @@ function renderResourceDetail(resource: Json, links: Json) {
     const task = object(data.task); const activeTaskRef = state.activeResource.ref;
     panel.append(el("p", "task-context muted", [string(task.id) || activeTaskRef.task_id, activeTaskRef.store_id].filter(Boolean).join(" · ")));
     panel.append(el("p", "task-metadata", taskMetadata(task)));
-    panel.append(el("p", "", string(task.description) || string(data.description) || content || "No task description."));
-    const dependencyList = array(data.dependencies); const dependencies: Json[] = []; const dependents: Json[] = [];
-    for (const value of dependencyList) {
-      const relation = object(value); const issueId = string(relation.issue_id); const dependsOnId = string(relation.depends_on_id); const currentId = activeTaskRef.task_id || string(task.id);
-      if (issueId && dependsOnId) (issueId === currentId ? dependencies : dependsOnId === currentId ? dependents : dependencies).push(relation);
-      else dependencies.push(relation);
-    }
-    const appendTaskRelations = (label: string, values: Json[], pick: (value: Json) => string) => {
-      if (!values.length) return; const section = el("section", "task-relations"); section.append(el("h3", "", label));
-      for (const relation of values) { const taskId = pick(relation) || string(object(relation.task_ref).task_id) || string(relation.task_id) || string(relation.id); if (taskId && activeTaskRef.store_id) section.append(button(taskId, () => void openResource(descriptor({ kind: "task", workspace_id: activeTaskRef.workspace_id, store_id: activeTaskRef.store_id, task_id: taskId }, `Task ${taskId}`)), "subtle")); }
-      panel.append(section);
-    };
-    appendTaskRelations("Dependencies", dependencies, (relation) => string(relation.depends_on_id));
-    appendTaskRelations("Dependents", dependents, (relation) => string(relation.issue_id));
+    panel.append(el("p", "task-description", string(task.description) || string(data.description) || content || "No task description."));
+    panel.append(...taskRelationSections(data, task, activeTaskRef));
     const ref = state.activeResource.ref; if (ref.store_id && ref.task_id && state.workspace) {
       const status = document.createElement("select"); status.setAttribute("aria-label", "Task status"); for (const value of ["open", "in_progress", "blocked", "closed"]) { const option = document.createElement("option"); option.value = value; option.textContent = value; option.selected = value === string(task.status) || value === string(data.status); status.append(option); }
+      status.addEventListener("change", () => { status.dataset.dirty = "true"; });
       const active = state.activeResource; const workspaceId = state.workspace.id; const href = active.href; const epoch = state.navigationEpoch;
       const controls = el("div", "task-controls"); controls.append(status, button("Update status", async () => { try { await call("task_update", { workspace_id: workspaceId, store_id: ref.store_id, task_id: ref.task_id, status: status.value, request_id: crypto.randomUUID() }); if (state.workspace?.id === workspaceId && state.activeHref === href && state.navigationEpoch === epoch) void openResource(active, true); } catch (error) { notice(message(error), "error"); } }, "subtle"));
       if (!taskAssignee(task) && string(task.status) === "open") {
@@ -1047,19 +1198,59 @@ function taskBackendErrors() {
 async function selectConversation(kind: ConversationKind, id: string, fromResource = false) {
   if (state.workspace) {
     const tab: AppTab = kind === "direct" && id === "__all_direct__" ? collectionTab("directs", state.workspace.id) : descriptor(kind === "channel" ? { kind: "channel", workspace_id: state.workspace.id, id } : kind === "direct" ? { kind: "direct", workspace_id: state.workspace.id, id } : { kind: "broadcast", workspace_id: state.workspace.id }, kind === "broadcast" ? "Broadcast" : kind === "channel" ? channelLabel(id) : participantLabel(participantName(id)));
-    const existing = state.tabs.find((item) => item.href === tab.href);
-    if (existing) existing.title = tab.title; else state.tabs.push(tab);
+    const existing = prepareTab(tab);
+    existing.title = tab.title;
     state.activeHref = tab.href; state.activeResource = isDescriptor(tab) ? tab : undefined; state.resourceLinks = {}; state.navigationEpoch += 1; patchTabs();
     if (!fromResource) history.pushState({ screen: "workspace", workspaceId: state.workspace.id, resourceHref: tab.href }, "", tab.href);
   }
   state.selectedConversation = id;
   state.conversationKind = kind;
+  state.agentData = undefined; state.agentLinks = undefined;
   state.replyTo = undefined;
   state.conversationMessages = [];
   patchConversations();
   patchConversation();
   const active = state.activeResource; const epoch = state.navigationEpoch;
-  await Promise.all([loadHistory(id), active && id !== "__all_direct__" ? loadConversationResource(active, epoch) : Promise.resolve()]);
+  await Promise.all([loadHistory(id), active && id !== "__all_direct__" ? loadConversationResource(active, epoch) : Promise.resolve(), kind === "direct" && id !== "__all_direct__" ? loadAgentContext(id, epoch) : Promise.resolve()]);
+}
+
+async function loadAgentContext(id: string, epoch: number) {
+  if (!state.workspace) return;
+  const workspaceId = state.workspace.id;
+  try {
+    const ref: ResourceRef = { kind: "agent", workspace_id: workspaceId, id };
+    const result = await call("resource_get", { workspace_id: workspaceId, ref });
+    if (state.workspace?.id !== workspaceId || state.navigationEpoch !== epoch || state.conversationKind !== "direct" || state.selectedConversation !== id) return;
+    state.agentData = object(result.resource); state.agentLinks = object(result.links);
+    patchAgentContext();
+  } catch (error) { if (state.workspace?.id === workspaceId && state.navigationEpoch === epoch) notice(message(error), "error"); }
+}
+
+function patchAgentContext() {
+  document.querySelector<HTMLElement>(".agent-context")?.remove();
+  if (state.conversationKind !== "direct" || !state.selectedConversation || state.selectedConversation === "__all_direct__") return;
+  const panel = document.querySelector<HTMLElement>("#conversation"); if (!panel) return;
+  const identity = object(object(state.agentData).data).participant;
+  const participant = object(identity);
+  const fallback = mailList("participants").map(object).find((person) => identifier(person) === state.selectedConversation) || {};
+  const person = Object.keys(participant).length ? participant : fallback;
+  const context = el("section", "agent-context");
+  context.append(el("strong", "", participantLabel(string(person.name) || state.selectedConversation)));
+  const registered = string(person.registered_at) || string(person.created_at);
+  const contacted = string(person.last_contact_at);
+  context.append(el("span", "muted", `${person.registered === false ? "Not registered" : registered ? `Registered ${registered}` : "Registered"} · ${contacted ? `Last contact ${contacted}` : "No recorded contact"}`));
+  const related = [...array(state.agentLinks?.outgoing).map((value) => ({ value, key: "target" })), ...array(state.agentLinks?.incoming).map((value) => ({ value, key: "source" }))];
+  if (related.length) {
+    const links = el("div", "agent-related");
+    for (const relation of related) {
+      const item = object(relation.value); const ref = object(item[relation.key]) as ResourceRef;
+      if (!ref.kind || ref.workspace_id !== state.workspace?.id || (ref.kind === "agent" && ref.id === state.selectedConversation)) continue;
+      const label = string(item.label) || string(ref.path) || string(ref.id) || string(ref.task_id) || ref.kind;
+      links.append(button(label, () => void openResource(descriptor(ref, label)), "subtle"));
+    }
+    if (links.childElementCount) context.append(links);
+  }
+  panel.querySelector(".conversation-title")?.after(context);
 }
 
 async function loadConversationResource(active: Descriptor, epoch: number) {
@@ -1067,10 +1258,17 @@ async function loadConversationResource(active: Descriptor, epoch: number) {
   try {
     const result = await call("resource_get", { workspace_id: workspaceId, ref: active.ref });
     if (state.workspace?.id !== workspaceId || state.activeHref !== active.href || state.navigationEpoch !== epoch) return;
-    state.resourceData = object(result.resource); state.resourceLinks = object(result.links); rememberConversationContext(); patchConversation(); restoreConversationContext();
+    state.resourceData = object(result.resource); state.resourceLinks = object(result.links); patchConversationLinks();
   } catch (error) {
     if (state.workspace?.id === workspaceId && state.activeHref === active.href && state.navigationEpoch === epoch) notice(message(error), "error");
   }
+}
+
+function patchConversationLinks() {
+  const panel = document.querySelector<HTMLElement>("#conversation");
+  if (!panel || !state.activeResource || !["channel", "direct", "broadcast"].includes(state.activeResource.kind)) return;
+  panel.querySelectorAll(":scope > .resource-actions, :scope > .related-links").forEach((node) => node.remove());
+  appendResourceActions(panel, state.activeResource, state.resourceLinks || {});
 }
 
 function patchConversation() {
@@ -1084,6 +1282,7 @@ function patchConversation() {
     heading.append(button(title, () => void openResource(descriptor(ref, title)), "subtle"));
   } else heading.textContent = title;
   panel.append(heading);
+  patchAgentContext();
   const thread = el("div", "thread");
   thread.id = "thread";
   const messages = state.selectedConversation ? state.conversationMessages : [];
@@ -1097,6 +1296,8 @@ function patchConversation() {
 function patchMessages() {
   const thread = document.querySelector<HTMLElement>("#thread");
   if (!thread || !state.selectedConversation) return;
+  if (hasSelectionWithin(thread) || (document.activeElement !== document.body && thread.contains(document.activeElement))) { messagePatchPending = true; return; }
+  messagePatchPending = false;
   const previousScroll = thread.scrollTop;
   const wasAtBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 32;
   thread.replaceChildren();
@@ -1333,7 +1534,7 @@ function renderAgentCollection() {
   for (const participant of participants) {
     const id = identifier(participant); const name = string(participant.name) || id;
     const row = el("article", "agent-card"); row.append(button(name, () => void openResource(descriptor({ kind: "agent", workspace_id: state.workspace!.id, id }, name)), "subtle"));
-    if (string(participant.last_contact_at)) row.append(el("p", "muted", `Last contact ${string(participant.last_contact_at)}`)); else row.append(el("p", "muted", "Registered; no recorded contact yet."));
+    if (string(participant.last_contact_at)) row.append(el("p", "muted", `Last contact ${string(participant.last_contact_at)}`)); else row.append(el("p", "muted", participant.registered === false ? "Not registered; no recorded contact yet." : "Registered; no recorded contact yet."));
     panel.append(row);
   }
   const actions = el("div", "resource-actions"); actions.append(button("Connection settings", showAgentForm, "subtle")); panel.append(actions);
@@ -1362,6 +1563,7 @@ async function loadHistory(channelId: string) {
       return (sender === "owner" && destination === channelId) || (sender === channelId && destination === "owner");
     });
     if (request !== state.conversationRequest || state.workspace?.id !== workspaceId || state.conversationKind !== kind || state.selectedConversation !== channelId) return;
+    if (!(state.activeResource && ["channel", "direct", "broadcast"].includes(state.activeResource.kind)) && state.activeHref !== collectionTab("directs", workspaceId).href) return;
     state.conversationMessages = messages;
     markCurrentConversationRead(messages);
     patchConversations();
@@ -1560,27 +1762,190 @@ async function loadConnection(endpoint: HTMLElement, token: HTMLElement, claudeC
   } catch (error) { notice(message(error), "error"); }
 }
 
-async function refreshSnapshot() {
+function refreshSnapshot(topics: string[] = ["workspace", "mail", "tasks", "artifacts", "repositories"]): Promise<void> {
+  for (const topic of topics) pendingRefreshTopics.add(topic);
+  if (!refreshFlight) {
+    refreshFlight = (async () => {
+      while (pendingRefreshTopics.size) {
+        const changed = [...pendingRefreshTopics]; pendingRefreshTopics.clear();
+        await refreshSnapshotNow(changed);
+      }
+    })().finally(() => { refreshFlight = undefined; if (pendingRefreshTopics.size) void refreshSnapshot([]); });
+  }
+  return refreshFlight;
+}
+
+async function refreshSnapshotNow(topics: string[]) {
   if (!state.workspace) return;
   const workspaceId = state.workspace.id;
+  const generation = liveGeneration;
   const snapshot = await call("workspace_snapshot", { workspace_id: workspaceId });
-  if (state.workspace?.id !== workspaceId) return;
+  if (state.workspace?.id !== workspaceId || generation !== liveGeneration) return;
   state.snapshot = snapshot;
-  try {
-    const settings = await call("settings_get");
-    if (state.workspace?.id !== workspaceId) return;
-    state.taskBackend = object(object(settings.config).task_backend);
-  } catch (error) {
-    state.taskBackend = { available: false, error: message(error) };
+  if (topics.includes("workspace")) {
+    try {
+      const settings = await call("settings_get");
+      if (state.workspace?.id !== workspaceId || generation !== liveGeneration) return;
+      state.taskBackend = object(object(settings.config).task_backend);
+    } catch (error) {
+      state.taskBackend = { available: false, error: message(error) };
+    }
   }
+  if (state.workspace?.id !== workspaceId || generation !== liveGeneration) return;
   observeMessages(mailList("history"));
   patchConversations();
   patchOnboarding();
+  if (topics.includes("mail") && state.screen === "workspace" && state.detailView !== "form") {
+    if (state.activeHref === collectionTab("agents", workspaceId).href) renderAgentCollection();
+    if (state.selectedConversation && (state.activeResource && ["channel", "direct", "broadcast"].includes(state.activeResource.kind) || state.activeHref === collectionTab("directs", workspaceId).href)) await loadHistory(state.selectedConversation);
+    if (state.conversationKind === "direct" && state.activeResource?.kind === "direct" && state.selectedConversation) void loadAgentContext(state.selectedConversation, state.navigationEpoch);
+  }
+  if (topics.includes("tasks") || topics.includes("repositories")) {
+    if (state.activeHref === collectionTab("tasks", workspaceId).href && state.detailView !== "form") {
+      const panel = document.querySelector<HTMLElement>("#conversation"); const scroll = panel?.scrollTop || 0;
+      renderTaskCollection(); if (panel) panel.scrollTop = scroll;
+    } else await refreshVisibleTask(workspaceId);
+  }
+  if (topics.includes("artifacts") || topics.includes("repositories")) {
+    const expanded = [...state.artifactExpanded];
+    const roots = state.artifactRoots.map((value) => string(object(value).id));
+    state.artifactRoots = []; state.artifactEntries.clear();
+    if (state.treeExpanded.has("artifacts")) {
+      await loadArtifactRoots();
+      for (const key of expanded) {
+        const rootId = roots.find((id) => key.startsWith(`${id}:`));
+        if (rootId && state.workspace?.id === workspaceId) void loadArtifactDirectory(workspaceId, rootId, key.slice(rootId.length + 1));
+      }
+    }
+    await refreshVisibleArtifact(workspaceId);
+    await refreshVisibleTask(workspaceId);
+  }
+  if ((topics.includes("mail") || topics.includes("artifacts")) && state.activeResource && ["channel", "direct", "broadcast"].includes(state.activeResource.kind)) void loadConversationResource(state.activeResource, state.navigationEpoch);
 }
 
-function startPolling() {
+async function refreshVisibleTask(workspaceId: string) {
+  const active = state.activeResource;
+  if (active?.ref.kind !== "task" || state.workspace?.id !== workspaceId || state.detailView === "form") return;
+  const epoch = state.navigationEpoch;
+  try {
+    const result = await call("resource_get", { workspace_id: workspaceId, ref: active.ref });
+    if (state.workspace?.id !== workspaceId || state.navigationEpoch !== epoch || state.activeHref !== active.href) return;
+    state.resourceData = object(result.resource); state.resourceLinks = object(result.links);
+    patchTaskDetailFromCache();
+  } catch (error) { notice(message(error), "error"); }
+}
+
+function patchTaskDetailFromCache() {
+  const active = state.activeResource;
+  const resource = state.resourceData;
+  const panel = document.querySelector<HTMLElement>("#conversation");
+  if (active?.ref.kind !== "task" || !resource || !panel) { taskPatchPending = false; return; }
+  const data = object(resource.data); const task = object(data.task);
+  const heading = panel.querySelector<HTMLElement>(".conversation-title"); if (heading) heading.textContent = string(resource.title) || "Task";
+  const context = panel.querySelector<HTMLElement>(".task-context"); if (context) context.textContent = [string(task.id) || active.ref.task_id, active.ref.store_id].filter(Boolean).join(" · ");
+  const metadata = panel.querySelector<HTMLElement>(".task-metadata"); if (metadata) metadata.textContent = taskMetadata(task);
+  const description = panel.querySelector<HTMLElement>(".task-description"); if (description) description.textContent = string(task.description) || string(data.description) || string(data.text) || "No task description.";
+  const status = panel.querySelector<HTMLSelectElement>('select[aria-label="Task status"]');
+  if (status && status.dataset.dirty !== "true" && document.activeElement !== status) status.value = string(task.status);
+  if (taskAssignee(task) || string(task.status) !== "open") panel.querySelector(".task-claim")?.remove();
+  const busyRelations = [...panel.querySelectorAll<HTMLElement>(".task-relations")].some((node) => node.contains(document.activeElement) || hasSelectionWithin(node));
+  const busyLinks = [...panel.querySelectorAll<HTMLElement>(".resource-actions, .related-links")].some((node) => node.contains(document.activeElement) || hasSelectionWithin(node));
+  if (!busyRelations) {
+    panel.querySelectorAll(":scope > .task-relations").forEach((node) => node.remove());
+    const controls = panel.querySelector(".task-controls");
+    for (const section of taskRelationSections(data, task, active.ref)) controls ? panel.insertBefore(section, controls) : panel.append(section);
+  }
+  if (!busyLinks) {
+    panel.querySelectorAll(":scope > .resource-actions, :scope > .related-links").forEach((node) => node.remove());
+    appendResourceActions(panel, active, state.resourceLinks || {});
+  }
+  taskPatchPending = busyRelations || busyLinks || (!!status && status.dataset.dirty === "true" && !taskAssignee(task) && string(task.status) === "open" && !panel.querySelector(".task-claim"));
+}
+
+async function refreshVisibleArtifact(workspaceId: string) {
+  const active = state.activeResource;
+  if (active?.ref.kind !== "file" || active.ref.revision || state.workspace?.id !== workspaceId || state.detailView === "form") return;
+  const panel = document.querySelector<HTMLElement>("#conversation");
+  if (!panel || panel.querySelector(".inline-form")) return;
+  if (hasSelectionWithin(panel) || (document.activeElement !== document.body && panel.contains(document.activeElement))) { artifactPatchPending = true; return; }
+  artifactPatchPending = false;
+  const epoch = state.navigationEpoch; const scroll = panel.scrollTop; const pageScroll = window.scrollY;
+  try {
+    const result = await call("resource_get", { workspace_id: workspaceId, ref: active.ref });
+    if (state.workspace?.id !== workspaceId || state.navigationEpoch !== epoch || state.activeHref !== active.href) return;
+    state.resourceData = object(result.resource); state.resourceLinks = object(result.links);
+    renderResourceDetail(state.resourceData, state.resourceLinks);
+    panel.scrollTop = scroll; window.scrollTo(window.scrollX, pageScroll);
+  } catch (error) { notice(message(error), "error"); }
+}
+
+function patchConnectionStatus() {
+  const target = document.querySelector<HTMLElement>("#connection-status");
+  if (target) { target.textContent = state.connection === "connected" ? "Live" : state.connection === "connecting" ? "Connecting…" : "Disconnected · checking periodically"; target.dataset.state = state.connection; target.setAttribute("role", "status"); }
+}
+
+function stopLiveUpdates() {
+  liveGeneration += 1;
+  pendingRefreshTopics.clear();
+  if (state.socket) { const old = state.socket; state.socket = undefined; old.close(); }
   if (state.poll) window.clearInterval(state.poll);
-  state.poll = window.setInterval(() => void refreshSnapshot().catch((error) => notice(message(error), "error")), 8000);
+  if (state.reconnect) window.clearTimeout(state.reconnect);
+  if (state.refreshTimer) window.clearTimeout(state.refreshTimer);
+  state.poll = undefined; state.reconnect = undefined; state.refreshTimer = undefined;
+}
+
+function startFallback() {
+  if (state.poll) return;
+  state.poll = window.setInterval(() => { if (state.connection === "disconnected") void refreshSnapshot().catch((error) => notice(message(error), "error")); }, 30_000);
+}
+
+function startLiveUpdates() {
+  if (!state.workspace) return;
+  stopLiveUpdates();
+  const workspaceId = state.workspace.id;
+  const generation = liveGeneration;
+  let attempt = 0;
+  const connect = async () => {
+    if (state.workspace?.id !== workspaceId || generation !== liveGeneration) return;
+    state.connection = "connecting"; patchConnectionStatus();
+    try {
+      if (!await ensureBrowserSession() || state.workspace?.id !== workspaceId || generation !== liveGeneration) throw new Error("Session unavailable");
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const socket = new WebSocket(`${protocol}//${window.location.host}/api/workspaces/${encodeURIComponent(workspaceId)}/events`);
+      state.socket = socket;
+      socket.addEventListener("open", () => {
+        if (state.socket !== socket || generation !== liveGeneration) return;
+        state.connection = "connected"; attempt = 0; patchConnectionStatus();
+        if (state.poll) { window.clearInterval(state.poll); state.poll = undefined; }
+      });
+      socket.addEventListener("message", (event) => {
+        if (state.socket !== socket || state.workspace?.id !== workspaceId || generation !== liveGeneration) return;
+        let payload: Json;
+        try { payload = object(JSON.parse(String(event.data))); } catch { return; }
+        if (string(payload.workspace_id) !== workspaceId) return;
+        const type = string(payload.type);
+        const topics = type === "changed" ? array(payload.topics).map(string) : ["workspace", "mail", "tasks", "artifacts", "repositories"];
+        if (type !== "changed" && type !== "hello" && type !== "resync") return;
+        for (const topic of topics) pendingRefreshTopics.add(topic);
+        if (!state.refreshTimer) state.refreshTimer = window.setTimeout(() => {
+          state.refreshTimer = undefined;
+          const changed = [...pendingRefreshTopics]; pendingRefreshTopics.clear();
+          void refreshSnapshot(changed).catch((error) => notice(message(error), "error"));
+        }, type === "changed" ? 80 : 0);
+      });
+      socket.addEventListener("close", () => {
+        if (state.socket !== socket || state.workspace?.id !== workspaceId || generation !== liveGeneration) return;
+        state.socket = undefined; state.connection = "disconnected"; patchConnectionStatus(); startFallback();
+        state.reconnect = window.setTimeout(() => { state.reconnect = undefined; void connect(); }, Math.min(30_000, 1000 * 2 ** Math.min(attempt++, 5)));
+      });
+      socket.addEventListener("error", () => socket.close());
+    } catch {
+      if (state.workspace?.id !== workspaceId || generation !== liveGeneration) return;
+      state.connection = "disconnected"; patchConnectionStatus(); startFallback();
+      state.reconnect = window.setTimeout(() => { state.reconnect = undefined; void connect(); }, Math.min(30_000, 1000 * 2 ** Math.min(attempt++, 5)));
+    }
+  };
+  void connect();
 }
 
 void bootstrap();
