@@ -31,10 +31,10 @@ impl ToolBackend for CombinedBackend {
     fn call(&self, name: &str, args: Value) -> Result<Value, String> {
         match name {
             "tasks_list" | "workspace_info" | "task_show" | "task_create" | "task_update"
-            | "task_close" | "task_dependencies" | "resource_get" | "resource_links"
-            | "resource_link" | "artifact_roots" | "artifact_list" | "artifact_history"
-            | "artifact_upload" | "artifact_delete" | "artifact_commit" | "workspace_intro"
-            | "workspace_status" | "workspace_alerts" => {
+            | "task_claim" | "task_close" | "task_dependencies" | "resource_get"
+            | "resource_links" | "resource_link" | "artifact_roots" | "artifact_list"
+            | "artifact_history" | "artifact_upload" | "artifact_delete" | "artifact_commit"
+            | "workspace_intro" | "workspace_status" | "workspace_alerts" => {
                 call_from_mcp(&self.host, &self.workspace_id, name, args)
             }
             _ => self.mail.call(name, args),
@@ -201,6 +201,18 @@ fn task_tools() -> Vec<ToolDefinition> {
                     "remove_labels":{"type":"array","items":{"type":"string"}}
                 },
                 "required":["store_id","task_id","request_id"],"additionalProperties":false
+            }),
+        ),
+        tool(
+            "task_claim",
+            "Atomically claim one open, unassigned task as a registered participant. Reuse request_id after a lost response; an uncertain claim is never rerun automatically.",
+            json!({
+                "type":"object",
+                "properties":{
+                    "store_id":{"type":"string"},"task_id":{"type":"string"},
+                    "participant_id":{"type":"string"},"request_id":{"type":"string"}
+                },
+                "required":["store_id","task_id","participant_id","request_id"],"additionalProperties":false
             }),
         ),
         tool(

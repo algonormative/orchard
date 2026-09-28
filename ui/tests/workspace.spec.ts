@@ -213,6 +213,141 @@ test("pending operations preserve newer input and do not reopen stale views", as
   await expect(page.locator("#thread")).toBeVisible();
 });
 
+test("mail retry reuses the accepted request after its response is lost", async ({ page, request }) => {
+  await unlock(page);
+  await request.post("/fixture/lose-mail-response-once");
+  const chats = await openTree(page, "Chats");
+  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await page.getByLabel("Message").fill("Only one copy");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.locator(".mail-delivery-warning")).toBeVisible();
+  await page.getByRole("button", { name: "Retry original message", exact: true }).click();
+  await expect(page.locator(".mail-delivery-warning")).toHaveCount(0);
+  const audit = await (await request.get("/fixture/audit")).json();
+  const attempts = audit.calls.filter((entry: { operation: string; args: { body?: string } }) => entry.operation === "mail_send" && entry.args.body === "Only one copy");
+  expect(attempts).toHaveLength(2);
+  expect(attempts[0].args.request_id).toBe(attempts[1].args.request_id);
+  expect(audit.messages.filter((entry: { body?: string }) => entry.body === "Only one copy")).toHaveLength(1);
+});
+
+test("uncertain mail retains original payload while newer draft and navigation change", async ({ page, request }) => {
+  await unlock(page); await request.post("/fixture/lose-mail-response-once");
+  const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "#general", exact: true }).click();
+  const composer = page.getByLabel("Message"); await composer.fill("Original body");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.locator(".mail-delivery-warning")).toBeVisible();
+  await composer.fill("Edited body stays");
+  await chats.getByRole("button", { name: "@Alice", exact: true }).click();
+  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await expect(composer).toHaveValue("Edited body stays");
+  await page.getByRole("button", { name: "Retry original message", exact: true }).click();
+  await expect(page.locator(".mail-delivery-warning")).toHaveCount(0);
+  await expect(composer).toHaveValue("Edited body stays");
+  const audit = await (await request.get("/fixture/audit")).json();
+  const attempts = audit.calls.filter((entry: { operation: string; args: { body?: string } }) => entry.operation === "mail_send" && entry.args.body === "Original body");
+  expect(attempts).toHaveLength(2);
+  expect(attempts[0].args).toEqual(attempts[1].args);
+  expect(audit.messages.filter((entry: { body?: string }) => entry.body === "Original body")).toHaveLength(1);
+  expect(audit.messages.some((entry: { body?: string }) => entry.body === "Edited body stays")).toBeFalsy();
+});
+
+test("late mail confirmation from another workspace keeps the new workspace draft", async ({ page, request }) => {
+  await unlock(page); await request.post("/fixture/delay", { data: { send: 1000 } });
+  const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await page.getByLabel("Message").fill("Old workspace message");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await page.getByRole("button", { name: "New workspace", exact: true }).click();
+  await page.getByLabel("Workspace name").fill("Second workspace");
+  await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+  await expect(page.getByLabel("Workspace", { exact: true })).toHaveValue("workspace-2");
+  await page.getByLabel("Message").fill("Old workspace message");
+  await page.waitForTimeout(1250);
+  await expect(page.getByLabel("Message")).toHaveValue("Old workspace message");
+});
+
+test("late failed mail stays with its original workspace", async ({ page, request }) => {
+  await unlock(page); await request.post("/fixture/delay", { data: { send: 850 } }); await request.post("/fixture/lose-mail-response-once");
+  const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await page.getByLabel("Message").fill("Old uncertain message");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await page.getByRole("button", { name: "New workspace", exact: true }).click();
+  await page.getByLabel("Workspace name").fill("Second workspace");
+  await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+  await expect(page.getByLabel("Workspace", { exact: true })).toHaveValue("workspace-2");
+  await page.waitForTimeout(1100);
+  await expect(page.locator("#notice")).not.toContainText("Delivery is uncertain");
+  await page.getByLabel("Workspace", { exact: true }).selectOption("workspace-1");
+  await expect(page.locator(".mail-delivery-warning")).toBeVisible();
+});
+
+test("delayed successful reply clears its original draft after navigation", async ({ page, request }) => {
+  await unlock(page); await request.post("/fixture/delay", { data: { send: 700 } });
+  const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await page.getByRole("button", { name: "Reply", exact: true }).first().click();
+  const composer = page.getByLabel("Message"); await composer.fill("Delayed reply review");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await chats.getByRole("button", { name: "@Alice", exact: true }).click();
+  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await expect(composer).toHaveValue("", { timeout: 3000 });
+});
+
+test("mail result updates a replacement composer after navigation", async ({ page, request }) => {
+  await unlock(page); await request.post("/fixture/delay", { data: { send: 650 } });
+  const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "#general", exact: true }).click();
+  const composer = page.getByLabel("Message"); await composer.fill("Delayed success");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await chats.getByRole("button", { name: "@Alice", exact: true }).click();
+  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await expect(composer).toHaveValue("Delayed success");
+  await expect(composer).toHaveValue("", { timeout: 3000 });
+
+  await request.post("/fixture/lose-mail-response-once");
+  await composer.fill("Delayed uncertain");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await chats.getByRole("button", { name: "@Alice", exact: true }).click();
+  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await expect(page.locator(".mail-delivery-warning")).toBeVisible({ timeout: 3000 });
+  await expect(composer).toHaveValue("Delayed uncertain");
+  await page.getByRole("button", { name: "Retry original message", exact: true }).click();
+  await expect(page.locator(".mail-delivery-warning")).toHaveCount(0);
+});
+
+test("purpose and first agent invitation use generic prompt and observed registration", async ({ page, request, context }) => {
+  await request.post("/fixture/fresh-workspace");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:4174" });
+  await unlock(page, false);
+  await page.getByLabel("Workspace name").fill("Studio session");
+  await page.getByLabel("Workspace purpose (optional)").fill("Review arrangement ideas");
+  await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+  const invite = page.locator(".onboarding-callout");
+  await expect(invite).toContainText("Invite an agent");
+  await invite.getByRole("button", { name: "Copy joining prompt" }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("Call workspace_intro");
+  const audit = await (await request.get("/fixture/audit")).json();
+  expect(audit.calls.find((entry: { operation: string }) => entry.operation === "workspace_create").args.purpose).toBe("Review arrangement ideas");
+  await request.post("/fixture/agent-contact");
+  await expect(invite).toContainText("Agent registered", { timeout: 10_000 });
+  await expect(invite).not.toContainText("running");
+  await invite.getByRole("button", { name: "Dismiss" }).click();
+  await expect(invite).toHaveCount(0);
+});
+
+test("task status, priority, assignee and claim are visible", async ({ page, request }) => {
+  await unlock(page); await openTree(page, "Tasks");
+  await page.getByRole("button", { name: "All tasks", exact: true }).click();
+  await expect(page.locator(".task-list-row")).toContainText("Open · P2 · Unassigned");
+  await page.getByLabel("Filter tasks by status").selectOption("closed");
+  await expect(page.locator(".task-list-row")).toHaveCount(0);
+  await page.getByLabel("Filter tasks by status").selectOption("all");
+  await page.locator(".task-list-row").getByRole("button", { name: /Fixture task/ }).click();
+  await expect(page.locator(".task-metadata")).toContainText("Open · P2 · Unassigned");
+  await page.getByRole("button", { name: "Claim task" }).click();
+  await expect(page.locator(".task-metadata")).toContainText("Assigned to Owner");
+  await expect(page.getByRole("button", { name: "Claim task" })).toHaveCount(0);
+  const audit = await (await request.get("/fixture/audit")).json();
+  expect(audit.calls.find((entry: { operation: string }) => entry.operation === "task_claim").args.participant_id).toBe("owner");
+});
+
 test("responsive code surfaces stay contained and copy exact text", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:4174" });
   await unlock(page); await page.setViewportSize({ width: 390, height: 844 });

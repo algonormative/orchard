@@ -350,6 +350,57 @@ impl BeadsAdapter {
         }
     }
 
+    pub(crate) fn claim(
+        &self,
+        store: &TaskStoreConfig,
+        task_id: &str,
+        request_id: &str,
+        participant_id: &str,
+    ) -> Result<Value, CommandFailure> {
+        self.preflight(store)?;
+        let before = self.read_task_direct(store, task_id)?;
+        if before.get("status").and_then(Value::as_str) != Some("open")
+            || before
+                .get("assignee")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        {
+            return Err(normal_failure("task is not open and unassigned"));
+        }
+        let args = vec![
+            "--actor".to_owned(),
+            participant_id.to_owned(),
+            "update".to_owned(),
+            task_id.to_owned(),
+            "--claim".to_owned(),
+        ];
+        match self.run(store, &args, true) {
+            Ok(value) => {
+                let task = normalize_mutation_task(self, store, value)?;
+                Ok(
+                    json!({"task":task,"request_id":request_id,"reconciled":false,"application_status":"br_success"}),
+                )
+            }
+            Err(error) => {
+                // A failed claim may have committed before its response or flush failed.
+                // Matching assignee alone cannot establish which request made the claim.
+                let observed = self.read_task_direct(store, task_id).ok();
+                Err(CommandFailure {
+                    message: format!(
+                        "task claim outcome is unknown for request {request_id}; inspect the task before retrying: {}{}",
+                        error.message,
+                        observed.as_ref().map_or(String::new(), |task| format!(
+                            "; observed status={} assignee={}",
+                            task.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+                            task.get("assignee").and_then(Value::as_str).unwrap_or("unassigned")
+                        ))
+                    ),
+                    unknown_outcome: true,
+                })
+            }
+        }
+    }
+
     pub(crate) fn close(
         &self,
         store: &TaskStoreConfig,

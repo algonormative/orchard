@@ -61,7 +61,7 @@ Direct host operations are an allowlist:
 | Operation | Arguments |
 | --- | --- |
 | `workspace_list` | `{}` |
-| `workspace_create` | `{name, root?, owner_name?}` |
+| `workspace_create` | `{name, root?, owner_name?, purpose?}` |
 | `workspace_archive` | `{workspace_id}` |
 | `workspace_snapshot` | `{workspace_id, history_limit?}` |
 | `workspace_info` | `{workspace_id}`; sanitized and also available to that workspace's MCP clients |
@@ -76,6 +76,7 @@ Direct host operations are an allowlist:
 | `task_show` | `{workspace_id, store_id, task_id}` |
 | `task_create` | `{workspace_id, store_id, request_id, title, description?, priority?, labels?}` |
 | `task_update` | `{workspace_id, store_id, task_id, request_id, title?, description?, status?, priority?, add_labels?, remove_labels?}` |
+| `task_claim` | `{workspace_id, store_id, task_id, participant_id, request_id}`; atomic claim by a registered participant |
 | `task_close` | `{workspace_id, store_id, task_id, request_id, reason?}` |
 | `task_dependencies` | `{workspace_id, store_id, task_id}`; read-only in this release |
 | `resource_get` / `resource_links` | `{workspace_id, ref}` |
@@ -111,8 +112,10 @@ project links to the detached source.
 
 `workspace_info` also returns authenticated same-host paths for the workspace,
 owned artifact root, and its `README.md`, plus the available operation names.
-Workspace creation seeds a minimal goals/context/MOTD README in the owned Git
-artifact root. Startup repairs only an interrupted matching seed; it never
+Workspace creation accepts an optional nonblank `purpose` of at most 2000 UTF-8
+bytes and seeds it into the goals section of the owned Git README. The purpose
+is stored with workspace metadata so an interrupted seed uses the same content
+after restart. Startup repairs only an interrupted matching seed; it never
 overwrites a user file or resurrects a README that appeared in repository
 history and was later deleted. `workspace_intro` is read-only and dynamically
 adds current participants and channels. Its generic joining prompt names the
@@ -219,6 +222,20 @@ changed request with a reused ID is rejected. After an uncertain response,
 Orchard inspects the task or create `external_ref`; it records observed state
 without claiming causation, and it never reruns a pending mutation that current
 state cannot prove. Beads remains the only mutable task ledger.
+
+`task_claim` accepts a currently registered participant ID and uses the
+bundled Beads `update --claim` with that ID as the explicit actor. Orchard
+requires an open, unassigned task before invoking Beads; Beads checks blocking
+dependencies and enforces the competing claim guard in its SQLite transaction.
+Participant identity is cooperative and is not provider-authenticated. Orchard
+serializes its own calls for each store; an external CLI can still change task
+state between Orchard's status precheck and Beads' atomic claim.
+A successful claim sets `status: in_progress` and `assignee` to the participant.
+An uncertain command result stays unknown: seeing the same assignee later is
+not proof that this request claimed it, and Orchard does not rerun the claim.
+A recorded request can be replayed after its participant leaves, but a new
+claim from an unregistered participant is rejected. `task_update` does not
+manage assignees; deliberate release or reassignment is outside this batch.
 
 ## Backup and restore
 

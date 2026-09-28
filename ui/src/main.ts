@@ -7,6 +7,7 @@ type Store = { id: string; path?: string; name?: string; source?: string };
 type ConversationKind = "channel" | "direct" | "broadcast";
 type DraftAttachment = { name: string; requestId: string; status: "uploading" | "ready" | "failed"; file?: File; href?: string; ref?: ResourceRef; error?: string };
 type Draft = { body: string; attachment?: DraftAttachment };
+type PendingMail = { args: Json; draftBody: string; attachmentRequestId?: string; replyRevision: number; state: "sending" | "uncertain" };
 type DetailView = "form";
 type Screen = "workspace" | "workspaces" | "settings" | "new-workspace" | "home";
 type CollectionTab = { kind: "collection"; collection: "tasks" | "agents" | "directs"; workspaceId: string; href: string; title: string };
@@ -28,6 +29,10 @@ const state: {
   conversationKind: ConversationKind;
   conversationMessages: unknown[];
   drafts: Map<string, Draft>;
+  pendingMail: Map<string, PendingMail>;
+  replyRevision: Map<string, number>;
+  onboarding: Map<string, "invite" | "contact" | "dismissed">;
+  taskFilter: "all" | "open" | "in_progress" | "blocked" | "closed";
   workspaceRequest: number;
   conversationRequest: number;
   seenMessageIds: Set<string>;
@@ -54,7 +59,7 @@ const state: {
   artifactExpanded: Set<string>;
   formReturn?: AppTab;
   newWorkspaceReturn?: Screen;
-} = { workspaces: [], recentWorkspaceIds: [], conversationKind: "channel", conversationMessages: [], drafts: new Map(), workspaceRequest: 0, conversationRequest: 0, seenMessageIds: new Set(), unread: new Map(), screen: "workspace", detailEpoch: 0, taskRequest: 0, tabs: [], resourceRequest: 0, navigationEpoch: 0, treeExpanded: new Set(["chats", "tasks", "artifacts"]), artifactRoots: [], artifactEntries: new Map(), artifactExpanded: new Set() };
+} = { workspaces: [], recentWorkspaceIds: [], conversationKind: "channel", conversationMessages: [], drafts: new Map(), pendingMail: new Map(), replyRevision: new Map(), onboarding: new Map(), taskFilter: "all", workspaceRequest: 0, conversationRequest: 0, seenMessageIds: new Set(), unread: new Map(), screen: "workspace", detailEpoch: 0, taskRequest: 0, tabs: [], resourceRequest: 0, navigationEpoch: 0, treeExpanded: new Set(["chats", "tasks", "artifacts"]), artifactRoots: [], artifactEntries: new Map(), artifactExpanded: new Set() };
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string) => {
   const node = document.createElement(tag);
@@ -124,18 +129,19 @@ function actionRow(...items: HTMLElement[]) {
 }
 
 /** The only renderer for copyable block code.  Keep its source as text, never HTML. */
+function copyTextButton(source: () => string, label = "Copy") {
+  return button(label, async () => {
+    try { await navigator.clipboard.writeText(source()); notice("Copied."); }
+    catch { notice("Copying is unavailable in this window.", "error"); }
+  }, "copy-button subtle");
+}
 function codeBlock(content: string, label = "Copy") {
   const block = el("section", "code-block");
   const pre = el("pre", "connection-value");
   const code = el("code");
   code.textContent = content;
   pre.append(code);
-  const copy = button(label, async () => {
-    try {
-      await navigator.clipboard.writeText(code.textContent || "");
-      notice("Copied.");
-    } catch { notice("Copying is unavailable in this window.", "error"); }
-  }, "copy-button subtle");
+  const copy = copyTextButton(() => code.textContent || "", label);
   block.append(pre, copy);
   return block;
 }
@@ -423,12 +429,16 @@ function renderEmptyWorkspace(fromHistory = false) {
   name.setAttribute("aria-label", "Workspace name");
   name.autocomplete = "off";
   name.required = true;
+  const purpose = document.createElement("textarea");
+  purpose.name = "purpose"; purpose.rows = 3; purpose.maxLength = 2000;
+  purpose.placeholder = "What is this workspace for? (optional)";
+  purpose.setAttribute("aria-label", "Workspace purpose (optional)");
   const submit = button("Create workspace", async () => {
     if (!name.value.trim()) return notice("Give the workspace a name.", "error");
     if (submit.disabled) return;
     submit.disabled = true;
     try {
-      const result = await call("workspace_create", { name: name.value.trim() });
+      const result = await call("workspace_create", { name: name.value.trim(), ...(purpose.value.trim() ? { purpose: purpose.value.trim() } : {}) });
       const id = identifier(result.workspace);
       if (!id) throw new Error("The service did not return a workspace id.");
       await refreshWorkspaces();
@@ -440,7 +450,8 @@ function renderEmptyWorkspace(fromHistory = false) {
   const cancel = button("Cancel", () => {
     leaveNewWorkspace();
   }, "subtle");
-  form.append(name, actionRow(submit, cancel));
+  form.classList.add("workspace-create-form");
+  form.append(name, purpose, actionRow(submit, cancel));
   document.querySelector(".welcome")?.append(form);
 }
 
@@ -454,6 +465,7 @@ function leaveNewWorkspace() {
 function renderCalmHome(fromHistory = false) {
   if (!fromHistory) navigate("home", undefined, true);
   shell("Orchard", "Create a workspace when you are ready.");
+  document.querySelector(".welcome")?.classList.add("welcome-home");
   document.querySelector(".welcome")?.append(button("Create workspace", () => renderEmptyWorkspace(), "primary"));
 }
 
@@ -479,6 +491,7 @@ function recordWorkspaceVisit(id: string) {
 function renderWorkspaceChooser(fromHistory = false) {
   if (!fromHistory) navigate("workspaces", undefined, false, "/workspaces");
   shell("All Workspaces", "Choose a workspace or create a new one.");
+  document.querySelector(".welcome")?.classList.add("welcome-home");
   const list = el("div", "stack workspace-list");
   for (const workspace of orderedWorkspaces()) {
     list.append(button(workspace.name, () => void chooseWorkspace(workspace.id), "workspace-choice"));
@@ -585,6 +598,7 @@ function renderWorkspace() {
   viewer.append(tabs, main);
   layout.append(conversations, viewer);
   root.append(top, layout);
+  patchOnboarding();
   patchWorkspace();
   restoreConversationContext();
 }
@@ -605,6 +619,56 @@ function workspaceStores(): unknown[] { return snapshotList("task_stores"); }
 function participantName(id: string): string {
   const item = mailList("participants").map(object).find((participant) => identifier(participant) === id);
   return string(item?.name) || id || "Participant";
+}
+function taskAssignee(task: Json): string {
+  const value = task.assignee ?? task.assignee_id;
+  return string(value) || string(object(value).id);
+}
+function taskMetadata(task: Json) {
+  const status = ({ open: "Open", in_progress: "In progress", blocked: "Blocked", closed: "Closed" } as Record<string, string>)[string(task.status)] || string(task.status) || "Unknown";
+  const priority = typeof task.priority === "number" ? `P${task.priority}` : "Priority unavailable";
+  const assignee = taskAssignee(task);
+  return `${status} · ${priority} · ${assignee ? `Assigned to ${participantName(assignee)}` : "Unassigned"}`;
+}
+
+function agentContacted(): boolean {
+  const agents = mailList("participants").map(object).filter((participant) => !["owner", "orchard"].includes(identifier(participant)));
+  return agents.length > 0;
+}
+
+function patchOnboarding() {
+  const workspace = state.workspace;
+  if (!workspace || state.screen !== "workspace") return;
+  const id = workspace.id;
+  const contact = agentContacted();
+  let phase = state.onboarding.get(id);
+  if (phase === "dismissed") return;
+  if (contact && phase === "invite") { phase = "contact"; state.onboarding.set(id, phase); }
+  if (contact && phase !== "contact") return;
+  if (!phase) { phase = "invite"; state.onboarding.set(id, phase); }
+  const existing = document.querySelector<HTMLElement>(".onboarding-callout");
+  if (existing?.dataset.workspaceId === id && existing.dataset.phase === phase) return;
+  existing?.remove();
+  const callout = el("section", "onboarding-callout");
+  callout.dataset.workspaceId = id; callout.dataset.phase = phase;
+  const close = button("Dismiss", () => { state.onboarding.set(id, "dismissed"); callout.remove(); }, "subtle");
+  if (phase === "contact") {
+    callout.setAttribute("role", "status");
+    callout.append(el("h2", "", "Agent registered"), el("p", "onboarding-feedback", "An agent is registered in this workspace. Its last contact and messages show what it actually did."), close);
+    window.setTimeout(() => { if (state.workspace?.id === id && state.onboarding.get(id) === "contact") { state.onboarding.set(id, "dismissed"); callout.remove(); } }, 12_000);
+  } else {
+    callout.append(el("h2", "", "Invite an agent into this workspace"), el("p", "onboarding-feedback", "Share the generic joining prompt with an agent you already use. Registration and last contact appear here after it connects."));
+    let joiningPrompt = "";
+    const copy = copyTextButton(() => joiningPrompt, "Copy joining prompt"); copy.disabled = true;
+    const actions = el("div", "onboarding-actions");
+    actions.append(copy, button("Connection settings", showAgentForm, "subtle"), close);
+    callout.append(actions);
+    void call("workspace_intro", { workspace_id: id }).then((result) => {
+      if (state.workspace?.id !== id || !document.contains(copy)) return;
+      joiningPrompt = string(result.joining_prompt); copy.disabled = !joiningPrompt;
+    }).catch((error) => { if (document.contains(copy)) notice(message(error), "error"); });
+  }
+  root.insertBefore(callout, document.querySelector("#workspace-layout"));
 }
 
 function patchWorkspace() {
@@ -740,10 +804,11 @@ function renderResourceDetail(resource: Json, links: Json) {
     }
     panel.append(messageBody(string(record.body) || string(record.content) || string(data.body) || content)); for (const ref of array(record.refs ?? data.refs)) panel.append(referenceNode(ref));
   } else if (state.activeResource?.ref.kind === "agent") {
-    const participant = object(data.participant); panel.append(el("p", "muted", string(participant.name) || string(participant.id) || "Agent")); if (string(participant.last_contact_at)) panel.append(el("p", "muted", `Last seen ${string(participant.last_contact_at)}`));
+    const participant = object(data.participant); panel.append(el("p", "muted", string(participant.name) || string(participant.id) || "Agent")); if (string(participant.last_contact_at)) panel.append(el("p", "muted", `Last contact ${string(participant.last_contact_at)}`)); else panel.append(el("p", "muted", "Registered; no recorded contact yet."));
   } else if (state.activeResource?.ref.kind === "task") {
     const task = object(data.task); const activeTaskRef = state.activeResource.ref;
     panel.append(el("p", "task-context muted", [string(task.id) || activeTaskRef.task_id, activeTaskRef.store_id].filter(Boolean).join(" · ")));
+    panel.append(el("p", "task-metadata", taskMetadata(task)));
     panel.append(el("p", "", string(task.description) || string(data.description) || content || "No task description."));
     const dependencyList = array(data.dependencies); const dependencies: Json[] = []; const dependents: Json[] = [];
     for (const value of dependencyList) {
@@ -761,7 +826,19 @@ function renderResourceDetail(resource: Json, links: Json) {
     const ref = state.activeResource.ref; if (ref.store_id && ref.task_id && state.workspace) {
       const status = document.createElement("select"); status.setAttribute("aria-label", "Task status"); for (const value of ["open", "in_progress", "blocked", "closed"]) { const option = document.createElement("option"); option.value = value; option.textContent = value; option.selected = value === string(task.status) || value === string(data.status); status.append(option); }
       const active = state.activeResource; const workspaceId = state.workspace.id; const href = active.href; const epoch = state.navigationEpoch;
-      const controls = el("div", "task-controls"); controls.append(status, button("Update status", async () => { try { await call("task_update", { workspace_id: workspaceId, store_id: ref.store_id, task_id: ref.task_id, status: status.value, request_id: crypto.randomUUID() }); if (state.workspace?.id === workspaceId && state.activeHref === href && state.navigationEpoch === epoch) void openResource(active, true); } catch (error) { notice(message(error), "error"); } }, "subtle")); panel.append(controls);
+      const controls = el("div", "task-controls"); controls.append(status, button("Update status", async () => { try { await call("task_update", { workspace_id: workspaceId, store_id: ref.store_id, task_id: ref.task_id, status: status.value, request_id: crypto.randomUUID() }); if (state.workspace?.id === workspaceId && state.activeHref === href && state.navigationEpoch === epoch) void openResource(active, true); } catch (error) { notice(message(error), "error"); } }, "subtle"));
+      if (!taskAssignee(task) && string(task.status) === "open") {
+        const claim = button("Claim task", async () => {
+        if (claim.disabled) return; claim.disabled = true;
+        try {
+          await call("task_claim", { workspace_id: workspaceId, store_id: ref.store_id, task_id: ref.task_id, participant_id: "owner", request_id: crypto.randomUUID() });
+          notice(`Task claimed by ${participantName("owner")}.`);
+          if (state.workspace?.id === workspaceId) { if (state.store?.id === ref.store_id) await loadTasks(); if (state.activeHref === href && state.navigationEpoch === epoch) void openResource(active, true); }
+        } catch (error) { notice(message(error), "error"); }
+        finally { if (document.contains(claim)) claim.disabled = false; }
+      }, "subtle task-claim"); controls.append(claim);
+      }
+      panel.append(controls);
     }
   } else if (state.activeResource?.ref.kind === "file") {
     if (typeof data.text === "string") {
@@ -1050,7 +1127,7 @@ function renderMessageList(thread: HTMLElement, messages: unknown[], showDestina
     article.append(messageBody(string(item.body) || string(item.content)));
     for (const ref of array(item.refs)) article.append(referenceNode(ref));
     if (string(item.thread_id)) article.append(el("p", "muted", "In reply to an earlier message"));
-    if (string(item.id) && state.selectedConversation !== "__all_direct__") article.append(button("Reply", () => { state.replyTo = string(item.id); patchConversation(); }, "subtle reply-button"));
+    if (string(item.id) && state.selectedConversation !== "__all_direct__") article.append(button("Reply", () => { state.replyTo = string(item.id); const revisionKey = `${state.workspace?.id}:${draftKey()}`; state.replyRevision.set(revisionKey, (state.replyRevision.get(revisionKey) || 0) + 1); patchConversation(); }, "subtle reply-button"));
     thread.append(article);
   }
   if (!messages.length) thread.append(el("p", "muted", "No messages yet."));
@@ -1062,6 +1139,12 @@ function refreshDraftAttachment(key: string) {
   for (const form of document.querySelectorAll<HTMLElement>(".composer")) if (form.dataset.draftKey === key) form.dispatchEvent(new Event("draftattachmentchange"));
 }
 
+function refreshDraftDelivery(workspaceId: string, key: string) {
+  for (const form of document.querySelectorAll<HTMLElement>(".composer")) {
+    if (form.dataset.workspaceId === workspaceId && form.dataset.draftKey === key) form.dispatchEvent(new Event("draftdeliverychange"));
+  }
+}
+
 function composer() {
   const form = el("form", "composer");
   const input = document.createElement("textarea");
@@ -1071,8 +1154,13 @@ function composer() {
   input.rows = 3;
   input.placeholder = state.replyTo ? "Write a reply" : "Write a message";
   input.setAttribute("aria-label", "Message");
-  const workspaceId = state.workspace?.id;
+  const workspaceId = state.workspace!.id;
   const attachmentArea = el("div", "attachment-area");
+  const deliveryArea = el("div", "mail-delivery-area");
+  const pendingKey = `${workspaceId}:${key}`;
+  const noticeForDraft = (text: string, tone: "error" | "info" = "info") => {
+    if (state.screen === "workspace" && state.workspace?.id === workspaceId && draftKey() === key) notice(text, tone);
+  };
   const file = document.createElement("input");
   file.type = "file"; file.hidden = true; file.tabIndex = -1; file.setAttribute("aria-hidden", "true");
 
@@ -1132,9 +1220,43 @@ function composer() {
     }
   };
 
+  const finishMail = async (pending: PendingMail) => {
+    if (state.pendingMail.get(pendingKey) !== pending) return;
+    state.pendingMail.delete(pendingKey);
+    if (state.workspace?.id !== workspaceId) return;
+    const currentDraft = state.drafts.get(key);
+    if (currentDraft?.body === pending.draftBody && currentDraft.attachment?.requestId === pending.attachmentRequestId && (state.replyRevision.get(pendingKey) || 0) === pending.replyRevision) state.drafts.delete(key);
+    if (draftKey() !== key) return;
+    if (!state.drafts.has(key)) state.replyTo = undefined;
+    refreshDraftDelivery(workspaceId, key);
+    if (state.selectedConversation) await loadHistory(state.selectedConversation);
+  };
+
+  const renderDelivery = () => {
+    deliveryArea.replaceChildren();
+    const pending = state.pendingMail.get(pendingKey);
+    if (pending?.state !== "uncertain") return;
+    const warning = el("div", "mail-delivery-warning");
+    warning.append(el("p", "", "Delivery is uncertain. The original message may already be present. Retry uses the same request and content, even if you edit this draft."));
+    const retry = button("Retry original message", async () => {
+      if (pending.state !== "uncertain") return;
+      pending.state = "sending"; retry.disabled = true; abandon.disabled = true;
+      try { await call("mail_send", pending.args); await finishMail(pending); noticeForDraft("Original message confirmed."); }
+      catch (error) { pending.state = "uncertain"; refreshDraftDelivery(workspaceId, key); noticeForDraft(`Original message remains uncertain: ${message(error)}`, "error"); }
+      finally { retry.disabled = false; abandon.disabled = false; if (document.contains(deliveryArea)) renderDelivery(); }
+    }, "subtle mail-retry");
+    const abandon = button("Keep draft as new message", () => {
+      if (pending.state !== "uncertain" || state.pendingMail.get(pendingKey) !== pending) return;
+      state.pendingMail.delete(pendingKey); renderDelivery();
+      notice("Original delivery may have succeeded. Your next Send creates a separate message.");
+    }, "subtle");
+    warning.append(actionRow(retry, abandon)); deliveryArea.append(warning);
+  };
+
   const send = button("Send", async () => {
     if (!state.workspace) return;
     if (send.disabled) return;
+    if (state.pendingMail.has(pendingKey)) return notice("Resolve the uncertain original message before sending this draft.", "error");
     const draft = state.drafts.get(key) || { body: input.value };
     const attachment = draft.attachment;
     if (attachment?.status === "uploading") return notice("Wait for the attachment to finish uploading.", "error");
@@ -1145,21 +1267,12 @@ function composer() {
     const kind = state.conversationKind;
     const id = state.selectedConversation;
     const target = kind === "broadcast" ? { kind } : { kind, id };
-    if (kind !== "broadcast" && !id) return notice("Choose a conversation first.", "error");
-    try {
-      const refs = attachment?.ref ? [{ type: "resource", resource: attachment.ref }] : [];
-      const draftAtSubmit = { body: input.value, attachmentRequestId: attachment?.requestId };
-      const replyTo = state.replyTo;
-      await call("mail_send", { workspace_id: workspaceId, request_id: crypto.randomUUID(), sender_id: "owner", destination: target, body, kind: "message", thread_id: replyTo, refs });
-      const currentDraft = state.drafts.get(key);
-      if (currentDraft?.body === draftAtSubmit.body && currentDraft?.attachment?.requestId === draftAtSubmit.attachmentRequestId) {
-        state.drafts.delete(key);
-      }
-      if (state.workspace?.id !== workspaceId || draftKey() !== key) return;
-      if (!state.drafts.has(key)) { input.value = ""; renderAttachment(); }
-      if (state.replyTo === replyTo) state.replyTo = undefined;
-      if (state.selectedConversation) await loadHistory(state.selectedConversation);
-    } catch (error) { notice(message(error), "error"); }
+    if (kind !== "broadcast" && !id) { send.disabled = false; return notice("Choose a conversation first.", "error"); }
+    const refs = attachment?.ref ? [{ type: "resource", resource: attachment.ref }] : [];
+    const pending: PendingMail = { args: { workspace_id: workspaceId, request_id: crypto.randomUUID(), sender_id: "owner", destination: target, body, kind: "message", thread_id: state.replyTo, refs }, draftBody: input.value, attachmentRequestId: attachment?.requestId, replyRevision: state.replyRevision.get(pendingKey) || 0, state: "sending" };
+    state.pendingMail.set(pendingKey, pending);
+    try { await call("mail_send", pending.args); await finishMail(pending); }
+    catch (error) { pending.state = "uncertain"; refreshDraftDelivery(workspaceId, key); noticeForDraft(`Delivery is uncertain: ${message(error)}. Retry the original message.`, "error"); }
     finally { if (document.contains(send)) send.disabled = false; }
   }, "primary");
   form.addEventListener("submit", (event) => { event.preventDefault(); send.click(); });
@@ -1174,9 +1287,12 @@ function composer() {
   file.addEventListener("change", () => { const selected = file.files?.[0]; file.value = ""; if (selected) void uploadAttachment(selected); });
   input.addEventListener("input", saveBody);
   const attachmentControls = el("div", "attachment-controls"); attachmentControls.append(attach, file, attachmentArea);
-  form.dataset.draftKey = key; form.addEventListener("draftattachmentchange", renderAttachment);
+  form.dataset.draftKey = key; form.dataset.workspaceId = workspaceId;
+  form.addEventListener("draftattachmentchange", renderAttachment);
+  form.addEventListener("draftdeliverychange", () => { if (!state.drafts.has(key)) { input.value = ""; renderAttachment(); } renderDelivery(); });
   renderAttachment();
-  form.append(destination, input, attachmentControls, send);
+  renderDelivery();
+  form.append(destination, input, attachmentControls, deliveryArea, send);
   return form;
 }
 
@@ -1217,7 +1333,7 @@ function renderAgentCollection() {
   for (const participant of participants) {
     const id = identifier(participant); const name = string(participant.name) || id;
     const row = el("article", "agent-card"); row.append(button(name, () => void openResource(descriptor({ kind: "agent", workspace_id: state.workspace!.id, id }, name)), "subtle"));
-    if (string(participant.last_contact_at)) row.append(el("p", "muted", `Last seen ${string(participant.last_contact_at)}`));
+    if (string(participant.last_contact_at)) row.append(el("p", "muted", `Last contact ${string(participant.last_contact_at)}`)); else row.append(el("p", "muted", "Registered; no recorded contact yet."));
     panel.append(row);
   }
   const actions = el("div", "resource-actions"); actions.append(button("Connection settings", showAgentForm, "subtle")); panel.append(actions);
@@ -1317,11 +1433,22 @@ function patchTaskPanel(panel: HTMLElement) {
     panel.append(section);
     return;
   }
+  const filter = document.createElement("select"); filter.className = "task-filter"; filter.setAttribute("aria-label", "Filter tasks by status");
+  for (const [value, label] of [["all", "All statuses"], ["open", "Open"], ["in_progress", "In progress"], ["blocked", "Blocked"], ["closed", "Closed"]]) {
+    const option = document.createElement("option"); option.value = value; option.textContent = label; option.selected = state.taskFilter === value; filter.append(option);
+  }
+  filter.addEventListener("change", () => { state.taskFilter = filter.value as typeof state.taskFilter; renderTaskCollection(); });
+  section.append(filter);
+  let visible = 0;
   for (const item of array(selectedStore?.tasks)) {
     const task = object(item);
+    if (state.taskFilter !== "all" && string(task.status) !== state.taskFilter) continue;
     const id = string(task.task_id) || identifier(task);
-    section.append(button(`${id} ${string(task.title)}`, () => { state.selectedTask = id; void openResource(descriptor({ kind: "task", workspace_id: state.workspace!.id, store_id: state.store!.id, task_id: id }, string(task.title) || `Task ${id}`)); }, state.selectedTask === id ? "selected subtle" : "subtle"));
+    const row = el("div", "task-list-row");
+    row.append(button(`${id} ${string(task.title)}`, () => { state.selectedTask = id; void openResource(descriptor({ kind: "task", workspace_id: state.workspace!.id, store_id: state.store!.id, task_id: id }, string(task.title) || `Task ${id}`)); }, state.selectedTask === id ? "selected subtle" : "subtle"), el("span", "task-summary", taskMetadata(task)));
+    section.append(row); visible += 1;
   }
+  if (!visible) section.append(el("p", "muted", "No tasks match this status."));
   panel.append(section);
 }
 
@@ -1448,6 +1575,7 @@ async function refreshSnapshot() {
   }
   observeMessages(mailList("history"));
   patchConversations();
+  patchOnboarding();
 }
 
 function startPolling() {

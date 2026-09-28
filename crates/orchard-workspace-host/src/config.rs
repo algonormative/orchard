@@ -33,6 +33,8 @@ impl Default for AppConfig {
 pub(crate) struct WorkspaceConfig {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
     pub root: PathBuf,
     pub mail_path: PathBuf,
     #[serde(default)]

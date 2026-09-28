@@ -41,6 +41,250 @@ fn create_workspace(host: &WorkspaceHost, name: &str) -> (String, String, PathBu
     (workspace_id, store_id, root)
 }
 
+#[test]
+fn purpose_seeds_readme_and_claim_assigns_actor() {
+    let temp = TempDir::new().unwrap();
+    let data_root = temp.path().join("data");
+    let host = WorkspaceHost::open(data_root.clone(), packaged_br()).unwrap();
+    let created = host
+        .call(
+            "workspace_create",
+            json!({"name":"First batch", "purpose":"Ship one useful task."}),
+        )
+        .unwrap();
+    let workspace_id = created["workspace"]["id"].as_str().unwrap();
+    let readme =
+        PathBuf::from(created["workspace"]["root"].as_str().unwrap()).join("artifacts/README.md");
+    let store_id = created["workspace"]["task_stores"][0]["id"]
+        .as_str()
+        .unwrap();
+    let intro = host
+        .call("workspace_intro", json!({"workspace_id":workspace_id}))
+        .unwrap();
+    assert!(intro["readme"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Ship one useful task."));
+    let task = host.call("task_create", json!({"workspace_id":workspace_id,"store_id":store_id,"request_id":"make","title":"Do work"})).unwrap();
+    let task_id = task["task"]["id"].as_str().unwrap();
+    let claimed = host.call("task_claim", json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id,"participant_id":"owner","request_id":"claim"})).unwrap();
+    assert_eq!(claimed["task"]["assignee"], "owner");
+    fs::write(&readme, "# Human purpose\n").unwrap();
+    drop(host);
+    let reopened = WorkspaceHost::open(data_root, packaged_br()).unwrap();
+    assert_eq!(
+        reopened
+            .call("workspace_intro", json!({"workspace_id":workspace_id}))
+            .unwrap()["readme"]["text"],
+        "# Human purpose\n"
+    );
+    assert_eq!(
+        reopened
+            .call(
+                "task_claim",
+                json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id,
+        "participant_id":"owner","request_id":"claim"})
+            )
+            .unwrap()["idempotent_replay"],
+        true
+    );
+}
+
+#[test]
+fn claim_is_exclusive_idempotent_and_replays_after_participant_leaves() {
+    let temp = TempDir::new().unwrap();
+    let data_root = temp.path().join("data");
+    let host = Arc::new(WorkspaceHost::open(data_root.clone(), packaged_br()).unwrap());
+    let (workspace_id, store_id, _) = create_workspace(&host, "Claims");
+    host.call("mail_register", json!({"workspace_id":workspace_id,"request_id":"register-alice","participant_id":"alice","name":"Alice"})).unwrap();
+    host.call("mail_register", json!({"workspace_id":workspace_id,"request_id":"register-bob","participant_id":"bob","name":"Bob"})).unwrap();
+    let task = host.call("task_create", json!({"workspace_id":workspace_id,"store_id":store_id,"request_id":"make","title":"Pick me"})).unwrap();
+    let task_id = task["task"]["id"].as_str().unwrap().to_owned();
+    let claims = ["alice", "bob"].map(|actor| {
+        let host = Arc::clone(&host);
+        let workspace_id = workspace_id.clone();
+        let store_id = store_id.clone();
+        let task_id = task_id.clone();
+        std::thread::spawn(move || {
+            host.call(
+                "task_claim",
+                json!({
+                    "workspace_id":workspace_id,"store_id":store_id,"task_id":task_id,
+                    "participant_id":actor,"request_id":format!("claim-{actor}")
+                }),
+            )
+        })
+    });
+    let outcomes = claims.map(|claim| claim.join().unwrap());
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    let winner = outcomes
+        .iter()
+        .find_map(|outcome| outcome.as_ref().ok())
+        .unwrap();
+    let actor = winner["task"]["assignee"].as_str().unwrap();
+    assert!(actor == "alice" || actor == "bob");
+    assert_eq!(winner["task"]["status"], "in_progress");
+    let replay_args = json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id,
+        "participant_id":actor,"request_id":format!("claim-{actor}")});
+    assert_eq!(
+        host.call("task_claim", replay_args.clone()).unwrap()["idempotent_replay"],
+        true
+    );
+    assert!(host
+        .call(
+            "task_claim",
+            json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id,
+        "participant_id":"owner","request_id":format!("claim-{actor}")})
+        )
+        .unwrap_err()
+        .contains("different task arguments"));
+    host.call(
+        "mail_leave",
+        json!({"workspace_id":workspace_id,"participant_id":actor,"request_id":"winner-left"}),
+    )
+    .unwrap();
+    assert_eq!(
+        host.call("task_claim", replay_args).unwrap()["idempotent_replay"],
+        true
+    );
+    assert_eq!(
+        host.call(
+            "task_show",
+            json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id})
+        )
+        .unwrap()["assignee"],
+        actor
+    );
+}
+
+#[test]
+fn claim_rejects_invalid_participant_and_closed_task() {
+    let temp = TempDir::new().unwrap();
+    let host = WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap();
+    let (workspace_id, store_id, _) = create_workspace(&host, "Claim checks");
+    let task = host.call("task_create", json!({"workspace_id":workspace_id,"store_id":store_id,"request_id":"make","title":"Done"})).unwrap();
+    let task_id = task["task"]["id"].as_str().unwrap();
+    assert!(host
+        .call(
+            "task_claim",
+            json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id,
+        "participant_id":"unknown","request_id":"unknown-claim"})
+        )
+        .unwrap_err()
+        .contains("not registered"));
+    host.call("mail_register", json!({"workspace_id":workspace_id,"request_id":"register-leaver","participant_id":"leaver","name":"Leaver"})).unwrap();
+    host.call(
+        "mail_leave",
+        json!({"workspace_id":workspace_id,"request_id":"leave","participant_id":"leaver"}),
+    )
+    .unwrap();
+    assert!(host
+        .call(
+            "task_claim",
+            json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id,
+        "participant_id":"leaver","request_id":"left-claim"})
+        )
+        .unwrap_err()
+        .contains("not registered"));
+    host.call("task_close", json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id,"request_id":"close"})).unwrap();
+    assert!(host
+        .call(
+            "task_claim",
+            json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id,
+        "participant_id":"owner","request_id":"closed-claim"})
+        )
+        .unwrap_err()
+        .contains("not open and unassigned"));
+    assert_eq!(
+        host.call(
+            "task_show",
+            json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id})
+        )
+        .unwrap()["status"],
+        "closed"
+    );
+}
+
+#[test]
+fn claim_rejects_blocked_task() {
+    let temp = TempDir::new().unwrap();
+    let host = WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap();
+    let (workspace_id, store_id, workspace_root) = create_workspace(&host, "Blocked claim");
+    let make = |request_id: &str, title: &str| {
+        host.call("task_create", json!({"workspace_id":workspace_id,"store_id":store_id,"request_id":request_id,"title":title})).unwrap()["task"]["id"].as_str().unwrap().to_owned()
+    };
+    let blocker_id = make("blocker", "Finish first");
+    let task_id = make("blocked", "Wait for first");
+    let task_root = workspace_root.join("tasks");
+    let db_path = task_root.join(".beads/beads.db");
+    let add = Command::new(packaged_br())
+        .current_dir(&task_root)
+        .arg("--db")
+        .arg(&db_path)
+        .args(["dep", "add", &task_id, &blocker_id])
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let flush = Command::new(packaged_br())
+        .current_dir(&task_root)
+        .arg("--db")
+        .arg(&db_path)
+        .args(["sync", "--flush-only"])
+        .output()
+        .unwrap();
+    assert!(
+        flush.status.success(),
+        "{}",
+        String::from_utf8_lossy(&flush.stderr)
+    );
+    let error = host
+        .call(
+            "task_claim",
+            json!({"workspace_id":workspace_id,"store_id":store_id,
+        "task_id":task_id,"participant_id":"owner","request_id":"blocked-claim"}),
+        )
+        .unwrap_err();
+    assert!(error.contains("blocked"), "{error}");
+    let task = host
+        .call(
+            "task_show",
+            json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id}),
+        )
+        .unwrap();
+    assert_eq!(task["status"], "open");
+    assert!(task["assignee"].is_null());
+}
+
+#[test]
+fn uncertain_claim_reports_observed_state_without_claiming_causation_or_rerunning() {
+    let temp = TempDir::new().unwrap();
+    let wrapper = temp.path().join("br-wrapper");
+    let count = temp.path().join("claim-count");
+    write_executable(&wrapper, &format!(
+        "#!/bin/sh\nreal='{}'\ncount='{}'\ncase \" $* \" in\n  *' --claim '*) printf 'x\\n' >> \"$count\"; \"$real\" \"$@\"; exit 9 ;;\nesac\nexec \"$real\" \"$@\"\n",
+        packaged_br().display(), count.display()
+    ));
+    let host = WorkspaceHost::open(temp.path().join("data"), wrapper).unwrap();
+    let (workspace_id, store_id, _) = create_workspace(&host, "Unknown claim");
+    let task = host.call("task_create", json!({"workspace_id":workspace_id,"store_id":store_id,"request_id":"make","title":"Pick me"})).unwrap();
+    let task_id = task["task"]["id"].as_str().unwrap();
+    let args = json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id,
+        "participant_id":"owner","request_id":"uncertain-claim"});
+    let first = host.call("task_claim", args.clone()).unwrap_err();
+    assert!(first.contains("outcome is unknown"), "{first}");
+    assert!(
+        first.contains("observed status=in_progress assignee=owner"),
+        "{first}"
+    );
+    let retry = host.call("task_claim", args).unwrap_err();
+    assert!(retry.contains("does not prove it applied"), "{retry}");
+    assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 1);
+}
+
 fn mcp_arguments(value: Value) -> Map<String, Value> {
     value.as_object().unwrap().clone()
 }
@@ -349,7 +593,7 @@ fn workspace_intro_seeds_and_preserves_readme_and_reports_paths() {
         "workspace_intro",
         "workspace_status",
         "tasks_list",
-        "task_update",
+        "task_claim",
         "mail_send",
         "mail_history",
         "workspace_alerts",
@@ -1375,6 +1619,7 @@ async fn combined_mcp_clients_discover_tasks_and_complete_a_mail_handoff() {
     let tools = client_a.list_all_tools().await.unwrap();
     assert!(tools.iter().any(|tool| tool.name == "workspace_info"));
     assert!(tools.iter().any(|tool| tool.name == "task_create"));
+    assert!(tools.iter().any(|tool| tool.name == "task_claim"));
     assert!(tools.iter().any(|tool| tool.name == "resource_get"));
     assert!(!tools.iter().any(|tool| tool.name == "workspace_archive"));
 
@@ -1439,6 +1684,17 @@ async fn combined_mcp_clients_discover_tasks_and_complete_a_mail_handoff() {
     assert_eq!(created.is_error, Some(false));
     let created = created.structured_content.unwrap();
     let task_id = created["task"]["id"].as_str().unwrap().to_owned();
+    let claimed = client_a
+        .call_tool(mcp_call(
+            "task_claim",
+            json!({"store_id":store_id,"task_id":task_id,"participant_id":"alice","request_id":"mcp-task-claim"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(claimed.is_error, Some(false));
+    let claimed = claimed.structured_content.unwrap();
+    assert_eq!(claimed["task"]["assignee"], "alice");
+    assert_eq!(claimed["task"]["status"], "in_progress");
     let task_ref = json!({
         "type":"task",
         "store_id":store_id,

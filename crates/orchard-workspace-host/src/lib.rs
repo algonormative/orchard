@@ -251,6 +251,7 @@ impl WorkspaceHost {
             "task_show" => self.task_show(args),
             "task_create" => self.task_create(args),
             "task_update" => self.task_update(args),
+            "task_claim" => self.task_claim(args),
             "task_close" => self.task_close(args),
             "task_dependencies" => self.task_dependencies(args),
             "resource_get" => self.resource_get(args),
@@ -393,6 +394,12 @@ impl WorkspaceHost {
     fn workspace_create(&self, args: Value) -> Result<Value, String> {
         let args = object(args)?;
         let name = required_string(&args, "name")?;
+        let purpose = optional_string(&args, "purpose")?;
+        if let Some(purpose) = &purpose {
+            if purpose.trim().is_empty() || purpose.len() > 2000 || purpose.contains('\0') {
+                return Err("purpose must be 1 to 2000 bytes of nonblank text".to_owned());
+            }
+        }
         let owner_name =
             optional_string(&args, "owner_name")?.unwrap_or_else(|| "Owner".to_owned());
         if name.trim().is_empty() {
@@ -412,6 +419,7 @@ impl WorkspaceHost {
         let mut workspace = WorkspaceConfig {
             id: id.clone(),
             name,
+            purpose,
             root,
             mail_path,
             archived: false,
@@ -866,6 +874,53 @@ impl WorkspaceHost {
         )
     }
 
+    fn task_claim(&self, args: Value) -> Result<Value, String> {
+        let args = object(args)?;
+        let workspace_id = required_string(&args, "workspace_id")?;
+        let store_id = required_string(&args, "store_id")?;
+        let task_id = required_string(&args, "task_id")?;
+        let participant_id = required_string(&args, "participant_id")?;
+        let request_id = required_string(&args, "request_id")?;
+        if participant_id == "orchard" {
+            return Err("the system participant cannot claim tasks".to_owned());
+        }
+        let runtime = self.active_runtime(&workspace_id)?;
+        // A recorded request remains replayable after a participant leaves.
+        if self.task_receipts(&runtime, &request_id)?.is_empty() {
+            let participants = self.mail_read(&workspace_id, "mail_participants", json!({}))?;
+            let registered = participants["participants"]
+                .as_array()
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item["id"] == participant_id && item["registered"] == true)
+                });
+            if !registered {
+                return Err(format!(
+                    "participant {participant_id:?} is not registered in this workspace"
+                ));
+            }
+        }
+        let semantic = json!({
+            "operation":"claim","store_id":store_id,"task_id":task_id,
+            "participant_id":participant_id
+        });
+        self.mutate_task(
+            &workspace_id,
+            &store_id,
+            &request_id,
+            "claim",
+            Some(&task_id),
+            semantic,
+            |store| {
+                self.inner
+                    .beads
+                    .claim(store, &task_id, &request_id, &participant_id)
+            },
+            |_store| Ok(None),
+        )
+    }
+
     fn task_close(&self, args: Value) -> Result<Value, String> {
         let args = object(args)?;
         let workspace_id = required_string(&args, "workspace_id")?;
@@ -1213,7 +1268,7 @@ impl WorkspaceHost {
             "capabilities": {
                 "mail": MAIL_OPERATIONS,
                 "tasks": if self.inner.beads.availability().is_ok() {
-                    json!(["tasks_list","task_show","task_create","task_update","task_close","task_dependencies"])
+                    json!(["tasks_list","task_show","task_create","task_update","task_claim","task_close","task_dependencies"])
                 } else { json!([]) },
                 "task_dependencies_mutable": false,
                 "resources": ["resource_get","resource_links","resource_link","workspace_intro","workspace_status","workspace_alerts","artifact_roots","artifact_list","artifact_history","artifact_upload","artifact_delete","artifact_commit"]
@@ -1976,6 +2031,7 @@ fn workspace_view(workspace: &WorkspaceConfig) -> Value {
     json!({
         "id": workspace.id,
         "name": workspace.name,
+        "purpose": workspace.purpose,
         "root": workspace.root,
         "archived": workspace.archived,
         "repositories": workspace.repositories.iter().map(|repository| {

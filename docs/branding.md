@@ -19,3 +19,7 @@ The [brand gallery](../site/brand/index.html) presents three wide orchard backgr
 The square art has a normalized 1024 × 1024 source at `crates/orchard-desktop/icons/lemon-orchard-1024.png`. The next package build uses `scripts/build-macos-icon.sh` to make an `Orchard.icns` with the standard macOS sizes, places it in `Contents/Resources`, and sets `CFBundleIconFile` in `Info.plist`. Tauri's `bundle.icon` also points at the normalized source. The macOS menu bar mark stays a separate template icon rendered in `crates/orchard-desktop/src/main.rs` so it remains legible in light and dark menu bars.
 
 This source change does not alter an already published app. The Finder icon will arrive in a future version after packaging, signing, notarization, and an installed-app visual check. The current gallery presents the art direction in the meantime.
+
+## In the browser app
+
+The workspace UI uses the same ink, citron, leaf, and cream palette with small terminal labels and a 96-pixel derivative of the mascot. A 960-pixel derivative of `02-harvest-loop.png` appears only on the calm home and workspace chooser. Both UI copies have versioned names under `ui/public/brand/` because bundled assets are cached across app sessions. Full-resolution art remains in the gallery; conversations, task controls, forms, and connection details use quiet surfaces so working content stays foremost.
