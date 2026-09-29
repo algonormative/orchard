@@ -62,7 +62,7 @@ To build an unsigned Apple Silicon app locally:
 ```sh
 CARGO_TARGET_DIR=/private/tmp/orchard-ux-target \
   CARGO_INCREMENTAL=0 \
-  ORCHARD_VERSION=0.1.0 scripts/package-macos-app.sh
+  ORCHARD_VERSION=0.1.1 scripts/package-macos-app.sh
 ```
 
 Signing, notarization, GitHub Release setup, and the release checklist are
