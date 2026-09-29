@@ -105,6 +105,30 @@ simulated installed version 0.0.0, it returned `UpdateAvailable` and the exact
 Apple Silicon ZIP. Five targeted update tests passed. These checks exercise the
 update library and public release endpoint, not the menu action in the app.
 
+## Public release v0.1.1 — 2026-09-29
+
+Tag `v0.1.1` at commit
+`62678dc3a7da9c2948623b9969c7eddd5269ccab` completed GitHub Actions run
+[`36604510088`](https://github.com/algonormative/orchard-workspace/actions/runs/36604510088).
+The workflow passed 24 browser and 62 Rust tests, then signed, notarized,
+packaged, and published the release. An anonymous download of
+`Orchard-0.1.1-macos-arm64.zip` returned HTTP 200 and 16,881,208 bytes; its
+SHA-256 was `e193b6c4345f13325a34027e3fe737d454d217b7835a8a303561f9cc274c8d92`.
+
+The downloaded app passed deep-strict `codesign`, `stapler`, and `spctl`
+verification with source `Notarized Developer ID`. Its desktop plist reports
+version 0.1.1, its icon is `Orchard.icns`, and both binaries are arm64. Launched
+from the downloaded app with isolated data and
+`PATH=/usr/bin:/bin:/usr/sbin:/sbin`, the UI and live workspace loaded and a
+task was created through bundled `br`, verified with headless Playwright. The
+test app was then stopped.
+
+A live update-library check against the public endpoint returned
+`UpdateAvailable` with the matching 0.1.1 ZIP for installed version 0.1.0, and
+`UpToDate` for installed version 0.1.1. This does not establish Finder or menu
+interaction, second-Mac installation, sleep/wake behavior, or a clean-machine
+runtime check.
+
 ## Remaining integration evidence
 
 Originally tracked in Vault epic `vault-1qnss`, release gate `vault-1qnss.7`:
