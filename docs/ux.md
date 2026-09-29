@@ -64,6 +64,21 @@ agents: the harness must reload its own MCP configuration, register or resume
 an identity, poll its inbox, and acknowledge messages. It does not expose a
 protocol log dashboard.
 
+Settings also shows Orchard's bundled plugin catalog as a small, progressive
+surface: Core and Chat are marked required; Tasks and State show their
+description, version, availability, attachment status, and an explicit
+Attach or Detach action. A detached plugin keeps its workspace data. Existing
+resource tabs remain readable, while actions that would write through a
+detached plugin are disabled with plain text explaining why. Orchard does not
+offer downloads, a workflow editor, or custom plugin JavaScript here.
+
+State appears in the resource tree only while its plugin is attached. Its list
+opens canonical marker tabs at `/w/{workspace}/states/{id}`. A marker viewer
+shows its title, current state, subject, immutable definition version, actor,
+history, and the transitions currently allowed by the host. Agent-managed
+definitions and transitions stay out of the browser; State is a read-only
+progress view in this release.
+
 All code-like blocks use one shared renderer with text-node content, a visible
 generic Copy control, and contained horizontal scrolling. This preserves the
 exact copied source while keeping long commands, endpoints, tokens, and fenced

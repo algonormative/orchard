@@ -274,6 +274,67 @@ test("workspace settings has a canonical reloadable route and opens README in th
   await expect(page.getByRole("heading", { name: "Workspace settings", exact: true })).toBeVisible();
 });
 
+test("plugin settings detach Tasks and live State remains a readable canonical resource", async ({ page, request }) => {
+  await unlock(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.locator(".plugin-catalog")).toContainText("Core");
+  await expect(page.locator(".plugin-catalog")).toContainText("Tasks");
+  await page.locator(".plugin-row", { hasText: "Tasks" }).getByRole("button", { name: "Detach" }).click();
+  await expect(page.locator(".plugin-row", { hasText: "Tasks" })).toContainText("Detached");
+  await page.locator(".plugin-row", { hasText: "Tasks" }).getByRole("button", { name: "View retained data" }).click();
+  await expect(page.locator("#conversation")).toContainText("Preserved task records are read-only.");
+  await expect(page.getByRole("button", { name: "New task", exact: true })).toBeDisabled();
+  await expect(page.locator("#conversation")).toContainText("Fixture task");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Back to workspace", exact: true }).first().click();
+  await expect(page.locator("details.tree-group").filter({ hasText: "Tasks" })).toHaveCount(0);
+  await page.goto("/w/workspace-1/~states");
+  await expect(page.getByRole("tab", { name: "State", exact: true })).toBeVisible();
+  await page.locator("#conversation").getByRole("button", { name: /Fixture release.*draft/ }).click();
+  await expect(page).toHaveURL(/\/w\/workspace-1\/states\/marker-1$/);
+  await expect(page.locator("#conversation")).toContainText("History");
+  await expect(page.locator("#conversation")).toContainText("Definition Release · v1");
+  await request.post("/fixture/external-change", { data: { marker_state: "review", topics: ["state"] } });
+  await expect(page.locator("#conversation")).toContainText("State: review · revision 2");
+});
+
+test("State collection loads an empty list once and scopes cached markers to its workspace", async ({ page, request }) => {
+  await unlock(page);
+  await openTree(page, "Tasks");
+  const stateTree = page.locator("details.tree-group").filter({ has: page.locator("summary", { hasText: "State" }) });
+  if (!(await stateTree.evaluate((node: HTMLDetailsElement) => node.open))) await stateTree.locator("summary").click();
+  await stateTree.getByRole("button", { name: "All state markers", exact: true }).click();
+  await expect(page.locator("#conversation").getByRole("button", { name: /Fixture release.*draft/ })).toBeVisible();
+  const audit = await (await request.get("/fixture/audit")).json();
+  expect(audit.calls.filter((entry: { operation: string }) => entry.operation === "state_list")).toHaveLength(1);
+  await page.getByRole("button", { name: "New workspace", exact: true }).click();
+  await page.getByLabel("Workspace name").fill("State switch");
+  await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+  await page.goto("/w/workspace-2/~states");
+  await expect(page.getByRole("button", { name: /Fixture release/ })).toHaveCount(0);
+});
+
+test("State event during an older marker list drains to a fresh tree and collection", async ({ page, request }) => {
+  await request.post("/fixture/delay", { data: { state_list: 250 } });
+  await unlock(page);
+  await request.post("/fixture/external-change", { data: { marker_state: "review", topics: ["state"] } });
+  const stateTree = page.locator("details.tree-group").filter({ has: page.locator("summary", { hasText: "State" }) });
+  await expect(stateTree.getByRole("button", { name: /Fixture release.*review/ })).toBeVisible();
+  await stateTree.getByRole("button", { name: "All state markers", exact: true }).click();
+  await expect(page.locator("#conversation").getByRole("button", { name: /Fixture release.*review/ })).toBeVisible();
+});
+
+test("a failed State list is shown once without an immediate retry loop", async ({ page, request }) => {
+  await request.post("/fixture/fail-state-list");
+  await unlock(page);
+  const stateTree = page.locator("details.tree-group").filter({ has: page.locator("summary", { hasText: "State" }) });
+  await expect(stateTree).toContainText("State is unavailable: Fixture State store is unavailable");
+  await expect(stateTree).not.toContainText("No state markers yet.");
+  await page.waitForTimeout(300);
+  const audit = await (await request.get("/fixture/audit")).json();
+  expect(audit.calls.filter((entry: { operation: string }) => entry.operation === "state_list")).toHaveLength(1);
+});
+
 test("draft, reply, scroll, reconnect, and polling preserve working context", async ({ page, request }) => {
   await unlock(page); await request.post("/fixture/long-history");
   const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "#general", exact: true }).click();

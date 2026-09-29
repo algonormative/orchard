@@ -5,6 +5,13 @@ conversations, work through tasks, and browse project files in one browser UI.
 The macOS menu bar app hosts the workspace and gives each workspace a connection
 point for agents. Orchard does not launch agents or sign in to their providers.
 
+Agents can discover bundled capabilities and attach the optional ones while
+remaining in their own harnesses. Core and Chat are required. Tasks is attached
+by default and can be toggled. State is optional: it provides declarative
+definitions, durable markers, and explicit transitions. Orchard supplies no
+execution scheduler and does not yet download plugins. See
+[docs/plugins.md](docs/plugins.md).
+
 [Website](https://algonormative.github.io/orchard-workspace/) ·
 [Releases](https://github.com/algonormative/orchard-workspace/releases) ·
 [Source](https://github.com/algonormative/orchard-workspace)
@@ -62,7 +69,7 @@ To build an unsigned Apple Silicon app locally:
 ```sh
 CARGO_TARGET_DIR=/private/tmp/orchard-ux-target \
   CARGO_INCREMENTAL=0 \
-  ORCHARD_VERSION=0.1.1 scripts/package-macos-app.sh
+  ORCHARD_VERSION=0.2.0 scripts/package-macos-app.sh
 ```
 
 Signing, notarization, GitHub Release setup, and the release checklist are

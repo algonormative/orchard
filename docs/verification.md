@@ -129,6 +129,40 @@ A live update-library check against the public endpoint returned
 interaction, second-Mac installation, sleep/wake behavior, or a clean-machine
 runtime check.
 
+## Local v0.2.0 preparation — 2026-09-29
+
+An unsigned v0.2.0 `Orchard.app` was built at
+`/private/tmp/orchard-v02-verified/Orchard.app`. The pinned bundled `br` and
+license-notice package gates passed. The debug workspace suite passed 69 Rust
+tests, and the Playwright suite passed 28 tests, including focused numeric
+version and failed-fetch retry tests. The retry correction reduced the old
+packaged-UI baseline of 1,298 `state_list` requests in 800 ms to one fixture
+request with an honest unavailable error. A headless probe of the final package
+made exactly one `state_list` request in 800 ms, showed unavailable rather than
+a false empty state, and recovered on reload with review/version 1 retained.
+A screenshot of that state view was visually inspected for correct margins.
+Host all-target Clippy with warnings denied, formatting, and the diff check
+passed. Whole-workspace Clippy remains
+blocked by three pre-existing updater warnings tracked in `vault-4nv6c`.
+
+Using isolated data at `/private/tmp/orchard-v02-probe`,
+the final package ran against an old v0.1.1 fixture on port 64652 with
+`PATH=/usr/bin:/bin`. The existing live chat, upload, and task smoke
+passed. Six integration tests cover State same-session MCP, compare-and-swap,
+detached reads, restart, and corrupt-data behavior. The packaged app
+live-State smoke passed external HTTP draft-to-review, exact retry,
+stale compare-and-swap rejection, retained reads while detached, rejection of detached writes, and
+reattachment; the open viewer
+updated without navigation or reload. The process was interrupted with SIGINT
+and the same app was relaunched. A read-only restart probe of the final
+package passed, reporting State review/history 2/attached true. This does not
+establish native Quit or sleep/wake behavior. Default attachment behavior is
+covered by the integration suite; the final live probe reused State after it
+had already been attached during the initial attempt.
+
+This v0.2.0 evidence is local preparation only: no tag, signing, notarization,
+or release publication occurred. The existing public release remains v0.1.1.
+
 ## Remaining integration evidence
 
 Originally tracked in Vault epic `vault-1qnss`, release gate `vault-1qnss.7`:

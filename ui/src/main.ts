@@ -10,7 +10,7 @@ type Draft = { body: string; attachment?: DraftAttachment };
 type PendingMail = { args: Json; draftBody: string; attachmentRequestId?: string; replyRevision: number; state: "sending" | "uncertain" };
 type DetailView = "form";
 type Screen = "workspace" | "workspaces" | "settings" | "new-workspace" | "home";
-type CollectionTab = { kind: "collection"; collection: "tasks" | "agents" | "directs"; workspaceId: string; href: string; title: string };
+type CollectionTab = { kind: "collection"; collection: "tasks" | "agents" | "directs" | "states"; workspaceId: string; href: string; title: string };
 type AppTab = Descriptor | CollectionTab;
 
 const rootElement = document.querySelector<HTMLElement>("#app");
@@ -62,13 +62,16 @@ const state: {
   agentData?: Json;
   agentLinks?: Json;
   navigationEpoch: number;
-  treeExpanded: Set<"chats" | "tasks" | "artifacts">;
+  treeExpanded: Set<"chats" | "tasks" | "artifacts" | "states">;
   artifactRoots: Json[];
   artifactEntries: Map<string, Json[]>;
   artifactExpanded: Set<string>;
+  stateMarkers: Json[];
+  stateMarkersWorkspace?: string;
+  stateMarkersLoading?: string;
   formReturn?: AppTab;
   newWorkspaceReturn?: Screen;
-} = { workspaces: [], recentWorkspaceIds: [], conversationKind: "channel", conversationMessages: [], drafts: new Map(), pendingMail: new Map(), replyRevision: new Map(), onboarding: new Map(), taskFilter: "all", workspaceRequest: 0, snapshotRequest: 0, conversationRequest: 0, seenMessageIds: new Set(), unread: new Map(), screen: "workspace", detailEpoch: 0, taskRequest: 0, tabs: [], resourceRequest: 0, navigationEpoch: 0, connection: "disconnected", treeExpanded: new Set(["chats", "tasks", "artifacts"]), artifactRoots: [], artifactEntries: new Map(), artifactExpanded: new Set() };
+} = { workspaces: [], recentWorkspaceIds: [], conversationKind: "channel", conversationMessages: [], drafts: new Map(), pendingMail: new Map(), replyRevision: new Map(), onboarding: new Map(), taskFilter: "all", workspaceRequest: 0, snapshotRequest: 0, conversationRequest: 0, seenMessageIds: new Set(), unread: new Map(), screen: "workspace", detailEpoch: 0, taskRequest: 0, tabs: [], resourceRequest: 0, navigationEpoch: 0, connection: "disconnected", treeExpanded: new Set(["chats", "tasks", "artifacts", "states"]), artifactRoots: [], artifactEntries: new Map(), artifactExpanded: new Set(), stateMarkers: [] };
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string) => {
   const node = document.createElement(tag);
@@ -92,6 +95,16 @@ let refreshFlight: Promise<void> | undefined;
 let messagePatchPending = false;
 let artifactPatchPending = false;
 let taskPatchPending = false;
+let statePatchPending = false;
+let stateMarkersFlight: Promise<void> | undefined;
+let stateMarkersVersion = 0;
+let stateMarkersLoadedVersion = -1;
+let stateMarkersError = "";
+
+function plugins(): Json[] { return array(state.snapshot?.plugins).map(object); }
+function plugin(id: string) { return plugins().find((item) => string(item.id) === id); }
+function pluginAttached(id: string, fallback = false) { const item = plugin(id); return item ? item.attached !== false && item.available !== false : fallback; }
+function pluginErrors() { return plugins().filter((item) => item.available === false).map((item) => `${string(item.name) || string(item.id) || "plugin"}: ${string(item.health) || "unavailable"}`); }
 
 function hasSelectionWithin(container: HTMLElement) {
   const selection = window.getSelection();
@@ -102,9 +115,10 @@ document.addEventListener("selectionchange", () => {
   if (messagePatchPending) patchMessages();
   if (artifactPatchPending && state.workspace) void refreshVisibleArtifact(state.workspace.id);
   if (taskPatchPending) patchTaskDetailFromCache();
+  if (statePatchPending && state.workspace) void refreshStateViews(state.workspace.id);
 });
 document.addEventListener("focusout", () => {
-  window.setTimeout(() => { if (messagePatchPending) patchMessages(); if (artifactPatchPending && state.workspace) void refreshVisibleArtifact(state.workspace.id); if (taskPatchPending) patchTaskDetailFromCache(); }, 0);
+  window.setTimeout(() => { if (messagePatchPending) patchMessages(); if (artifactPatchPending && state.workspace) void refreshVisibleArtifact(state.workspace.id); if (taskPatchPending) patchTaskDetailFromCache(); if (statePatchPending && state.workspace) void refreshStateViews(state.workspace.id); }, 0);
 }, true);
 
 async function ensureBrowserSession(): Promise<boolean> {
@@ -312,11 +326,11 @@ function cycleTab(direction: number) {
 function isDescriptor(tab: AppTab): tab is Descriptor { return tab.kind !== "collection"; }
 
 function collectionTab(collection: CollectionTab["collection"], workspaceId: string): CollectionTab {
-  return { kind: "collection", collection, workspaceId, href: `/w/${encodeURIComponent(workspaceId)}/~${collection}`, title: collection === "tasks" ? "Tasks" : collection === "agents" ? "Agents" : "All direct messages" };
+  return { kind: "collection", collection, workspaceId, href: `/w/${encodeURIComponent(workspaceId)}/~${collection}`, title: collection === "tasks" ? "Tasks" : collection === "agents" ? "Agents" : collection === "states" ? "State" : "All direct messages" };
 }
 
 function collectionFromHref(href: string, workspaceId: string): CollectionTab | undefined {
-  return (["tasks", "agents", "directs"] as const).map((name) => collectionTab(name, workspaceId)).find((tab) => tab.href === href);
+  return (["tasks", "agents", "directs", "states"] as const).map((name) => collectionTab(name, workspaceId)).find((tab) => tab.href === href);
 }
 
 function prepareTab(tab: AppTab) {
@@ -360,6 +374,7 @@ async function activateTab(tab: AppTab, fromHistory = false) {
   if (!fromHistory) history.pushState({ screen: "workspace", workspaceId: tab.workspaceId, resourceHref: tab.href }, "", tab.href);
   if (tab.collection === "tasks") renderTaskCollection();
   else if (tab.collection === "agents") renderAgentCollection();
+  else if (tab.collection === "states") renderStateCollection();
   else {
     state.selectedConversation = "__all_direct__"; state.conversationKind = "direct"; state.replyTo = undefined; state.conversationMessages = [];
     patchConversations(); patchConversation(); await loadHistory("__all_direct__");
@@ -584,6 +599,7 @@ async function chooseWorkspace(id: string, fromHistory = false, replaceHistory =
   const snapshot = await call("workspace_snapshot", { workspace_id: id });
   if (request !== state.workspaceRequest) return;
   state.workspace = workspace;
+  if (!retainsDrafts) { state.stateMarkers = []; state.stateMarkersWorkspace = undefined; state.stateMarkersLoading = undefined; stateMarkersFlight = undefined; stateMarkersVersion = 0; stateMarkersLoadedVersion = -1; stateMarkersError = ""; }
   stopLiveUpdates();
   state.navigationEpoch += 1;
   state.snapshot = snapshot;
@@ -782,10 +798,10 @@ function patchConversations() {
   const panel = document.querySelector<HTMLElement>("#conversations");
   if (!panel || !state.workspace) return;
   panel.replaceChildren();
-  const errors = [...snapshotErrors(), ...taskBackendErrors()];
+  const errors = [...snapshotErrors(), ...taskBackendErrors(), ...pluginErrors()];
   if (errors.length) panel.append(el("p", "error", `Unavailable source${errors.length === 1 ? "" : "s"}: ${errors.join("; ")}`));
 
-  const section = (name: "chats" | "tasks" | "artifacts", label: string) => {
+  const section = (name: "chats" | "tasks" | "artifacts" | "states", label: string) => {
     const details = document.createElement("details");
     details.className = "tree-group";
     details.open = state.treeExpanded.has(name);
@@ -824,6 +840,8 @@ function patchConversations() {
   chats.append(button("Agents", () => void activateTab(collectionTab("agents", state.workspace!.id)), "tree-action subtle"), button("Connection settings", showAgentForm, "tree-action subtle"));
 
   const tasks = section("tasks", "Tasks");
+  if (!pluginAttached("tasks", true)) tasks.remove();
+  else {
   tasks.append(button("All tasks", openTasks, "tree-action subtle"), button("Add project", () => void attachRepository(), "tree-action subtle"));
   for (const value of workspaceStores()) {
     const item = object(value); const store = object(item.store); const storeId = identifier(store) || string(store.store_id);
@@ -835,11 +853,42 @@ function patchConversations() {
     }
     tasks.append(group);
   }
+  }
 
   const artifacts = section("artifacts", "Artifacts");
   artifacts.id = "artifact-tree";
   renderArtifactTree(artifacts);
   if (artifacts.open && !state.artifactRoots.length) void loadArtifactRoots();
+
+  if (pluginAttached("state")) {
+    const states = section("states", "State");
+    states.append(button("All state markers", () => void activateTab(collectionTab("states", state.workspace!.id)), "tree-action subtle"));
+    if (stateMarkersError) states.append(el("p", "error", `State is unavailable: ${stateMarkersError}`));
+    if (!stateMarkersError && !state.stateMarkers.length) states.append(el("p", "muted", state.stateMarkersWorkspace === state.workspace.id ? "No state markers yet." : "Loading state markers…"));
+    for (const marker of state.stateMarkers) {
+      const id = identifier(marker); const title = string(marker.title) || id;
+      states.append(button(`${title} · ${string(marker.state) || "unknown"}`, () => void openResource(descriptor({ kind: "state", workspace_id: state.workspace!.id, id }, title)), "conversation-button"));
+    }
+    if (states.open && state.stateMarkersWorkspace !== state.workspace.id) void loadStateMarkers();
+  }
+}
+
+async function loadStateMarkers(force = false) {
+  if (!state.workspace) return;
+  if (force) { stateMarkersVersion += 1; state.stateMarkersWorkspace = undefined; }
+  if (state.stateMarkersWorkspace === state.workspace.id && stateMarkersLoadedVersion >= stateMarkersVersion) return;
+  if (stateMarkersFlight) { await stateMarkersFlight; return loadStateMarkers(false); }
+  const workspaceId = state.workspace.id;
+  const version = stateMarkersVersion;
+  state.stateMarkersLoading = workspaceId;
+  const flight = (async () => { try {
+    const result = await call("state_list", { workspace_id: workspaceId });
+    if (state.workspace?.id === workspaceId && version === stateMarkersVersion) { state.stateMarkers = array(result.markers).map(object); state.stateMarkersWorkspace = workspaceId; stateMarkersLoadedVersion = version; stateMarkersError = ""; patchConversations(); if (state.activeHref === collectionTab("states", workspaceId).href) renderStateCollection(); }
+  } catch (error) { if (state.workspace?.id === workspaceId && version === stateMarkersVersion) { state.stateMarkersWorkspace = workspaceId; stateMarkersLoadedVersion = version; stateMarkersError = message(error); patchConversations(); if (state.activeHref === collectionTab("states", workspaceId).href) renderStateCollection(); } }
+  finally { if (state.stateMarkersLoading === workspaceId) state.stateMarkersLoading = undefined; } })();
+  stateMarkersFlight = flight;
+  try { await flight; } finally { if (stateMarkersFlight === flight) stateMarkersFlight = undefined; }
+  if (stateMarkersLoadedVersion < stateMarkersVersion) return loadStateMarkers(false);
 }
 
 function patchTabs() {
@@ -967,6 +1016,33 @@ function renderResourceDetail(resource: Json, links: Json) {
     panel.append(messageBody(string(record.body) || string(record.content) || string(data.body) || content)); for (const ref of array(record.refs ?? data.refs)) panel.append(referenceNode(ref));
   } else if (state.activeResource?.ref.kind === "agent") {
     const participant = object(data.participant); panel.append(el("p", "muted", string(participant.name) || string(participant.id) || "Agent")); if (string(participant.last_contact_at)) panel.append(el("p", "muted", `Last contact ${string(participant.last_contact_at)}`)); else panel.append(el("p", "muted", "Registered; no recorded contact yet."));
+  } else if (state.activeResource?.ref.kind === "state") {
+    const marker = object(data.marker ?? data); const definition = object(data.definition);
+    const subject = object(marker.subject); const attached = data.attached !== false && pluginAttached("state");
+    panel.append(el("p", "task-metadata", `State: ${string(marker.state) || "unknown"} · revision ${marker.revision === undefined ? "0" : String(marker.revision)}`));
+    if (string(subject.kind) && subject.workspace_id === state.workspace?.id) { const subjectActions = el("div", "resource-actions"); subjectActions.append(button(`Subject: ${string(subject.path) || string(subject.title) || string(subject.id) || string(subject.task_id) || string(subject.kind)}`, () => void openResource(descriptor(subject as ResourceRef, string(subject.path) || string(subject.id) || string(subject.kind))), "subtle")); panel.append(subjectActions); }
+    const definitionVersion = definition.version ?? marker.definition_version;
+    panel.append(el("p", "muted", `Definition ${string(definition.label) || string(marker.definition_id) || "unknown"} · v${definitionVersion === undefined || definitionVersion === null ? "?" : String(definitionVersion)}`));
+    panel.append(el("p", "muted", `Actor: ${string(marker.created_by) || "unknown"}`));
+    const history = array(data.history); const historySection = el("section", "state-history"); historySection.append(el("h3", "", "History"));
+    if (!history.length) historySection.append(el("p", "muted", "No recorded transitions."));
+    for (const entry of history) {
+      const item = object(entry); const actor = string(item.actor) || string(item.participant_id); const note = string(item.note); const timestamp = typeof item.timestamp === "number" ? new Date(item.timestamp * 1000).toLocaleString() : string(item.at) || string(item.created_at);
+      const row = el("p", "muted", `${string(item.from) || "—"} → ${string(item.to) || string(item.state) || "—"}${actor ? ` · ${actor}` : ""}${note ? ` · ${note}` : ""}${timestamp ? ` · ${timestamp}` : ""}${item.revision !== undefined ? ` · r${String(item.revision)}` : ""}`);
+      for (const reference of array(item.references)) { const ref = object(reference) as ResourceRef; if (ref.kind && ref.workspace_id === state.workspace?.id) row.append(document.createTextNode(" "), button(string(ref.path) || string(ref.id) || string(ref.task_id) || ref.kind, () => void openResource(descriptor(ref, string(ref.path) || string(ref.id) || string(ref.task_id) || ref.kind)), "subtle")); }
+      historySection.append(row);
+    }
+    panel.append(historySection);
+    const transitions = array(data.available_transitions).map(object);
+    if (!attached) panel.append(el("p", "muted", "State is detached. Preserved marker data is read-only."));
+    else if (transitions.length) {
+      const controls = el("section", "state-transitions"); controls.append(el("h3", "", "Allowed transitions"));
+      for (const transition of transitions) {
+        const to = string(transition.to); if (!to) continue;
+        controls.append(el("p", "muted", `${string(transition.label) || `${string(transition.from) || "current"} → ${to}`} · agents may advance this marker.`));
+      }
+      panel.append(controls);
+    }
   } else if (state.activeResource?.ref.kind === "task") {
     const task = object(data.task); const activeTaskRef = state.activeResource.ref;
     panel.append(el("p", "task-context muted", [string(task.id) || activeTaskRef.task_id, activeTaskRef.store_id].filter(Boolean).join(" · ")));
@@ -977,8 +1053,10 @@ function renderResourceDetail(resource: Json, links: Json) {
       const status = document.createElement("select"); status.setAttribute("aria-label", "Task status"); for (const value of ["open", "in_progress", "blocked", "closed"]) { const option = document.createElement("option"); option.value = value; option.textContent = value; option.selected = value === string(task.status) || value === string(data.status); status.append(option); }
       status.addEventListener("change", () => { status.dataset.dirty = "true"; });
       const active = state.activeResource; const workspaceId = state.workspace.id; const href = active.href; const epoch = state.navigationEpoch;
-      const controls = el("div", "task-controls"); controls.append(status, button("Update status", async () => { try { await call("task_update", { workspace_id: workspaceId, store_id: ref.store_id, task_id: ref.task_id, status: status.value, request_id: crypto.randomUUID() }); if (state.workspace?.id === workspaceId && state.activeHref === href && state.navigationEpoch === epoch) void openResource(active, true); } catch (error) { notice(message(error), "error"); } }, "subtle"));
-      if (!taskAssignee(task) && string(task.status) === "open") {
+      const tasksAttached = pluginAttached("tasks", true); status.disabled = !tasksAttached;
+      const update = button("Update status", async () => { try { await call("task_update", { workspace_id: workspaceId, store_id: ref.store_id, task_id: ref.task_id, status: status.value, request_id: crypto.randomUUID() }); if (state.workspace?.id === workspaceId && state.activeHref === href && state.navigationEpoch === epoch) void openResource(active, true); } catch (error) { notice(message(error), "error"); } }, "subtle"); update.disabled = !tasksAttached;
+      const controls = el("div", "task-controls"); controls.append(status, update);
+      if (tasksAttached && !taskAssignee(task) && string(task.status) === "open") {
         const claim = button("Claim task", async () => {
         if (claim.disabled) return; claim.disabled = true;
         try {
@@ -1517,7 +1595,9 @@ function openTasks() {
 function renderTaskCollection() {
   if (!state.workspace) return;
   const panel = document.querySelector<HTMLElement>("#conversation"); if (!panel) return; panel.replaceChildren(el("header", "conversation-title", "Tasks"));
-  const actions = el("div", "resource-actions"); actions.append(button("Add project", () => void attachRepository(), "subtle")); panel.append(actions);
+  const attached = pluginAttached("tasks", true);
+  if (!attached) panel.append(el("p", "muted", "Tasks is detached. Preserved task records are read-only."));
+  const actions = el("div", "resource-actions"); const addProject = button("Add project", () => void attachRepository(), "subtle"); addProject.disabled = !attached; actions.append(addProject); panel.append(actions);
   const stores = workspaceStores().map(object);
   if (!stores.length) { panel.append(el("p", "empty-state muted", "No task stores are connected.")); return; }
   const picker = el("div", "collection-picker");
@@ -1538,6 +1618,15 @@ function renderAgentCollection() {
     panel.append(row);
   }
   const actions = el("div", "resource-actions"); actions.append(button("Connection settings", showAgentForm, "subtle")); panel.append(actions);
+}
+function renderStateCollection() {
+  const panel = document.querySelector<HTMLElement>("#conversation"); if (!panel || !state.workspace) return;
+  panel.replaceChildren(el("header", "conversation-title", "State"));
+  if (!state.stateMarkers.length && state.stateMarkersWorkspace !== state.workspace.id) { panel.append(el("p", "muted", "Loading state markers…")); void loadStateMarkers(); return; }
+  if (!pluginAttached("state")) panel.append(el("p", "muted", "State is detached. Preserved marker data is read-only."));
+  if (stateMarkersError) panel.append(el("p", "error", `State is unavailable: ${stateMarkersError}`));
+  if (!stateMarkersError && !state.stateMarkers.length) panel.append(el("p", "empty-state muted", "No state markers yet. Agents can attach definitions and create markers as part of their work."));
+  for (const marker of state.stateMarkers) { const id = identifier(marker); const title = string(marker.title) || id; panel.append(button(`${title} · ${string(marker.state) || "unknown"}`, () => void openResource(descriptor({ kind: "state", workspace_id: state.workspace!.id, id }, title)), "conversation-button")); }
 }
 function selectStore(item: Json) {
   const store = object(item.store); const id = identifier(store) || string(store.store_id);
@@ -1627,8 +1716,8 @@ function patchTaskPanel(panel: HTMLElement) {
   const section = el("section", "task-panel");
   const selectedStore = workspaceStores().map(object).find((item) => identifier(object(item.store)) === state.store?.id);
   const create = button("New task", () => void createTask(), "subtle task-create");
-  create.disabled = !selectedStore || selectedStore.tasks === null;
-  if (create.disabled) create.title = "This task source is unavailable.";
+  create.disabled = !pluginAttached("tasks", true) || !selectedStore || selectedStore.tasks === null;
+  if (create.disabled) create.title = pluginAttached("tasks", true) ? "This task source is unavailable." : "Tasks is detached; retained data is read-only.";
   section.append(create);
   if (selectedStore && selectedStore.tasks === null) {
     section.append(el("p", "error", "This task store is unavailable. Orchard has not substituted empty task data."));
@@ -1672,6 +1761,29 @@ function openWorkspaceFromSettings() {
   if (active) void activateTab(active, true); else renderEmptyViewer();
 }
 
+function pluginCatalog() {
+  const section = el("section", "settings-section plugin-catalog"); section.append(el("h2", "", "Bundled plugins"), el("p", "muted", "Core and Chat are required. Tasks and State can be attached to this workspace; detaching preserves their data for read-only views."));
+  const catalog = plugins();
+  if (!catalog.length) { section.append(el("p", "muted", "Plugin status is loading…")); return section; }
+  for (const item of catalog) {
+    const id = string(item.id); const row = el("article", "plugin-row"); const title = string(item.name) || id;
+    row.append(el("h3", "", title), el("p", "muted", string(item.description) || "No description supplied."));
+    const status = item.available === false ? "Unavailable" : item.required === true ? "Required" : item.attached === false ? "Detached" : "Attached";
+    row.append(el("p", "task-metadata", `${status} · v${item.version === undefined ? "?" : String(item.version)}`));
+    if (item.required !== true) {
+      const control = button(item.attached === false ? "Attach" : "Detach", async () => {
+        control.disabled = true; const operation = item.attached === false ? "plugin_attach" : "plugin_detach";
+        try { await call(operation, { workspace_id: state.workspace!.id, plugin_id: id, request_id: crypto.randomUUID() }); await refreshSnapshot(["plugins", "tasks", "state"]); notice(`${title} ${operation === "plugin_attach" ? "attached" : "detached"}.`); }
+        catch (error) { notice(message(error), "error"); }
+        finally { if (document.contains(control)) control.disabled = false; }
+      }, "subtle"); control.disabled = item.available === false; row.append(control);
+      if (item.attached === false && item.available !== false) row.append(button("View retained data", () => { renderWorkspace(); if (id === "tasks") openTasks(); else void activateTab(collectionTab("states", state.workspace!.id)); }, "subtle"));
+    }
+    section.append(row);
+  }
+  return section;
+}
+
 function renderSettings(fromHistory = false) {
   if (!state.workspace) return;
   if (!fromHistory) navigate("settings", undefined, false, workspaceSettingsHref(state.workspace.id));
@@ -1709,7 +1821,7 @@ function renderSettings(fromHistory = false) {
   }, "primary");
   const connection = document.createElement("details"); connection.className = "settings-section connection-details";
   connection.append(el("summary", "", "Connection details"), el("h2", "", "Endpoint"), endpoint, el("h2", "", "Credential"), token, el("p", "muted", "Each workspace gets its own MCP alias. Orchard does not launch or wake agents."), el("h3", "", "Claude Code"), claudeConfig, el("h3", "", "Codex"), codexConfig, el("h3", "", "Codex TOML"), codexToml, el("p", "muted", "For Codex, ORCHARD_TOKEN must exist in the process that launches the harness; exporting it in a terminal does not change an already-running app. After adding config, reconnect or reload MCP as the harness supports."), actionRow(rotate));
-  panel?.append(back(), overview, connection, actionRow(archive, back()));
+  panel?.append(back(), overview, pluginCatalog(), connection, actionRow(archive, back()));
   void loadWorkspaceIntroduction(introduction, readme, joining, workspacePath);
   void loadConnection(endpoint, token, claudeConfig, codexConfig, codexToml);
 }
@@ -1782,7 +1894,7 @@ async function refreshSnapshotNow(topics: string[]) {
   const snapshot = await call("workspace_snapshot", { workspace_id: workspaceId });
   if (state.workspace?.id !== workspaceId || generation !== liveGeneration) return;
   state.snapshot = snapshot;
-  if (topics.includes("workspace")) {
+  if (topics.includes("workspace") || topics.includes("plugins")) {
     try {
       const settings = await call("settings_get");
       if (state.workspace?.id !== workspaceId || generation !== liveGeneration) return;
@@ -1795,6 +1907,18 @@ async function refreshSnapshotNow(topics: string[]) {
   observeMessages(mailList("history"));
   patchConversations();
   patchOnboarding();
+  if (topics.includes("state")) { await loadStateMarkers(true); await refreshStateViews(workspaceId); }
+  if (topics.includes("plugins") && state.screen === "settings") {
+    const focused = document.activeElement as HTMLElement | null; const row = focused?.closest<HTMLElement>(".plugin-row"); const pluginName = row?.querySelector("h3")?.textContent; const action = focused?.textContent;
+    const catalog = document.querySelector(".plugin-catalog"); catalog?.replaceWith(pluginCatalog());
+    if (pluginName && action) [...document.querySelectorAll<HTMLElement>(".plugin-row")].find((item) => item.querySelector("h3")?.textContent === pluginName)?.querySelectorAll<HTMLButtonElement>("button").forEach((button) => { if (button.textContent === action) button.focus(); });
+  }
+  if (topics.includes("plugins")) {
+    if (state.activeHref === collectionTab("tasks", workspaceId).href) renderTaskCollection();
+    else await refreshVisibleTask(workspaceId);
+    if (state.activeHref === collectionTab("states", workspaceId).href) renderStateCollection();
+    else await refreshStateViews(workspaceId);
+  }
   if (topics.includes("mail") && state.screen === "workspace" && state.detailView !== "form") {
     if (state.activeHref === collectionTab("agents", workspaceId).href) renderAgentCollection();
     if (state.selectedConversation && (state.activeResource && ["channel", "direct", "broadcast"].includes(state.activeResource.kind) || state.activeHref === collectionTab("directs", workspaceId).href)) await loadHistory(state.selectedConversation);
@@ -1835,6 +1959,17 @@ async function refreshVisibleTask(workspaceId: string) {
   } catch (error) { notice(message(error), "error"); }
 }
 
+async function refreshStateViews(workspaceId: string) {
+  if (state.workspace?.id !== workspaceId) return;
+  if (state.activeHref === collectionTab("states", workspaceId).href) { const panel = document.querySelector<HTMLElement>("#conversation"); const scroll = panel?.scrollTop || 0; renderStateCollection(); if (panel) panel.scrollTop = scroll; return; }
+  const active = state.activeResource;
+  if (active?.ref.kind !== "state" || state.detailView === "form") return;
+  const epoch = state.navigationEpoch; const panel = document.querySelector<HTMLElement>("#conversation"); if (!panel) return; const scroll = panel.scrollTop;
+  if (hasSelectionWithin(panel) || (document.activeElement !== document.body && panel.contains(document.activeElement))) { statePatchPending = true; return; }
+  try { const result = await call("resource_get", { workspace_id: workspaceId, ref: active.ref }); if (state.workspace?.id !== workspaceId || state.navigationEpoch !== epoch || state.activeHref !== active.href) return; state.resourceData = object(result.resource); state.resourceLinks = object(result.links); statePatchPending = false; renderResourceDetail(state.resourceData, state.resourceLinks); panel.scrollTop = scroll; }
+  catch (error) { notice(message(error), "error"); }
+}
+
 function patchTaskDetailFromCache() {
   const active = state.activeResource;
   const resource = state.resourceData;
@@ -1846,6 +1981,10 @@ function patchTaskDetailFromCache() {
   const metadata = panel.querySelector<HTMLElement>(".task-metadata"); if (metadata) metadata.textContent = taskMetadata(task);
   const description = panel.querySelector<HTMLElement>(".task-description"); if (description) description.textContent = string(task.description) || string(data.description) || string(data.text) || "No task description.";
   const status = panel.querySelector<HTMLSelectElement>('select[aria-label="Task status"]');
+  const writesEnabled = pluginAttached("tasks", true);
+  if (status) status.disabled = !writesEnabled;
+  const update = [...panel.querySelectorAll<HTMLButtonElement>(".task-controls button")].find((button) => button.textContent === "Update status"); if (update) update.disabled = !writesEnabled;
+  if (!writesEnabled) panel.querySelector(".task-claim")?.remove();
   if (status && status.dataset.dirty !== "true" && document.activeElement !== status) status.value = string(task.status);
   if (taskAssignee(task) || string(task.status) !== "open") panel.querySelector(".task-claim")?.remove();
   const busyRelations = [...panel.querySelectorAll<HTMLElement>(".task-relations")].some((node) => node.contains(document.activeElement) || hasSelectionWithin(node));
@@ -1924,7 +2063,7 @@ function startLiveUpdates() {
         try { payload = object(JSON.parse(String(event.data))); } catch { return; }
         if (string(payload.workspace_id) !== workspaceId) return;
         const type = string(payload.type);
-        const topics = type === "changed" ? array(payload.topics).map(string) : ["workspace", "mail", "tasks", "artifacts", "repositories"];
+        const topics = type === "changed" ? array(payload.topics).map(string) : type === "resync" ? ["workspace", "mail", "tasks", "artifacts", "repositories", "plugins", "state"] : [];
         if (type !== "changed" && type !== "hello" && type !== "resync") return;
         for (const topic of topics) pendingRefreshTopics.add(topic);
         if (!state.refreshTimer) state.refreshTimer = window.setTimeout(() => {

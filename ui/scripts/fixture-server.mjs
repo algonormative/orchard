@@ -26,12 +26,21 @@ let delayAttachMs = 0;
 let delayTasksMs = 0;
 let delayActionMs = 0;
 let delaySnapshotMs = 0;
+let delayStateListMs = 0;
+let stateListFailures = 0;
 let uploadFailures = 0;
 let loseMailResponseOnce = false;
 const sentRequestIds = new Map();
 let freshWorkspace = false;
 let agentJoined = false;
 let resourceLinks = [];
+let plugins = [
+  { id: "core", version: "0.2.0", name: "Core", description: "Workspace records and resources.", required: true, attached: true },
+  { id: "chat", version: "0.2.0", name: "Chat", description: "Conversations for participants.", required: true, attached: true },
+  { id: "tasks", version: "0.2.0", name: "Tasks", description: "Workspace task store.", required: false, attached: true },
+  { id: "state", version: "0.2.0", name: "State", description: "Agent-managed state markers.", required: false, attached: true },
+];
+let markers = [{ id: "marker-1", title: "Fixture release", definition_id: "release", definition_version: "1", state: "draft", revision: 1, subject: { kind: "task", workspace_id: "workspace-1", store_id: "default", task_id: "fixture-1" }, created_by: "alice" }];
 let tasks = [{ id: "fixture-1", task_id: "fixture-1", title: "Fixture task", status: "open", priority: 2, description: "Fixture task description" }];
 const messages = [
   { id: "general-1", sender_id: "alice", destination: { kind: "channel", id: "general" }, body: "General fixture message\nhttps://example.com/docs and /w/workspace-1/files/fixture-root?path=README.md\n```sh\nprintf 'https://example.com/plain-code'\n```", kind: "message" },
@@ -66,9 +75,11 @@ function resetFixture() {
   for (const path of Object.keys(artifactFiles)) delete artifactFiles[path];
   Object.assign(artifactFiles, structuredClone(initialArtifactFiles));
   created = false; workspaces = []; recentWorkspaceIds = []; sessionsValid = true; sourceErrors = []; taskBackendAvailable = true;
-  repositories = []; delaySendMs = 0; delayAttachMs = 0; delayTasksMs = 0; delaySnapshotMs = 0;
+  repositories = []; delaySendMs = 0; delayAttachMs = 0; delayTasksMs = 0; delaySnapshotMs = 0; delayStateListMs = 0; stateListFailures = 0;
   delayActionMs = 0; uploadFailures = 0; resourceLinks = [];
   loseMailResponseOnce = false; sentRequestIds.clear(); freshWorkspace = false; agentJoined = false;
+  plugins = structuredClone([{ id: "core", version: "0.2.0", name: "Core", description: "Workspace records and resources.", required: true, attached: true }, { id: "chat", version: "0.2.0", name: "Chat", description: "Conversations for participants.", required: true, attached: true }, { id: "tasks", version: "0.2.0", name: "Tasks", description: "Workspace task store.", required: false, attached: true }, { id: "state", version: "0.2.0", name: "State", description: "Agent-managed state markers.", required: false, attached: true }]);
+  markers = [{ id: "marker-1", title: "Fixture release", definition_id: "release", definition_version: "1", state: "draft", revision: 1, subject: { kind: "task", workspace_id: "workspace-1", store_id: "default", task_id: "fixture-1" }, created_by: "alice" }];
   tasks = [{ id: "fixture-1", task_id: "fixture-1", title: "Fixture task", status: "open", priority: 2, description: "Fixture task description" }];
   calls.splice(0, calls.length);
   messages.splice(5);
@@ -85,7 +96,7 @@ function snapshot(workspaceId = workspace.id) {
   const stores = [{ store: taskStore, tasks }, ...repositories.filter((repository) => repository.task_store_id).map(() => ({ store: projectStore, tasks: [] }))];
   const selected = workspaces.find((item) => item.id === workspaceId) || workspace;
   const joining = freshWorkspace && !agentJoined;
-  return { workspace: { ...selected, repositories, task_stores: stores.map((item) => item.store) }, mail: { participants: joining ? participants.slice(0, 1) : participants, channels, history: joining ? [] : messages }, task_stores: stores, errors: sourceErrors };
+  return { workspace: { ...selected, repositories, task_stores: stores.map((item) => item.store) }, mail: { participants: joining ? participants.slice(0, 1) : participants, channels, history: joining ? [] : messages }, task_stores: stores, plugins, errors: sourceErrors };
 }
 
 function history(args) {
@@ -126,6 +137,11 @@ const server = createServer(async (request, response) => {
     if (payload.operation === "workspace_visit") { const selected = workspaces.find((item) => item.id === args.workspace_id); if (!selected) return send(response, 400, { error: "Unknown or archived workspace." }); recentWorkspaceIds = [selected.id, ...recentWorkspaceIds.filter((id) => id !== selected.id)].slice(0, 20); return send(response, 200, { result: { workspace_id: selected.id } }); }
     if (payload.operation === "workspace_archive") { const selected = workspaces.find((item) => item.id === args.workspace_id) || workspace; workspaces = workspaces.filter((item) => item.id !== args.workspace_id); created = workspaces.length > 0; return send(response, 200, { result: { workspace: { ...selected, archived: true } } }); }
     if (payload.operation === "workspace_snapshot") { if (delaySnapshotMs) await sleep(delaySnapshotMs); return send(response, 200, { result: snapshot(args.workspace_id) }); }
+    if (payload.operation === "plugin_attach" || payload.operation === "plugin_detach") { const item = plugins.find((entry) => entry.id === args.plugin_id); if (!item || item.required) return send(response, 400, { error: "Plugin cannot be changed" }); item.attached = payload.operation === "plugin_attach"; emitChange(["plugins", args.plugin_id === "state" ? "state" : "tasks"], args.workspace_id); return send(response, 200, { result: { plugin: item } }); }
+    if (payload.operation === "plugin_list") return send(response, 200, { result: { plugins } });
+    if (payload.operation === "state_list") { if (stateListFailures > 0) { stateListFailures -= 1; return send(response, 503, { error: "Fixture State store is unavailable" }); } const listed = structuredClone(args.workspace_id === workspace.id ? markers : []); if (delayStateListMs) await sleep(delayStateListMs); return send(response, 200, { result: { markers: listed } }); }
+    if (payload.operation === "state_get") { const marker = markers.find((entry) => entry.id === args.id); return marker ? send(response, 200, { result: { marker, definition: { id: "release", version: "1", label: "Release", states: ["draft", "review", "shipped"], initial: "draft", transitions: [{ from: "draft", to: "review" }, { from: "review", to: "shipped" }] }, history: [{ from: "draft", to: "draft", actor: "alice" }], available_transitions: marker.state === "draft" ? [{ from: "draft", to: "review", label: "Send to review" }] : [{ from: "review", to: "shipped", label: "Mark shipped" }], attached: plugins.find((item) => item.id === "state")?.attached } }) : send(response, 404, { error: "Marker not found" }); }
+    if (payload.operation === "state_advance") { const marker = markers.find((entry) => entry.id === args.id); if (!marker || marker.revision !== args.expected_revision) return send(response, 409, { error: "State marker changed; refresh before trying again." }); marker.state = args.to; marker.revision += 1; emitChange(["state"], args.workspace_id); return send(response, 200, { result: { marker } }); }
     if (payload.operation === "workspace_info") return send(response, 200, { result: { workspace: workspaces.find((item) => item.id === args.workspace_id) || workspace, paths: { workspace: `/private/tmp/orchard-fixture-workspaces/${args.workspace_id}`, artifacts: `/private/tmp/orchard-fixture-workspaces/${args.workspace_id}/artifacts`, readme: `/private/tmp/orchard-fixture-workspaces/${args.workspace_id}/artifacts/README.md` } } });
     if (payload.operation === "workspace_intro") {
       const ref = { kind: "file", workspace_id: args.workspace_id, root_id: "fixture-root", path: "README.md" };
@@ -141,6 +157,7 @@ const server = createServer(async (request, response) => {
       if (kind === "message") { const record = messages.find((entry) => entry.id === ref.id); return record ? send(response, 200, { result: { resource: descriptor("Message", { message: record }), links } }) : send(response, 404, { error: "Message not found" }); }
       if (kind === "agent") return send(response, 200, { result: { resource: descriptor(ref.id, { participant: participants.find((entry) => entry.id === ref.id) }), links } });
       if (kind === "task") { const task = tasks.find((entry) => entry.id === ref.task_id); return task ? send(response, 200, { result: { resource: descriptor(task.title, { task, dependencies: [] }), links } }) : send(response, 404, { error: "Task not found" }); }
+      if (kind === "state") { const marker = markers.find((entry) => entry.id === ref.id); return marker ? send(response, 200, { result: { resource: descriptor(marker.title, { marker, definition: { id: "release", version: "1", label: "Release" }, history: [{ from: "draft", to: "draft", actor: "alice" }], available_transitions: marker.state === "draft" ? [{ from: "draft", to: "review", label: "Send to review" }] : [{ from: "review", to: "shipped", label: "Mark shipped" }], attached: plugins.find((item) => item.id === "state")?.attached }), links } }) : send(response, 404, { error: "Marker not found" }); }
       if (kind === "file") { const file = artifactFiles[ref.path]; return file ? send(response, 200, { result: { resource: descriptor(ref.path, file), links } }) : send(response, 404, { error: "File not found" }); }
       if (kind === "url") return send(response, 200, { result: { resource: descriptor(ref.url, { url: ref.url }), links } });
     }
@@ -184,8 +201,9 @@ const server = createServer(async (request, response) => {
     return send(response, 200, { ok: true });
   }
   if (url.pathname === "/fixture/reset" && request.method === "POST") { resetFixture(); return send(response, 200, { ok: true }); }
-  if (url.pathname === "/fixture/delay" && request.method === "POST") { const value = await bodyOf(request); delaySendMs = Number(value.send || 0); delayAttachMs = Number(value.attach || 0); delayTasksMs = Number(value.tasks || 0); delayActionMs = Number(value.action || 0); delaySnapshotMs = Number(value.snapshot || 0); return send(response, 200, { ok: true }); }
+  if (url.pathname === "/fixture/delay" && request.method === "POST") { const value = await bodyOf(request); delaySendMs = Number(value.send || 0); delayAttachMs = Number(value.attach || 0); delayTasksMs = Number(value.tasks || 0); delayActionMs = Number(value.action || 0); delaySnapshotMs = Number(value.snapshot || 0); delayStateListMs = Number(value.state_list || 0); return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/fail-upload-once" && request.method === "POST") { uploadFailures = 1; return send(response, 200, { ok: true }); }
+  if (url.pathname === "/fixture/fail-state-list" && request.method === "POST") { stateListFailures = 1; return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/lose-mail-response-once" && request.method === "POST") { loseMailResponseOnce = true; return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/fresh-workspace" && request.method === "POST") { freshWorkspace = true; return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/agent-contact" && request.method === "POST") { agentJoined = true; emitChange(["mail"]); return send(response, 200, { ok: true }); }
@@ -194,6 +212,7 @@ const server = createServer(async (request, response) => {
     if (value.task_status) tasks[0].status = value.task_status;
     if (value.file_text) artifactFiles["README.md"] = { ...artifactFiles["README.md"], text: value.file_text };
     if (value.message) messages.push({ id: `external-${messages.length}`, sender_id: "alice", destination: { kind: "channel", id: "general" }, body: value.message, kind: "message" });
+    if (value.marker_state) { markers[0].state = value.marker_state; markers[0].revision += 1; }
     emitChange(value.topics || ["tasks", "mail"], value.workspace_id || workspace.id);
     return send(response, 200, { ok: true });
   }

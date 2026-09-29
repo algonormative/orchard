@@ -25,6 +25,7 @@ impl ToolBackend for CombinedBackend {
         let mut tools = self.mail.tools();
         tools.extend(task_tools());
         tools.extend(resource_tools());
+        tools.extend(plugin_tools());
         tools
     }
 
@@ -37,6 +38,11 @@ impl ToolBackend for CombinedBackend {
             | "workspace_intro" | "workspace_status" | "workspace_alerts" => {
                 call_from_mcp(&self.host, &self.workspace_id, name, args)
             }
+            "plugin_list" | "plugin_inspect" | "plugin_attach" | "plugin_detach"
+            | "plugin_call" | "state_define" | "state_definitions" | "state_create"
+            | "state_list" | "state_get" | "state_advance" => {
+                call_from_mcp(&self.host, &self.workspace_id, name, args)
+            }
             _ if self.mail.tools().iter().any(|tool| tool.name == name) => {
                 call_from_mcp(&self.host, &self.workspace_id, name, args)
             }
@@ -45,7 +51,7 @@ impl ToolBackend for CombinedBackend {
     }
 }
 
-fn resource_tools() -> Vec<ToolDefinition> {
+pub(crate) fn resource_tools() -> Vec<ToolDefinition> {
     vec![
         tool(
             "workspace_intro",
@@ -141,11 +147,11 @@ fn resource_tools() -> Vec<ToolDefinition> {
     ]
 }
 
-fn resource_ref_schema() -> Value {
+pub(crate) fn resource_ref_schema() -> Value {
     json!({
         "type":"object",
         "properties":{
-            "kind":{"type":"string","enum":["channel","direct","broadcast","message","agent","task","file","url"]},
+            "kind":{"type":"string","enum":["channel","direct","broadcast","message","agent","task","state","file","url"]},
             "workspace_id":{"type":"string"},"id":{"type":"string"},"store_id":{"type":"string"},
             "task_id":{"type":"string"},"root_id":{"type":"string"},"path":{"type":"string"},
             "revision":{"type":"string"},"url":{"type":"string"}
@@ -154,7 +160,81 @@ fn resource_ref_schema() -> Value {
     })
 }
 
-fn task_tools() -> Vec<ToolDefinition> {
+fn plugin_tools() -> Vec<ToolDefinition> {
+    vec![
+        tool(
+            "plugin_list",
+            "List bundled workspace plugins and their availability.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        tool(
+            "plugin_inspect",
+            "Inspect a bundled plugin and its operation schemas.",
+            json!({"type":"object","properties":{"plugin_id":{"type":"string"}},"required":["plugin_id"],"additionalProperties":false}),
+        ),
+        tool(
+            "plugin_attach",
+            "Attach an optional bundled plugin idempotently.",
+            json!({"type":"object","properties":{"plugin_id":{"type":"string"},"request_id":{"type":"string"}},"required":["plugin_id","request_id"],"additionalProperties":false}),
+        ),
+        tool(
+            "plugin_detach",
+            "Detach an optional bundled plugin while retaining its data for reads.",
+            json!({"type":"object","properties":{"plugin_id":{"type":"string"},"request_id":{"type":"string"}},"required":["plugin_id","request_id"],"additionalProperties":false}),
+        ),
+        tool(
+            "plugin_call",
+            "Call one operation declared by a bundled plugin; workspace identity is injected.",
+            json!({"type":"object","properties":{"plugin_id":{"type":"string"},"operation":{"type":"string"},"arguments":{"type":"object"}},"required":["plugin_id","operation","arguments"],"additionalProperties":false}),
+        ),
+        tool(
+            "state_define",
+            "Define an immutable declarative state machine.",
+            state_schema("definition"),
+        ),
+        tool(
+            "state_definitions",
+            "List retained state definitions.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        tool(
+            "state_create",
+            "Create a state marker from a definition.",
+            state_schema("create"),
+        ),
+        tool(
+            "state_list",
+            "List retained state markers.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        tool(
+            "state_get",
+            "Read a marker, definition, history, and legal next transitions.",
+            json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false}),
+        ),
+        tool(
+            "state_advance",
+            "Advance a marker with an expected revision.",
+            state_schema("advance"),
+        ),
+    ]
+}
+
+pub(crate) fn state_schema(kind: &str) -> Value {
+    match kind {
+        "definition" => {
+            json!({"type":"object","properties":{"participant_id":{"type":"string"},"request_id":{"type":"string"},"definition":{"type":"object","properties":{"id":{"type":"string"},"version":{"type":"integer","minimum":1},"label":{"type":"string"},"states":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"string"}},"initial":{"type":"string"},"transitions":{"type":"array","maxItems":256,"items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"label":{"type":"string"}},"required":["from","to"],"additionalProperties":false}}},"required":["id","version","label","states","initial","transitions"],"additionalProperties":false}},"required":["participant_id","request_id","definition"],"additionalProperties":false})
+        }
+        "create" => {
+            json!({"type":"object","properties":{"participant_id":{"type":"string"},"request_id":{"type":"string"},"id":{"type":"string"},"title":{"type":"string"},"definition_id":{"type":"string"},"definition_version":{"type":"integer","minimum":1},"subject":resource_ref_schema()},"required":["participant_id","request_id","id","title","definition_id","definition_version","subject"],"additionalProperties":false})
+        }
+        _ => {
+            json!({"type":"object","properties":{"participant_id":{"type":"string"},"request_id":{"type":"string"},"id":{"type":"string"},"expected_revision":{"type":"integer","minimum":1},"to":{"type":"string"},"note":{"type":"string"},"references":{"type":"array","maxItems":32,"items":resource_ref_schema()}},"required":["participant_id","request_id","id","expected_revision","to"],"additionalProperties":false})
+        }
+    }
+}
+
+pub(crate) fn task_tools() -> Vec<ToolDefinition> {
     vec![
         tool(
             "workspace_info",
@@ -236,6 +316,14 @@ fn task_tools() -> Vec<ToolDefinition> {
             task_ref_schema(),
         ),
     ]
+}
+
+pub(crate) fn host_tool_schema(name: &str) -> Option<Value> {
+    task_tools()
+        .into_iter()
+        .chain(resource_tools())
+        .find(|tool| tool.name == name)
+        .map(|tool| tool.input_schema)
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> ToolDefinition {

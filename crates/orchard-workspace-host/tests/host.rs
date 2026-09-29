@@ -2695,3 +2695,44 @@ fn second_host_cannot_open_same_data_root() {
     assert!(matches!(second, Err(HostError::AlreadyRunning)));
     drop(first);
 }
+
+#[test]
+fn state_plugin_detach_attach_and_retained_reads() {
+    let temp = TempDir::new().unwrap();
+    let host = WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap();
+    let (workspace_id, _, _) = create_workspace(&host, "State plugin");
+    let detached = host
+        .call("state_definitions", json!({"workspace_id":workspace_id}))
+        .unwrap();
+    assert_eq!(detached["definitions"], json!([]));
+    host.call("mail_register", json!({"workspace_id":workspace_id,"request_id":"register-alice","participant_id":"alice","name":"Alice"})).unwrap();
+    let blocked = host.call("state_define", json!({
+        "workspace_id":workspace_id,"participant_id":"alice","request_id":"blocked",
+        "definition":{"id":"review","version":1,"label":"Review","states":["open"],"initial":"open","transitions":[]}
+    }));
+    assert!(blocked.unwrap_err().contains("detached"));
+    let attached = host
+        .call(
+            "plugin_attach",
+            json!({"workspace_id":workspace_id,"plugin_id":"state","request_id":"attach-state"}),
+        )
+        .unwrap();
+    assert_eq!(attached["plugin"]["attached"], true);
+    let definition = json!({"id":"review","version":1,"label":"Review","states":["open","done"],"initial":"open","transitions":[{"from":"open","to":"done"}]});
+    host.call("state_define", json!({"workspace_id":workspace_id,"participant_id":"alice","request_id":"define-review","definition":definition})).unwrap();
+    let replay = host.call("state_define", json!({"workspace_id":workspace_id,"participant_id":"alice","request_id":"define-review","definition":definition})).unwrap();
+    assert_eq!(replay["idempotent_replay"], true);
+    host.call(
+        "plugin_detach",
+        json!({"workspace_id":workspace_id,"plugin_id":"state","request_id":"detach-state"}),
+    )
+    .unwrap();
+    assert_eq!(
+        host.call("state_definitions", json!({"workspace_id":workspace_id}))
+            .unwrap()["definitions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}

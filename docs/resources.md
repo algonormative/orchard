@@ -1,5 +1,10 @@
 # Orchard resources
 
+State markers are canonical resources at `/w/{workspace}/states/{id}` with
+`kind: "state"`. A state subject must be a same-workspace canonical resource;
+file subjects also require a full 40-character Git revision so an evolving
+working-tree file cannot be silently reinterpreted.
+
 Orchard presents workspace content through one resource model while leaving
 Mail, Beads, and Git as their respective systems of record. Resource reads do
 not rewrite source records. Crosslinks are immutable Orchard Mail records in

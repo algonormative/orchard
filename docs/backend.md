@@ -95,6 +95,17 @@ before the shared `MailService` call. Task responses always carry a qualified
 `task_ref: {store_id, task_id}`, because different stores may contain the same
 task ID.
 
+## Bundled plugins and State
+
+Orchard v0.2 ships a bounded registry rather than a plugin loader. Core and
+Chat are required; Tasks remains attached by default for both upgraded and new
+workspaces as a deliberate compatibility default; State starts detached.
+Attachment state, receipts, State definitions, markers, and histories live in
+`<workspace>/.orchard/plugins.sqlite`, not in `config.json`. Back up that
+workspace-local database together with its `-wal` and `-shm` siblings while
+the host is stopped. See [plugins.md](plugins.md) for the fixed discovery and
+gateway contract.
+
 Repository views add `name`, `task_store_id`, `task_status`, and `task_error`.
 `task_status` is one of `linked`, `none`, `missing`, or `unsupported`.
 Task-store views add `name`, `source`, and `repository_id`; `source` is one of

@@ -2,6 +2,7 @@ mod beads;
 mod config;
 mod events;
 mod mcp;
+mod plugins;
 mod reconcile;
 mod resources;
 
@@ -282,6 +283,11 @@ impl WorkspaceHost {
             "repository_detach" => self.repository_detach(args),
             "task_store_attach" => self.task_store_attach(args),
             "task_store_detach" => self.task_store_detach(args),
+            "plugin_list" => self.plugin_list(args),
+            "plugin_inspect" => self.plugin_inspect(args),
+            "plugin_attach" => self.plugin_attach(args),
+            "plugin_detach" => self.plugin_detach(args),
+            "plugin_call" => self.plugin_call(args),
             "tasks_list" => self.tasks_list(args),
             "task_show" => self.task_show(args),
             "task_create" => self.task_create(args),
@@ -289,6 +295,12 @@ impl WorkspaceHost {
             "task_claim" => self.task_claim(args),
             "task_close" => self.task_close(args),
             "task_dependencies" => self.task_dependencies(args),
+            "state_define" => self.state_define(args),
+            "state_definitions" => self.state_definitions(args),
+            "state_create" => self.state_create(args),
+            "state_list" => self.state_list(args),
+            "state_get" => self.state_get(args),
+            "state_advance" => self.state_advance(args),
             "resource_get" => self.resource_get(args),
             "resource_links" => self.resource_links(args),
             "resource_link" => self.resource_link(args),
@@ -829,6 +841,7 @@ impl WorkspaceHost {
     }
 
     fn task_create(&self, args: Value) -> Result<Value, String> {
+        self.ensure_plugin_write(&args, "tasks")?;
         let args = object(args)?;
         let workspace_id = required_string(&args, "workspace_id")?;
         let store_id = required_string(&args, "store_id")?;
@@ -870,6 +883,7 @@ impl WorkspaceHost {
     }
 
     fn task_update(&self, args: Value) -> Result<Value, String> {
+        self.ensure_plugin_write(&args, "tasks")?;
         let args = object(args)?;
         let workspace_id = required_string(&args, "workspace_id")?;
         let store_id = required_string(&args, "store_id")?;
@@ -923,6 +937,7 @@ impl WorkspaceHost {
     }
 
     fn task_claim(&self, args: Value) -> Result<Value, String> {
+        self.ensure_plugin_write(&args, "tasks")?;
         let args = object(args)?;
         let workspace_id = required_string(&args, "workspace_id")?;
         let store_id = required_string(&args, "store_id")?;
@@ -970,6 +985,7 @@ impl WorkspaceHost {
     }
 
     fn task_close(&self, args: Value) -> Result<Value, String> {
+        self.ensure_plugin_write(&args, "tasks")?;
         let args = object(args)?;
         let workspace_id = required_string(&args, "workspace_id")?;
         let store_id = required_string(&args, "store_id")?;
@@ -1277,8 +1293,16 @@ impl WorkspaceHost {
             })
             .collect::<Vec<_>>();
 
+        let plugins = match self.plugin_list(json!({"workspace_id":workspace_id})) {
+            Ok(value) => value["plugins"].clone(),
+            Err(error) => {
+                errors.push(json!({"source":"plugins","error":error}));
+                plugins::unavailable_plugin_catalog("plugin state unavailable")["plugins"].clone()
+            }
+        };
         Ok(json!({
             "workspace": workspace_view(&workspace),
+            "plugins": plugins,
             "mail": mail_snapshot,
             "repositories": repositories,
             "task_stores": task_stores,
@@ -1309,6 +1333,13 @@ impl WorkspaceHost {
         self.active_runtime(&workspace_id)?;
         let workspace = self.workspace_config(&workspace_id)?;
         let artifacts = workspace.root.join("artifacts");
+        let (plugins, plugin_error) = match self.plugin_list(json!({"workspace_id":workspace_id})) {
+            Ok(value) => (value["plugins"].clone(), Value::Null),
+            Err(error) => (
+                plugins::unavailable_plugin_catalog("plugin state unavailable")["plugins"].clone(),
+                Value::String(error),
+            ),
+        };
         Ok(json!({
             "workspace": workspace_view(&workspace),
             "owner_participant_id": "owner",
@@ -1322,7 +1353,9 @@ impl WorkspaceHost {
                 "resources": ["resource_get","resource_links","resource_link","workspace_intro","workspace_status","workspace_alerts","artifact_roots","artifact_list","artifact_history","artifact_upload","artifact_delete","artifact_commit"]
             },
             "paths": {"workspace":workspace.root,"artifacts":artifacts,"readme":artifacts.join("README.md")},
-            "task_backend": task_backend_view(&self.inner.beads)
+            "task_backend": task_backend_view(&self.inner.beads),
+            "plugins": plugins,
+            "plugin_error": plugin_error
         }))
     }
 
@@ -2125,6 +2158,8 @@ fn mutation_topics(operation: &str) -> Option<&'static [&'static str]> {
         | "mail_send"
         | "mail_acknowledge" => Some(&["mail"]),
         "task_create" | "task_update" | "task_claim" | "task_close" => Some(&["tasks", "mail"]),
+        "plugin_attach" | "plugin_detach" => Some(&["plugins"]),
+        "state_define" | "state_create" | "state_advance" => Some(&["state"]),
         "repository_attach" | "repository_detach" | "task_store_attach" | "task_store_detach" => {
             Some(&["repositories", "tasks", "artifacts"])
         }
