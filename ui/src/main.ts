@@ -1,5 +1,6 @@
 import "./style.css";
 import { canonicalHref, parseHref, type Descriptor, type ResourceRef } from "./resources";
+import { stateDiagram } from "./state-diagram";
 
 type Json = Record<string, unknown>;
 type Workspace = { id: string; name: string; archived?: boolean };
@@ -1069,6 +1070,7 @@ function renderResourceDetail(resource: Json, links: Json) {
     }
     const definitionVersion = definition.version ?? marker.definition_version;
     panel.append(el("p", "muted", `Definition ${string(definition.label) || string(marker.definition_id) || "unknown"} · v${definitionVersion === undefined || definitionVersion === null ? "?" : String(definitionVersion)}`));
+    const diagram = stateDiagram(definition, string(marker.state)); if (diagram) panel.append(diagram);
     panel.append(el("p", "muted", `Actor: ${string(marker.created_by) || "unknown"}`));
     const history = array(data.history); const historySection = el("section", "state-history"); historySection.append(el("h3", "", "History"));
     if (!history.length) historySection.append(el("p", "muted", "No recorded transitions."));
@@ -2052,9 +2054,10 @@ async function refreshStateViews(workspaceId: string) {
   if (state.activeHref === collectionTab("states", workspaceId).href) { renderStateCollectionRetained(); return; }
   const active = state.activeResource;
   if (active?.ref.kind !== "state" || state.detailView === "form") return;
-  const epoch = state.navigationEpoch; const panel = document.querySelector<HTMLElement>("#conversation"); if (!panel) return; const scroll = panel.scrollTop;
-  if (hasSelectionWithin(panel) || (document.activeElement !== document.body && panel.contains(document.activeElement))) { statePatchPending = true; return; }
-  try { const result = await call("resource_get", { workspace_id: workspaceId, ref: active.ref }); if (state.workspace?.id !== workspaceId || state.navigationEpoch !== epoch || state.activeHref !== active.href) return; state.resourceData = object(result.resource); state.resourceLinks = object(result.links); statePatchPending = false; renderResourceDetail(state.resourceData, state.resourceLinks); panel.scrollTop = scroll; }
+  const epoch = state.navigationEpoch; const panel = document.querySelector<HTMLElement>("#conversation"); if (!panel) return;
+  const busy = () => { const diagram = panel.querySelector<HTMLElement>("[data-state-diagram]"); return hasSelectionWithin(panel) || (document.activeElement !== document.body && panel.contains(document.activeElement) && document.activeElement !== diagram); };
+  if (busy()) { statePatchPending = true; return; }
+  try { const result = await call("resource_get", { workspace_id: workspaceId, ref: active.ref }); if (state.workspace?.id !== workspaceId || state.navigationEpoch !== epoch || state.activeHref !== active.href) return; if (busy()) { statePatchPending = true; return; } const scroll = panel.scrollTop; const diagramScroll = panel.querySelector<HTMLElement>("[data-state-diagram]"); const diagramPosition = diagramScroll ? { left: diagramScroll.scrollLeft, top: diagramScroll.scrollTop, focused: document.activeElement === diagramScroll } : undefined; state.resourceData = object(result.resource); state.resourceLinks = object(result.links); statePatchPending = false; renderResourceDetail(state.resourceData, state.resourceLinks); panel.scrollTop = scroll; const replacement = panel.querySelector<HTMLElement>("[data-state-diagram]"); if (replacement && diagramPosition) { replacement.scrollLeft = diagramPosition.left; replacement.scrollTop = diagramPosition.top; if (diagramPosition.focused) replacement.focus({ preventScroll: true }); } }
   catch (error) { notice(message(error), "error"); }
 }
 

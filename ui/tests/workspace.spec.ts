@@ -356,6 +356,27 @@ test("State guidance and work opportunities show honest readiness and refresh wi
   await expect(page.locator("#conversation")).toContainText("Subject task closed");
 });
 
+test("State map shows branches, cycles, self-loops, and current initial terminal markers", async ({ page, request }) => {
+  await request.post("/fixture/state-definition", { data: { definition: { id: "release", version: "2", label: "Release", states: ["draft", "review", "blocked", "shipped", "orphan"], initial: "draft", transitions: [{ from: "draft", to: "review", label: "submit" }, { from: "draft", to: "blocked", label: "hold" }, { from: "review", to: "draft", label: "revise" }, { from: "blocked", to: "blocked", label: "wait" }, { from: "review", to: "shipped", label: "ship" }] } } });
+  await unlock(page); await page.goto("/w/workspace-1/~states"); await page.locator("#conversation").getByRole("button", { name: /Fixture release.*draft/ }).click();
+  const map = page.locator(".state-diagram"); await expect(map).toContainText("State map"); await expect(map.locator("svg.state-diagram-graph")).toHaveAttribute("role", "img"); await expect(map.locator(".state-diagram-edge")).toHaveCount(5); await expect(map.locator(".state-diagram-node.is-current")).toContainText("draft"); await expect(map.locator(".state-diagram-node").filter({ hasText: "draft" })).toContainText("initial"); await expect(map.locator(".state-diagram-node").filter({ hasText: "shipped" })).toContainText("terminal"); await expect(map.locator(".state-diagram-node").filter({ hasText: "orphan" })).toContainText("terminal");
+});
+
+test("State map treats hostile text as text and confines long labels on mobile", async ({ page, request }) => {
+  const hostile = "<img src=x onerror=alert(1)>"; const long = "界".repeat(40);
+  await request.post("/fixture/state-definition", { data: { definition: { states: ["draft", long], initial: "draft", transitions: [{ from: "draft", to: long, label: hostile }] } } });
+  await unlock(page); await page.setViewportSize({ width: 375, height: 720 }); await page.goto("/w/workspace-1/~states"); await page.locator("#conversation").getByRole("button", { name: /Fixture release.*draft/ }).click();
+  const map = page.locator(".state-diagram"); const edgeLabel = map.locator(".state-diagram-edge-label"); await expect(map.locator("img")).toHaveCount(0); await expect(edgeLabel.locator("title")).toContainText(hostile); expect(await edgeLabel.evaluate((node) => node.firstChild?.textContent)).toBe(`${hostile.slice(0, 17)}…`); expect(await map.locator(".state-diagram-scroll").evaluate((node) => node.scrollWidth > node.clientWidth)).toBeTruthy();
+});
+
+test("State map updates the current highlight and retains its focused scroll position", async ({ page, request }) => {
+  const states = Array.from({ length: 8 }, (_, index) => `state-${index}`); const transitions = states.slice(0, -1).map((from, index) => ({ from, to: states[index + 1], label: `to ${index + 1}` }));
+  await request.post("/fixture/state-definition", { data: { definition: { states, initial: "state-0", transitions } } });
+  await unlock(page); await page.goto("/w/workspace-1/~states"); await page.locator("#conversation").getByRole("button", { name: /Fixture release.*draft/ }).click();
+  const scroll = page.locator(".state-diagram-scroll"); await scroll.evaluate((node: HTMLElement) => { node.scrollLeft = 280; node.scrollTop = 12; node.focus(); }); await request.post("/fixture/external-change", { data: { marker_state: "state-3", topics: ["state"] } });
+  await expect(page.locator(".state-diagram-node.is-current")).toContainText("state-3"); expect(await scroll.evaluate((node: HTMLElement) => ({ left: node.scrollLeft, focused: document.activeElement === node }))).toEqual({ left: 280, focused: true });
+});
+
 test("work opportunities have an empty and retryable error state", async ({ page, request }) => {
   await unlock(page);
   await request.post("/fixture/fail-state-opportunities");
