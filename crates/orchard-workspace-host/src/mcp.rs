@@ -38,11 +38,18 @@ impl ToolBackend for CombinedBackend {
             | "workspace_intro" | "workspace_status" | "workspace_alerts" => {
                 call_from_mcp(&self.host, &self.workspace_id, name, args)
             }
-            "plugin_list" | "plugin_inspect" | "plugin_attach" | "plugin_detach"
-            | "plugin_call" | "state_define" | "state_definitions" | "state_create"
-            | "state_list" | "state_get" | "state_advance" => {
-                call_from_mcp(&self.host, &self.workspace_id, name, args)
-            }
+            "plugin_list"
+            | "plugin_inspect"
+            | "plugin_attach"
+            | "plugin_detach"
+            | "plugin_call"
+            | "state_define"
+            | "state_definitions"
+            | "state_create"
+            | "state_list"
+            | "state_get"
+            | "state_opportunities"
+            | "state_advance" => call_from_mcp(&self.host, &self.workspace_id, name, args),
             _ if self.mail.tools().iter().any(|tool| tool.name == name) => {
                 call_from_mcp(&self.host, &self.workspace_id, name, args)
             }
@@ -213,6 +220,11 @@ fn plugin_tools() -> Vec<ToolDefinition> {
             json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false}),
         ),
         tool(
+            "state_opportunities",
+            "Discover nonterminal State markers filtered by state, capability, or task assignment.",
+            state_schema("opportunities"),
+        ),
+        tool(
             "state_advance",
             "Advance a marker with an expected revision.",
             state_schema("advance"),
@@ -223,10 +235,13 @@ fn plugin_tools() -> Vec<ToolDefinition> {
 pub(crate) fn state_schema(kind: &str) -> Value {
     match kind {
         "definition" => {
-            json!({"type":"object","properties":{"participant_id":{"type":"string"},"request_id":{"type":"string"},"definition":{"type":"object","properties":{"id":{"type":"string"},"version":{"type":"integer","minimum":1},"label":{"type":"string"},"states":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"string"}},"initial":{"type":"string"},"transitions":{"type":"array","maxItems":256,"items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"label":{"type":"string"}},"required":["from","to"],"additionalProperties":false}}},"required":["id","version","label","states","initial","transitions"],"additionalProperties":false}},"required":["participant_id","request_id","definition"],"additionalProperties":false})
+            json!({"type":"object","properties":{"participant_id":{"type":"string"},"request_id":{"type":"string"},"definition":{"type":"object","properties":{"id":{"type":"string"},"version":{"type":"integer","minimum":1},"label":{"type":"string"},"states":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"string"}},"initial":{"type":"string"},"state_guidance":{"type":"object","maxProperties":64,"additionalProperties":{"type":"object","properties":{"instructions":{"type":"string","maxLength":4000},"capabilities":{"type":"array","maxItems":32,"items":{"type":"string","maxLength":128}}},"required":["instructions"],"additionalProperties":false}},"transitions":{"type":"array","maxItems":256,"items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"label":{"type":"string"},"instructions":{"type":"string","maxLength":4000},"prerequisites":{"type":"array","maxItems":32,"items":{"oneOf":[{"type":"object","properties":{"kind":{"const":"subject_task_closed"}},"required":["kind"],"additionalProperties":false},{"type":"object","properties":{"kind":{"const":"reference_kind"},"resource_kind":{"enum":["file","message","task"]}},"required":["kind","resource_kind"],"additionalProperties":false}]}}},"required":["from","to"],"additionalProperties":false}}},"required":["id","version","label","states","initial","transitions"],"additionalProperties":false}},"required":["participant_id","request_id","definition"],"additionalProperties":false})
         }
         "create" => {
             json!({"type":"object","properties":{"participant_id":{"type":"string"},"request_id":{"type":"string"},"id":{"type":"string"},"title":{"type":"string"},"definition_id":{"type":"string"},"definition_version":{"type":"integer","minimum":1},"subject":resource_ref_schema()},"required":["participant_id","request_id","id","title","definition_id","definition_version","subject"],"additionalProperties":false})
+        }
+        "opportunities" => {
+            json!({"type":"object","properties":{"state":{"type":"string","maxLength":128},"capability":{"type":"string","maxLength":128},"unassigned":{"type":"boolean"}},"additionalProperties":false})
         }
         _ => {
             json!({"type":"object","properties":{"participant_id":{"type":"string"},"request_id":{"type":"string"},"id":{"type":"string"},"expected_revision":{"type":"integer","minimum":1},"to":{"type":"string"},"note":{"type":"string"},"references":{"type":"array","maxItems":32,"items":resource_ref_schema()}},"required":["participant_id","request_id","id","expected_revision","to"],"additionalProperties":false})

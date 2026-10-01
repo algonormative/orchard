@@ -300,6 +300,7 @@ impl WorkspaceHost {
             "state_create" => self.state_create(args),
             "state_list" => self.state_list(args),
             "state_get" => self.state_get(args),
+            "state_opportunities" => self.state_opportunities(args),
             "state_advance" => self.state_advance(args),
             "resource_get" => self.resource_get(args),
             "resource_links" => self.resource_links(args),
@@ -1350,7 +1351,8 @@ impl WorkspaceHost {
                     json!(["tasks_list","task_show","task_create","task_update","task_claim","task_close","task_dependencies"])
                 } else { json!([]) },
                 "task_dependencies_mutable": false,
-                "resources": ["resource_get","resource_links","resource_link","workspace_intro","workspace_status","workspace_alerts","artifact_roots","artifact_list","artifact_history","artifact_upload","artifact_delete","artifact_commit"]
+                "resources": ["resource_get","resource_links","resource_link","workspace_intro","workspace_status","workspace_alerts","artifact_roots","artifact_list","artifact_history","artifact_upload","artifact_delete","artifact_commit"],
+                "state": ["state_list","state_get","state_opportunities"]
             },
             "paths": {"workspace":workspace.root,"artifacts":artifacts,"readme":artifacts.join("README.md")},
             "task_backend": task_backend_view(&self.inner.beads),

@@ -148,6 +148,11 @@ fn bundled_catalog_and_inspection_make_capabilities_discoverable() {
         advance_schema["properties"]["expected_revision"]["minimum"],
         1
     );
+    let opportunities_schema = operation("state_opportunities")["input_schema"].clone();
+    assert_eq!(
+        opportunities_schema["properties"]["unassigned"]["type"],
+        "boolean"
+    );
     let core = call(
         &host,
         "plugin_inspect",
@@ -235,6 +240,7 @@ async fn one_mcp_session_can_attach_and_use_state_without_refreshing_tools() {
     let tools = client.list_all_tools().await.unwrap(); // exactly one tools/list for this session
     assert!(tools.iter().any(|tool| tool.name == "plugin_call"));
     assert!(tools.iter().any(|tool| tool.name == "state_advance"));
+    assert!(tools.iter().any(|tool| tool.name == "state_opportunities"));
     for plugin_id in ["core", "chat"] {
         let inspected = client
             .call_tool(mcp_call("plugin_inspect", json!({"plugin_id":plugin_id})))
@@ -284,7 +290,189 @@ async fn one_mcp_session_can_attach_and_use_state_without_refreshing_tools() {
         json!({"id":"mcp-marker"}),
     );
     assert_eq!(detail["marker"]["state"], "review");
+    let opportunities = client
+        .call_tool(mcp_call("state_opportunities", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(opportunities.is_error, Some(false));
     server.shutdown().await.unwrap();
+}
+
+#[test]
+fn state_workflow_guidance_guards_and_opportunities_are_observed_and_enforced() {
+    let temp = TempDir::new().unwrap();
+    let host = new_host(&temp);
+    let (workspace_id, store_id, _) = workspace(&host, "Workflow");
+    register(&host, &workspace_id, "alice");
+    attach_state(&host, &workspace_id);
+    let task = call(
+        &host,
+        "task_create",
+        &workspace_id,
+        json!({"store_id":store_id,"request_id":"workflow-task","title":"Close gate"}),
+    );
+    let task_ref = json!({"kind":"task","store_id":store_id,"task_id":task["task"]["id"]});
+    let definition = json!({
+        "id":"workflow", "version":1, "label":"Workflow", "states":["draft","review","done"], "initial":"draft",
+        "state_guidance":{"draft":{"instructions":"Prepare evidence.","capabilities":["writer"]},"review":{"instructions":"Review it.","capabilities":["reviewer"]}},
+        "transitions":[
+            {"from":"draft","to":"review","instructions":"Attach a pinned file.","prerequisites":[{"kind":"reference_kind","resource_kind":"file"}]},
+            {"from":"review","to":"done","prerequisites":[{"kind":"subject_task_closed"},{"kind":"reference_kind","resource_kind":"file"}]}
+        ]
+    });
+    call(
+        &host,
+        "state_define",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"workflow-definition","definition":definition}),
+    );
+    call(
+        &host,
+        "state_create",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"workflow-marker","id":"workflow-marker","title":"Workflow marker","definition_id":"workflow","definition_version":1,"subject":task_ref}),
+    );
+    let initial = call(
+        &host,
+        "state_get",
+        &workspace_id,
+        json!({"id":"workflow-marker"}),
+    );
+    assert_eq!(initial["guidance"]["capabilities"], json!(["writer"]));
+    assert_eq!(initial["task"]["status"], "open");
+    assert_eq!(
+        initial["available_transitions"][0]["readiness"],
+        "needs_input"
+    );
+    let writer_opportunities = call(
+        &host,
+        "state_opportunities",
+        &workspace_id,
+        json!({"state":"draft","capability":"writer","unassigned":true}),
+    );
+    assert_eq!(
+        writer_opportunities["opportunities"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        writer_opportunities["opportunities"][0]["resource"]["kind"],
+        "state"
+    );
+    assert!(call(
+        &host,
+        "state_opportunities",
+        &workspace_id,
+        json!({"state":"review","capability":"writer"})
+    )["opportunities"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(call(
+        &host,
+        "state_opportunities",
+        &workspace_id,
+        json!({"capability":"review"})
+    )["opportunities"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(error(&host, "state_advance", &workspace_id, json!({"participant_id":"alice","request_id":"missing-evidence","id":"workflow-marker","expected_revision":1,"to":"review"})).contains("needs_input"));
+    let absent_file = json!({"kind":"file","root_id":"artifacts","path":"missing.md","revision":"0000000000000000000000000000000000000000"});
+    assert!(error(&host, "state_advance", &workspace_id, json!({"participant_id":"alice","request_id":"missing-file","id":"workflow-marker","expected_revision":1,"to":"review","references":[absent_file]})).contains("blocked"));
+    let uploaded = call(
+        &host,
+        "artifact_upload",
+        &workspace_id,
+        json!({"path":"evidence.md","content_base64":base64::engine::general_purpose::STANDARD.encode(b"evidence"),"request_id":"workflow-evidence"}),
+    );
+    let evidence = uploaded["resource"]["ref"].clone();
+    let advanced = call(
+        &host,
+        "state_advance",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"advance-with-evidence","id":"workflow-marker","expected_revision":1,"to":"review","references":[evidence]}),
+    );
+    assert_eq!(advanced["marker"]["state"], "review");
+    let review = call(
+        &host,
+        "state_get",
+        &workspace_id,
+        json!({"id":"workflow-marker"}),
+    );
+    assert_eq!(review["available_transitions"][0]["readiness"], "blocked");
+    call(
+        &host,
+        "task_close",
+        &workspace_id,
+        json!({"store_id":store_id,"task_id":task["task"]["id"],"request_id":"close-workflow-task","reason":"done"}),
+    );
+    let needs_evidence = call(
+        &host,
+        "state_get",
+        &workspace_id,
+        json!({"id":"workflow-marker"}),
+    );
+    assert_eq!(
+        needs_evidence["available_transitions"][0]["readiness"],
+        "needs_input"
+    );
+    let final_advance = json!({"participant_id":"alice","request_id":"advance-closed-task","id":"workflow-marker","expected_revision":2,"to":"done","references":[evidence.clone()]});
+    call(&host, "state_advance", &workspace_id, final_advance.clone());
+    call(
+        &host,
+        "task_update",
+        &workspace_id,
+        json!({"store_id":store_id,"task_id":task["task"]["id"],"request_id":"reopen-workflow-task","status":"open"}),
+    );
+    assert_eq!(
+        call(&host, "state_advance", &workspace_id, final_advance)["idempotent_replay"],
+        true
+    );
+    call(
+        &host,
+        "state_create",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"unavailable-store-marker","id":"unavailable-store-marker","title":"Unavailable store","definition_id":"workflow","definition_version":1,"subject":{"kind":"task","store_id":"missing-store","task_id":"missing-task"}}),
+    );
+    let unavailable = call(
+        &host,
+        "state_get",
+        &workspace_id,
+        json!({"id":"unavailable-store-marker"}),
+    );
+    assert!(unavailable.get("task_error").is_some());
+    assert_eq!(
+        unavailable["available_transitions"][0]["readiness"],
+        "blocked"
+    );
+    assert!(error(&host, "state_advance", &workspace_id, json!({"participant_id":"alice","request_id":"unavailable-store-advance","id":"unavailable-store-marker","expected_revision":1,"to":"review","references":[evidence]})).contains("blocked"));
+    assert_eq!(
+        call(
+            &host,
+            "state_get",
+            &workspace_id,
+            json!({"id":"unavailable-store-marker"})
+        )["marker"]["revision"],
+        1
+    );
+
+    let opportunities = call(
+        &host,
+        "state_opportunities",
+        &workspace_id,
+        json!({"capability":"writer","unassigned":true}),
+    );
+    assert!(
+        opportunities["opportunities"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "terminal or assigned markers do not become opportunities"
+    );
+    assert!(error(&host, "state_define", &workspace_id, json!({"participant_id":"alice","request_id":"bad-prerequisite","definition":{"id":"bad","version":1,"label":"Bad","states":["a"],"initial":"a","transitions":[{"from":"a","to":"a","prerequisites":[{"kind":"reference_kind","resource_kind":"url"}]}]}})).contains("file, message, or task"));
 }
 
 #[test]
@@ -376,6 +564,7 @@ fn detach_gates_new_task_and_state_writes_but_keeps_retained_reads() {
     let retained = call(&host, "state_get", &workspace_id, json!({"id":"retained"}));
     assert_eq!(retained["attached"], false);
     assert_eq!(retained["marker"]["state"], "draft");
+    assert_eq!(retained["available_transitions"][0]["readiness"], "blocked");
 }
 
 #[test]
@@ -464,6 +653,50 @@ fn state_enforces_pinned_subjects_immutable_definitions_receipts_and_cas() {
         loser.contains("revision conflict") || loser.contains("current revision"),
         "unexpected CAS error: {loser}"
     );
+    call(
+        &host,
+        "state_create",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"create-replay-race","id":"replay-race","title":"Replay race","definition_id":"review-flow","definition_version":1,"subject":{"kind":"channel","id":"general"}}),
+    );
+    let barrier = Arc::new(Barrier::new(2));
+    let attempts = [(), ()].map(|_| {
+        let host = Arc::clone(&host);
+        let workspace_id = workspace_id.clone();
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            host.call("state_advance", json!({"workspace_id":workspace_id,"participant_id":"alice","request_id":"identical-replay-race","id":"replay-race","to":"review","expected_revision":1}))
+        })
+    });
+    let outcomes = attempts.map(|attempt| {
+        attempt
+            .join()
+            .expect("replay caller must not panic")
+            .expect("identical request must succeed")
+    });
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome["idempotent_replay"] == true)
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.get("idempotent_replay").is_none())
+            .count(),
+        1
+    );
+    let replay_race = call(
+        &host,
+        "state_get",
+        &workspace_id,
+        json!({"id":"replay-race"}),
+    );
+    assert_eq!(replay_race["marker"]["revision"], 2);
+    assert_eq!(replay_race["history"].as_array().unwrap().len(), 2);
     let detail = call(&host, "state_get", &workspace_id, json!({"id":"marker"}));
     assert_eq!(detail["marker"]["state"], "done");
     assert_eq!(detail["history"].as_array().unwrap().len(), 3);

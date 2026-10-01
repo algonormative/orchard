@@ -2,6 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
+use std::sync::{Arc, Mutex};
 
 use crate::{
     object, required_string,
@@ -15,6 +16,8 @@ const TASKS: &str = "tasks";
 const STATE: &str = "state";
 const MAX_STATES: usize = 64;
 const MAX_TRANSITIONS: usize = 256;
+const MAX_PREREQUISITES: usize = 32;
+const MAX_CAPABILITIES: usize = 32;
 
 #[derive(Clone, Copy)]
 struct Manifest {
@@ -95,7 +98,7 @@ const MANIFESTS: &[Manifest] = &[
     },
     Manifest {
         id: STATE,
-        version: 1,
+        version: 2,
         name: "State",
         description: "Declarative workspace state markers.",
         required: false,
@@ -107,6 +110,7 @@ const MANIFESTS: &[Manifest] = &[
             "state_create",
             "state_list",
             "state_get",
+            "state_opportunities",
             "state_advance",
         ],
     },
@@ -452,6 +456,47 @@ impl WorkspaceHost {
         };
         let references = canonical_references(a.get("references"), &w)?;
         let fingerprint = serde_json::to_string(&json!({"participant_id":p,"id":id,"expected_revision":expected,"to":to,"note":note,"references":references})).unwrap();
+        let request_lock = {
+            let mut locks = self.inner.request_locks.lock().unwrap();
+            locks
+                .entry((w.clone(), r.clone()))
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _request_guard = request_lock.lock().unwrap();
+        if let Some(replay) = self.state_replay(&w, STATE, &r, &fingerprint)? {
+            return Ok(replay);
+        }
+        let (marker, definition, _, attached) = self.state_stored_detail(&w, &id)?;
+        if marker["revision"].as_i64() != Some(expected) {
+            return Err(format!(
+                "state marker revision conflict: expected {expected}, current {}",
+                marker["revision"]
+            ));
+        }
+        let transition = declared_transition(&definition, &marker, &to)?;
+        let task_observation = self.marker_task_observation(&w, &marker);
+        let readiness = self.transition_readiness(
+            &w,
+            &marker,
+            &transition,
+            attached,
+            &references,
+            task_observation.as_ref(),
+        );
+        if readiness["readiness"] != "ready" {
+            return Err(format!(
+                "state transition is {}: {}",
+                readiness["readiness"],
+                readiness["reasons"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
         self.state_mutate(&w, STATE, &r, &fingerprint, || self.participant(&w, &p), |tx| {
             let (body, rev): (String, i64) = tx.query_row("SELECT body,revision FROM state_marker WHERE id=?1", [&id], |x| Ok((x.get(0)?, x.get(1)?))).map_err(|_| "unknown state marker".to_owned())?;
             if rev != expected { return Err(format!("state marker revision conflict: expected {expected}, current {rev}")); }
@@ -468,6 +513,30 @@ impl WorkspaceHost {
             tx.execute("INSERT INTO state_history(marker_id,revision,body) VALUES(?1,?2,?3)", params![id, rev + 1, serde_json::to_string(&history).unwrap()]).map_err(|e| e.to_string())?;
             Ok(json!({"marker":marker}))
         })
+    }
+    fn state_replay(
+        &self,
+        workspace_id: &str,
+        plugin: &str,
+        request_id: &str,
+        fingerprint: &str,
+    ) -> Result<Option<Value>, String> {
+        let db = self.plugin_db(workspace_id)?;
+        let item = db.query_row("SELECT fingerprint,outcome FROM plugin_receipt WHERE plugin_id=?1 AND request_id=?2", params![plugin, request_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .optional().map_err(|error| error.to_string())?;
+        item.map(|(old, outcome)| {
+            if old != fingerprint {
+                return Err("request_id was already used for a different request".to_owned());
+            }
+            let mut value: Value =
+                serde_json::from_str(&outcome).map_err(|error| error.to_string())?;
+            value
+                .as_object_mut()
+                .ok_or_else(|| "invalid stored state receipt".to_owned())?
+                .insert("idempotent_replay".to_owned(), Value::Bool(true));
+            Ok(value)
+        })
+        .transpose()
     }
     fn state_mutate<F, V>(
         &self,
@@ -508,6 +577,56 @@ impl WorkspaceHost {
         Ok(outcome)
     }
     pub(crate) fn state_detail(&self, w: &str, id: &str) -> Result<Value, String> {
+        let (marker, definition, history, attached) = self.state_stored_detail(w, id)?;
+        let task_observation = self.marker_task_observation(w, &marker);
+        let transitions = definition["transitions"]
+            .as_array()
+            .ok_or_else(|| "invalid stored state definition transitions".to_owned())?
+            .iter()
+            .filter(|edge| edge["from"] == marker["state"])
+            .map(|edge| {
+                self.transition_readiness(
+                    w,
+                    &marker,
+                    edge,
+                    attached,
+                    &[],
+                    task_observation.as_ref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut response = json!({"marker":marker,"definition":definition,"history":history,"available_transitions":transitions,"attached":attached});
+        if let Some(guidance) =
+            state_guidance(&response["definition"], &response["marker"]["state"])
+        {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("guidance".to_owned(), guidance);
+        }
+        if let Some(task_observation) = task_observation {
+            match task_observation {
+                Ok(task) => {
+                    response
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("task".to_owned(), task);
+                }
+                Err(error) => {
+                    response
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("task_error".to_owned(), Value::String(error));
+                }
+            }
+        }
+        Ok(response)
+    }
+    fn state_stored_detail(
+        &self,
+        w: &str,
+        id: &str,
+    ) -> Result<(Value, Value, Vec<Value>, bool), String> {
         let mut db = self.plugin_db(w)?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -543,13 +662,6 @@ impl WorkspaceHost {
                     .map_err(|e| e.to_string())
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let transitions = definition["transitions"]
-            .as_array()
-            .ok_or_else(|| "invalid stored state definition transitions".to_owned())?
-            .iter()
-            .filter(|x| x["from"] == marker["state"])
-            .cloned()
-            .collect::<Vec<_>>();
         let attached: i64 = tx
             .query_row(
                 "SELECT attached FROM plugin_attachment WHERE plugin_id=?1",
@@ -561,9 +673,209 @@ impl WorkspaceHost {
             .unwrap_or(0);
         drop(stmt);
         tx.commit().map_err(|error| error.to_string())?;
-        Ok(
-            json!({"marker":marker,"definition":definition,"history":history,"available_transitions":transitions,"attached":attached != 0}),
+        Ok((marker, definition, history, attached != 0))
+    }
+    pub(crate) fn state_opportunities(&self, args: Value) -> Result<Value, String> {
+        let args = object(args)?;
+        reject_unknown(
+            &args,
+            &["workspace_id", "state", "capability", "unassigned"],
+        )?;
+        let workspace_id = required_string(&args, "workspace_id")?;
+        let state = args
+            .get("state")
+            .map(|value| {
+                value
+                    .as_str()
+                    .ok_or_else(|| "state must be a string".to_owned())
+            })
+            .transpose()?
+            .map(|value| bounded(value, 128, "state"))
+            .transpose()?;
+        let capability = args
+            .get("capability")
+            .map(|value| {
+                value
+                    .as_str()
+                    .ok_or_else(|| "capability must be a string".to_owned())
+            })
+            .transpose()?
+            .map(|value| bounded(value, 128, "capability"))
+            .transpose()?;
+        let unassigned = args
+            .get("unassigned")
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| "unassigned must be a boolean".to_owned())
+            })
+            .transpose()?
+            .unwrap_or(false);
+        let markers = self.state_list(json!({"workspace_id":workspace_id}))?["markers"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mut opportunities = Vec::new();
+        for marker in markers {
+            if state
+                .as_deref()
+                .is_some_and(|wanted| marker["state"] != wanted)
+            {
+                continue;
+            }
+            let id = marker["id"]
+                .as_str()
+                .ok_or_else(|| "invalid stored state marker id".to_owned())?;
+            let detail = self.state_detail(&workspace_id, id)?;
+            if detail["available_transitions"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+            {
+                continue;
+            }
+            if capability.as_deref().is_some_and(|wanted| {
+                !detail
+                    .pointer("/guidance/capabilities")
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| values.iter().any(|value| value == wanted))
+            }) {
+                continue;
+            }
+            if unassigned
+                && !detail
+                    .get("task")
+                    .is_some_and(|task| task["assignee"].is_null() || task["assignee"] == "")
+            {
+                continue;
+            }
+            let mut opportunity = json!({"marker":detail["marker"],"resource":{"kind":"state","workspace_id":workspace_id,"id":id},"transitions":detail["available_transitions"]});
+            for key in ["guidance", "task", "task_error"] {
+                if let Some(value) = detail.get(key) {
+                    opportunity
+                        .as_object_mut()
+                        .unwrap()
+                        .insert(key.to_owned(), value.clone());
+                }
+            }
+            opportunities.push(opportunity);
+        }
+        Ok(json!({"opportunities":opportunities}))
+    }
+    fn task_observation(
+        &self,
+        workspace_id: &str,
+        reference: &ResourceRef,
+    ) -> Result<Value, String> {
+        let store_id = reference
+            .store_id
+            .as_deref()
+            .ok_or_else(|| "task subject is missing store_id".to_owned())?;
+        let task_id = reference
+            .task_id
+            .as_deref()
+            .ok_or_else(|| "task subject is missing task_id".to_owned())?;
+        self.call(
+            "task_show",
+            json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id}),
         )
+    }
+    fn marker_task_observation(
+        &self,
+        workspace_id: &str,
+        marker: &Value,
+    ) -> Option<Result<Value, String>> {
+        let subject = serde_json::from_value::<ResourceRef>(marker["subject"].clone()).ok()?;
+        matches!(subject.kind, crate::resources::ResourceKind::Task)
+            .then(|| self.task_observation(workspace_id, &subject))
+    }
+    fn transition_readiness(
+        &self,
+        workspace_id: &str,
+        marker: &Value,
+        edge: &Value,
+        attached: bool,
+        supplied_references: &[Value],
+        task_observation: Option<&Result<Value, String>>,
+    ) -> Value {
+        let mut reasons = Vec::new();
+        let mut needs_input = false;
+        let mut blocked = !attached;
+        if !attached {
+            reasons.push("State is detached; readiness cannot be acted on".to_owned());
+        }
+        let subject = serde_json::from_value::<ResourceRef>(marker["subject"].clone());
+        if let Ok(subject) = &subject {
+            if matches!(subject.kind, crate::resources::ResourceKind::Task)
+                && task_observation.is_some_and(Result::is_err)
+            {
+                blocked = true;
+                reasons.push("task subject does not resolve".to_owned());
+            }
+        } else {
+            blocked = true;
+            reasons.push("state marker subject is invalid".to_owned());
+        }
+        for prerequisite in edge["prerequisites"].as_array().into_iter().flatten() {
+            match prerequisite["kind"].as_str() {
+                Some("subject_task_closed") => match &subject {
+                    Ok(subject) if matches!(subject.kind, crate::resources::ResourceKind::Task) => {
+                        match task_observation {
+                            Some(Ok(task)) if task["status"] == "closed" => {}
+                            Some(Ok(_)) => {
+                                blocked = true;
+                                reasons.push("subject task is not closed".to_owned())
+                            }
+                            _ => {
+                                blocked = true;
+                                reasons.push("subject task does not resolve".to_owned())
+                            }
+                        }
+                    }
+                    _ => {
+                        blocked = true;
+                        reasons.push("subject_task_closed requires a task subject".to_owned())
+                    }
+                },
+                Some("reference_kind") => {
+                    let kind = prerequisite["resource_kind"].as_str().unwrap_or_default();
+                    let matching = supplied_references
+                        .iter()
+                        .filter(|reference| reference["kind"] == kind)
+                        .collect::<Vec<_>>();
+                    if matching.is_empty() {
+                        needs_input = true;
+                        reasons.push(format!("requires a submitted {kind} reference"));
+                    } else if !matching.iter().any(|reference| {
+                        self.resource_get(json!({"workspace_id":workspace_id,"ref":reference}))
+                            .is_ok()
+                    }) {
+                        blocked = true;
+                        reasons.push(format!("submitted {kind} reference does not resolve"));
+                    }
+                }
+                _ => {
+                    blocked = true;
+                    reasons.push("invalid stored transition prerequisite".to_owned())
+                }
+            }
+        }
+        let readiness = if blocked {
+            "blocked"
+        } else if needs_input {
+            "needs_input"
+        } else {
+            "ready"
+        };
+        let mut enriched = edge.clone();
+        enriched
+            .as_object_mut()
+            .unwrap()
+            .insert("readiness".to_owned(), Value::String(readiness.to_owned()));
+        enriched
+            .as_object_mut()
+            .unwrap()
+            .insert("reasons".to_owned(), json!(reasons));
+        enriched
     }
 }
 
@@ -580,9 +892,17 @@ fn parse_definition(value: &Value) -> Result<Value, String> {
     let map = value
         .as_object()
         .ok_or_else(|| "definition must be an object".to_owned())?;
-    let allowed: HashSet<&str> = ["id", "version", "label", "states", "initial", "transitions"]
-        .into_iter()
-        .collect();
+    let allowed: HashSet<&str> = [
+        "id",
+        "version",
+        "label",
+        "states",
+        "initial",
+        "transitions",
+        "state_guidance",
+    ]
+    .into_iter()
+    .collect();
     if map.keys().any(|k| !allowed.contains(k.as_str())) {
         return Err("definition contains unknown fields".to_owned());
     }
@@ -624,6 +944,62 @@ fn parse_definition(value: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .filter(|x| names.contains(*x))
         .ok_or_else(|| "definition.initial must be one declared state".to_owned())?;
+    let state_guidance = match map.get("state_guidance") {
+        None => None,
+        Some(Value::Object(entries)) if entries.len() <= MAX_STATES => {
+            let mut normalized = serde_json::Map::new();
+            for (state, guidance) in entries {
+                if !names.contains(state.as_str()) {
+                    return Err("state_guidance keys must be declared states".to_owned());
+                }
+                let guidance = guidance
+                    .as_object()
+                    .ok_or_else(|| "state guidance must be an object".to_owned())?;
+                if guidance
+                    .keys()
+                    .any(|key| key != "instructions" && key != "capabilities")
+                {
+                    return Err("state guidance contains unknown fields".to_owned());
+                }
+                let instructions = guidance
+                    .get("instructions")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "state guidance.instructions is required".to_owned())?;
+                checked_text(instructions, 4000, "state guidance.instructions")?;
+                let capabilities = match guidance.get("capabilities") {
+                    None => None,
+                    Some(Value::Array(items)) if items.len() <= MAX_CAPABILITIES => {
+                        let mut unique = HashSet::new();
+                        for capability in items {
+                            let capability = capability.as_str().ok_or_else(|| {
+                                "state guidance.capabilities must contain strings".to_owned()
+                            })?;
+                            checked_text(capability, 128, "state guidance.capability")?;
+                            if !unique.insert(capability) {
+                                return Err("state guidance.capabilities must be unique".to_owned());
+                            }
+                        }
+                        Some(items.clone())
+                    }
+                    _ => {
+                        return Err(
+                            "state guidance.capabilities must contain at most 32 strings"
+                                .to_owned(),
+                        )
+                    }
+                };
+                let mut item = json!({"instructions":instructions});
+                if let Some(capabilities) = capabilities {
+                    item.as_object_mut()
+                        .unwrap()
+                        .insert("capabilities".to_owned(), Value::Array(capabilities));
+                }
+                normalized.insert(state.clone(), item);
+            }
+            Some(Value::Object(normalized))
+        }
+        _ => return Err("state_guidance must be an object with at most 64 entries".to_owned()),
+    };
     let transitions = map
         .get("transitions")
         .and_then(Value::as_array)
@@ -634,10 +1010,9 @@ fn parse_definition(value: &Value) -> Result<Value, String> {
         let edge = edge
             .as_object()
             .ok_or_else(|| "transition must be an object".to_owned())?;
-        if edge
-            .keys()
-            .any(|k| k != "from" && k != "to" && k != "label")
-        {
+        if edge.keys().any(|k| {
+            k != "from" && k != "to" && k != "label" && k != "instructions" && k != "prerequisites"
+        }) {
             return Err("transition contains unknown fields".to_owned());
         }
         let from = edge
@@ -656,13 +1031,79 @@ fn parse_definition(value: &Value) -> Result<Value, String> {
         if let Some(label) = edge.get("label").and_then(Value::as_str) {
             checked_text(label, 500, "transition.label")?;
         }
+        if edge
+            .get("instructions")
+            .is_some_and(|value| !value.is_string())
+        {
+            return Err("transition.instructions must be a string".to_owned());
+        }
+        if let Some(instructions) = edge.get("instructions").and_then(Value::as_str) {
+            checked_text(instructions, 4000, "transition.instructions")?;
+        }
+        if let Some(prerequisites) = edge.get("prerequisites") {
+            let prerequisites = prerequisites
+                .as_array()
+                .filter(|items| items.len() <= MAX_PREREQUISITES)
+                .ok_or_else(|| {
+                    "transition.prerequisites must contain at most 32 entries".to_owned()
+                })?;
+            let mut seen = HashSet::new();
+            for prerequisite in prerequisites {
+                let prerequisite = prerequisite
+                    .as_object()
+                    .ok_or_else(|| "transition prerequisite must be an object".to_owned())?;
+                match prerequisite.get("kind").and_then(Value::as_str) {
+                    Some("subject_task_closed") if prerequisite.len() == 1 => {
+                        if !seen.insert("subject_task_closed".to_owned()) {
+                            return Err("transition prerequisites must be unique".to_owned());
+                        }
+                    }
+                    Some("reference_kind") if prerequisite.len() == 2 => {
+                        let resource_kind = prerequisite
+                            .get("resource_kind")
+                            .and_then(Value::as_str)
+                            .filter(|kind| matches!(*kind, "file" | "message" | "task"))
+                            .ok_or_else(|| {
+                                "reference_kind resource_kind must be file, message, or task"
+                                    .to_owned()
+                            })?;
+                        if !seen.insert(format!("reference_kind:{resource_kind}")) {
+                            return Err("transition prerequisites must be unique".to_owned());
+                        }
+                    }
+                    _ => return Err("transition prerequisite is invalid".to_owned()),
+                }
+            }
+        }
         if !edges.insert((from, to)) {
             return Err("definition transitions must be unique".to_owned());
         }
     }
-    Ok(
-        json!({"id":id,"version":version,"label":label,"states":states,"initial":initial,"transitions":transitions}),
-    )
+    let mut definition = json!({"id":id,"version":version,"label":label,"states":states,"initial":initial,"transitions":transitions});
+    if let Some(guidance) = state_guidance {
+        definition
+            .as_object_mut()
+            .unwrap()
+            .insert("state_guidance".to_owned(), guidance);
+    }
+    Ok(definition)
+}
+fn state_guidance(definition: &Value, state: &Value) -> Option<Value> {
+    definition
+        .get("state_guidance")?
+        .get(state.as_str()?)
+        .cloned()
+}
+fn declared_transition(definition: &Value, marker: &Value, to: &str) -> Result<Value, String> {
+    definition["transitions"]
+        .as_array()
+        .and_then(|edges| {
+            edges
+                .iter()
+                .find(|edge| edge["from"] == marker["state"] && edge["to"] == to)
+        })
+        .cloned()
+        .ok_or_else(|| "requested state transition is not declared".to_owned())
 }
 fn canonical_subject(value: &Value, w: &str) -> Result<Value, String> {
     let mut subject = value
@@ -725,6 +1166,7 @@ fn operation_schema(name: &str) -> Value {
         "state_get" => {
             json!({"type":"object","properties":{"id":{"type":"string","maxLength":128}},"required":["id"],"additionalProperties":false})
         }
+        "state_opportunities" => crate::mcp::state_schema("opportunities"),
         "state_define" => crate::mcp::state_schema("definition"),
         "state_create" => crate::mcp::state_schema("create"),
         "state_advance" => crate::mcp::state_schema("advance"),
@@ -767,6 +1209,7 @@ fn operation_description(name: &str) -> &'static str {
         "state_create" => "Create a marker for a canonical same-workspace subject.",
         "state_list" => "List retained state markers.",
         "state_get" => "Read marker history and currently available transitions.",
+        "state_opportunities" => "Discover nonterminal markers by workflow state, guidance capability, or task assignment.",
         "state_advance" => "Advance a marker using optimistic revision compare-and-swap.",
         _ => "Bundled workspace operation.",
     }

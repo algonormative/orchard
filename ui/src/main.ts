@@ -69,9 +69,13 @@ const state: {
   stateMarkers: Json[];
   stateMarkersWorkspace?: string;
   stateMarkersLoading?: string;
+  stateOpportunities: Json[];
+  stateOpportunitiesWorkspace?: string;
+  stateOpportunitiesLoading?: string;
+  stateCollectionMode: "markers" | "opportunities";
   formReturn?: AppTab;
   newWorkspaceReturn?: Screen;
-} = { workspaces: [], recentWorkspaceIds: [], conversationKind: "channel", conversationMessages: [], drafts: new Map(), pendingMail: new Map(), replyRevision: new Map(), onboarding: new Map(), taskFilter: "all", workspaceRequest: 0, snapshotRequest: 0, conversationRequest: 0, seenMessageIds: new Set(), unread: new Map(), screen: "workspace", detailEpoch: 0, taskRequest: 0, tabs: [], resourceRequest: 0, navigationEpoch: 0, connection: "disconnected", treeExpanded: new Set(["chats", "tasks", "artifacts", "states"]), artifactRoots: [], artifactEntries: new Map(), artifactExpanded: new Set(), stateMarkers: [] };
+} = { workspaces: [], recentWorkspaceIds: [], conversationKind: "channel", conversationMessages: [], drafts: new Map(), pendingMail: new Map(), replyRevision: new Map(), onboarding: new Map(), taskFilter: "all", workspaceRequest: 0, snapshotRequest: 0, conversationRequest: 0, seenMessageIds: new Set(), unread: new Map(), screen: "workspace", detailEpoch: 0, taskRequest: 0, tabs: [], resourceRequest: 0, navigationEpoch: 0, connection: "disconnected", treeExpanded: new Set(["chats", "tasks", "artifacts", "states"]), artifactRoots: [], artifactEntries: new Map(), artifactExpanded: new Set(), stateMarkers: [], stateOpportunities: [], stateCollectionMode: "markers" };
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string) => {
   const node = document.createElement(tag);
@@ -100,6 +104,10 @@ let stateMarkersFlight: Promise<void> | undefined;
 let stateMarkersVersion = 0;
 let stateMarkersLoadedVersion = -1;
 let stateMarkersError = "";
+let stateOpportunitiesFlight: Promise<void> | undefined;
+let stateOpportunitiesError = "";
+let stateOpportunitiesVersion = 0;
+let stateOpportunitiesLoadedVersion = -1;
 
 function plugins(): Json[] { return array(state.snapshot?.plugins).map(object); }
 function plugin(id: string) { return plugins().find((item) => string(item.id) === id); }
@@ -599,7 +607,7 @@ async function chooseWorkspace(id: string, fromHistory = false, replaceHistory =
   const snapshot = await call("workspace_snapshot", { workspace_id: id });
   if (request !== state.workspaceRequest) return;
   state.workspace = workspace;
-  if (!retainsDrafts) { state.stateMarkers = []; state.stateMarkersWorkspace = undefined; state.stateMarkersLoading = undefined; stateMarkersFlight = undefined; stateMarkersVersion = 0; stateMarkersLoadedVersion = -1; stateMarkersError = ""; }
+  if (!retainsDrafts) { state.stateMarkers = []; state.stateMarkersWorkspace = undefined; state.stateMarkersLoading = undefined; state.stateOpportunities = []; state.stateOpportunitiesWorkspace = undefined; state.stateOpportunitiesLoading = undefined; state.stateCollectionMode = "markers"; stateMarkersFlight = undefined; stateOpportunitiesFlight = undefined; stateMarkersVersion = 0; stateMarkersLoadedVersion = -1; stateOpportunitiesVersion = 0; stateOpportunitiesLoadedVersion = -1; stateMarkersError = ""; stateOpportunitiesError = ""; }
   stopLiveUpdates();
   state.navigationEpoch += 1;
   state.snapshot = snapshot;
@@ -883,12 +891,33 @@ async function loadStateMarkers(force = false) {
   state.stateMarkersLoading = workspaceId;
   const flight = (async () => { try {
     const result = await call("state_list", { workspace_id: workspaceId });
-    if (state.workspace?.id === workspaceId && version === stateMarkersVersion) { state.stateMarkers = array(result.markers).map(object); state.stateMarkersWorkspace = workspaceId; stateMarkersLoadedVersion = version; stateMarkersError = ""; patchConversations(); if (state.activeHref === collectionTab("states", workspaceId).href) renderStateCollection(); }
-  } catch (error) { if (state.workspace?.id === workspaceId && version === stateMarkersVersion) { state.stateMarkersWorkspace = workspaceId; stateMarkersLoadedVersion = version; stateMarkersError = message(error); patchConversations(); if (state.activeHref === collectionTab("states", workspaceId).href) renderStateCollection(); } }
+    if (state.workspace?.id === workspaceId && version === stateMarkersVersion) { state.stateMarkers = array(result.markers).map(object); state.stateMarkersWorkspace = workspaceId; stateMarkersLoadedVersion = version; stateMarkersError = ""; patchConversations(); if (state.activeHref === collectionTab("states", workspaceId).href) renderStateCollectionRetained(); }
+  } catch (error) { if (state.workspace?.id === workspaceId && version === stateMarkersVersion) { state.stateMarkersWorkspace = workspaceId; stateMarkersLoadedVersion = version; stateMarkersError = message(error); patchConversations(); if (state.activeHref === collectionTab("states", workspaceId).href) renderStateCollectionRetained(); } }
   finally { if (state.stateMarkersLoading === workspaceId) state.stateMarkersLoading = undefined; } })();
   stateMarkersFlight = flight;
   try { await flight; } finally { if (stateMarkersFlight === flight) stateMarkersFlight = undefined; }
   if (stateMarkersLoadedVersion < stateMarkersVersion) return loadStateMarkers(false);
+}
+
+async function loadStateOpportunities(force = false) {
+  if (!state.workspace) return;
+  const workspaceId = state.workspace.id;
+  if (force) { stateOpportunitiesVersion += 1; state.stateOpportunitiesWorkspace = undefined; }
+  if (state.stateOpportunitiesWorkspace === workspaceId && stateOpportunitiesLoadedVersion >= stateOpportunitiesVersion) return;
+  if (stateOpportunitiesFlight) { await stateOpportunitiesFlight; return loadStateOpportunities(false); }
+  const version = stateOpportunitiesVersion;
+  state.stateOpportunitiesLoading = workspaceId;
+  const flight = (async () => {
+    try {
+      const result = await call("state_opportunities", { workspace_id: workspaceId });
+      if (state.workspace?.id === workspaceId && version === stateOpportunitiesVersion) { state.stateOpportunities = array(result.opportunities).map(object); state.stateOpportunitiesWorkspace = workspaceId; stateOpportunitiesLoadedVersion = version; stateOpportunitiesError = ""; if (state.activeHref === collectionTab("states", workspaceId).href && state.stateCollectionMode === "opportunities") renderStateCollectionRetained(); }
+    } catch (error) {
+      if (state.workspace?.id === workspaceId && version === stateOpportunitiesVersion) { state.stateOpportunities = []; state.stateOpportunitiesWorkspace = workspaceId; stateOpportunitiesLoadedVersion = version; stateOpportunitiesError = message(error); if (state.activeHref === collectionTab("states", workspaceId).href && state.stateCollectionMode === "opportunities") renderStateCollectionRetained(); }
+    } finally { if (state.stateOpportunitiesLoading === workspaceId) state.stateOpportunitiesLoading = undefined; }
+  })();
+  stateOpportunitiesFlight = flight;
+  try { await flight; } finally { if (stateOpportunitiesFlight === flight) stateOpportunitiesFlight = undefined; }
+  if (stateOpportunitiesLoadedVersion < stateOpportunitiesVersion) return loadStateOpportunities(false);
 }
 
 function patchTabs() {
@@ -1021,6 +1050,23 @@ function renderResourceDetail(resource: Json, links: Json) {
     const subject = object(marker.subject); const attached = data.attached !== false && pluginAttached("state");
     panel.append(el("p", "task-metadata", `State: ${string(marker.state) || "unknown"} · revision ${marker.revision === undefined ? "0" : String(marker.revision)}`));
     if (string(subject.kind) && subject.workspace_id === state.workspace?.id) { const subjectActions = el("div", "resource-actions"); subjectActions.append(button(`Subject: ${string(subject.path) || string(subject.title) || string(subject.id) || string(subject.task_id) || string(subject.kind)}`, () => void openResource(descriptor(subject as ResourceRef, string(subject.path) || string(subject.id) || string(subject.kind))), "subtle")); panel.append(subjectActions); }
+    const guidance = object(data.guidance);
+    if (string(guidance.instructions) || array(guidance.capabilities).length) {
+      const section = el("section", "state-guidance"); section.append(el("h3", "", "Guidance"));
+      if (string(guidance.instructions)) section.append(el("p", "", string(guidance.instructions)));
+      const capabilities = array(guidance.capabilities).map(string).filter(Boolean);
+      if (capabilities.length) section.append(el("p", "muted", `Relevant capabilities: ${capabilities.join(", ")}`));
+      panel.append(section);
+    }
+    const observedTask = object(data.task);
+    if (Object.keys(observedTask).length) {
+      const taskRef = subject.kind === "task" && subject.workspace_id === state.workspace?.id ? subject as ResourceRef : undefined;
+      const section = el("section", "state-observed-task"); section.append(el("h3", "", "Observed task"));
+      const title = string(observedTask.title) || string(observedTask.id) || string(taskRef?.task_id) || "Task";
+      if (taskRef?.store_id && taskRef.task_id) section.append(button(title, () => void openResource(descriptor(taskRef, title)), "subtle")); else section.append(el("p", "", title));
+      section.append(el("p", "muted", taskMetadata(observedTask)));
+      panel.append(section);
+    }
     const definitionVersion = definition.version ?? marker.definition_version;
     panel.append(el("p", "muted", `Definition ${string(definition.label) || string(marker.definition_id) || "unknown"} · v${definitionVersion === undefined || definitionVersion === null ? "?" : String(definitionVersion)}`));
     panel.append(el("p", "muted", `Actor: ${string(marker.created_by) || "unknown"}`));
@@ -1039,7 +1085,16 @@ function renderResourceDetail(resource: Json, links: Json) {
       const controls = el("section", "state-transitions"); controls.append(el("h3", "", "Allowed transitions"));
       for (const transition of transitions) {
         const to = string(transition.to); if (!to) continue;
-        controls.append(el("p", "muted", `${string(transition.label) || `${string(transition.from) || "current"} → ${to}`} · agents may advance this marker.`));
+        const readiness = string(transition.readiness) || "ready";
+        const row = el("div", `state-transition state-transition-${readiness}`);
+        row.append(el("p", "", `${string(transition.label) || `${string(transition.from) || "current"} → ${to}`} · ${readiness === "ready" ? "Ready" : readiness === "needs_input" ? "Needs input" : "Blocked"}`));
+        if (string(transition.instructions)) row.append(el("p", "muted", string(transition.instructions)));
+        const prerequisites = array(transition.prerequisites).map(object).map((prerequisite) => {
+          const kind = string(prerequisite.kind); if (kind === "subject_task_closed") return "Subject task closed";
+          const resourceKind = string(prerequisite.resource_kind); if (resourceKind === "file") return "File reference required"; if (resourceKind === "message") return "Message reference required"; if (resourceKind === "task") return "Task reference required"; return string(prerequisite.label) || kind || resourceKind;
+        }).filter(Boolean); if (prerequisites.length) row.append(el("p", "muted", `Prerequisites: ${prerequisites.join(", ")}`));
+        const reasons = array(transition.reasons).map(string).filter(Boolean); if (reasons.length) row.append(el("p", "state-transition-reasons", reasons.join(" · ")));
+        controls.append(row);
       }
       panel.append(controls);
     }
@@ -1622,11 +1677,41 @@ function renderAgentCollection() {
 function renderStateCollection() {
   const panel = document.querySelector<HTMLElement>("#conversation"); if (!panel || !state.workspace) return;
   panel.replaceChildren(el("header", "conversation-title", "State"));
+  const picker = el("div", "collection-picker");
+  const markers = button("All markers", () => { state.stateCollectionMode = "markers"; renderStateCollection(); }, state.stateCollectionMode === "markers" ? "selected subtle" : "subtle");
+  const opportunities = button("Work opportunities", () => { state.stateCollectionMode = "opportunities"; renderStateCollection(); }, state.stateCollectionMode === "opportunities" ? "selected subtle" : "subtle");
+  picker.append(markers, opportunities); panel.append(picker);
+  if (state.stateCollectionMode === "opportunities") {
+    if (state.stateOpportunitiesWorkspace !== state.workspace.id) { panel.append(el("p", "muted", "Loading work opportunities…")); void loadStateOpportunities(); return; }
+    if (stateOpportunitiesError) { const error = el("p", "error", `Work opportunities are unavailable: ${stateOpportunitiesError}`); const retry = button("Retry", () => void loadStateOpportunities(true), "subtle"); panel.append(error, retry); return; }
+    if (!state.stateOpportunities.length) { panel.append(el("p", "empty-state muted", "No work opportunities right now.")); return; }
+    for (const opportunity of state.stateOpportunities) {
+      const marker = object(opportunity.marker); const id = identifier(marker); if (!id) continue;
+      const title = string(marker.title) || id; const transitions = array(opportunity.transitions).map(object);
+      const ready = transitions.filter((transition) => string(transition.readiness) === "ready").length;
+      const row = el("article", "state-opportunity"); const label = `${title} · ${string(marker.state) || "unknown"}${ready ? ` · ${ready} ready` : ""}`;
+      row.append(button(label, () => void openResource(descriptor({ kind: "state", workspace_id: state.workspace!.id, id }, title)), "conversation-button"));
+      const guidance = object(opportunity.guidance); if (string(guidance.instructions)) row.append(el("p", "muted", string(guidance.instructions)));
+      const blocked = transitions.find((transition) => string(transition.readiness) === "blocked" || string(transition.readiness) === "needs_input");
+      const reasons = array(blocked?.reasons).map(string).filter(Boolean); if (reasons.length) row.append(el("p", "state-transition-reasons", reasons.join(" · ")));
+      panel.append(row);
+    }
+    return;
+  }
   if (!state.stateMarkers.length && state.stateMarkersWorkspace !== state.workspace.id) { panel.append(el("p", "muted", "Loading state markers…")); void loadStateMarkers(); return; }
   if (!pluginAttached("state")) panel.append(el("p", "muted", "State is detached. Preserved marker data is read-only."));
-  if (stateMarkersError) panel.append(el("p", "error", `State is unavailable: ${stateMarkersError}`));
+  if (stateMarkersError) { panel.append(el("p", "error", `State is unavailable: ${stateMarkersError}`), button("Retry", () => void loadStateMarkers(true), "subtle")); return; }
   if (!stateMarkersError && !state.stateMarkers.length) panel.append(el("p", "empty-state muted", "No state markers yet. Agents can attach definitions and create markers as part of their work."));
   for (const marker of state.stateMarkers) { const id = identifier(marker); const title = string(marker.title) || id; panel.append(button(`${title} · ${string(marker.state) || "unknown"}`, () => void openResource(descriptor({ kind: "state", workspace_id: state.workspace!.id, id }, title)), "conversation-button")); }
+}
+function renderStateCollectionRetained() {
+  const panel = document.querySelector<HTMLElement>("#conversation");
+  const scroll = panel?.scrollTop || 0;
+  const focused = document.activeElement instanceof HTMLButtonElement && panel?.contains(document.activeElement) ? document.activeElement.textContent : undefined;
+  renderStateCollection();
+  if (!panel) return;
+  panel.scrollTop = scroll;
+  if (focused) [...panel.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === focused)?.focus();
 }
 function selectStore(item: Json) {
   const store = object(item.store); const id = identifier(store) || string(store.store_id);
@@ -1907,7 +1992,9 @@ async function refreshSnapshotNow(topics: string[]) {
   observeMessages(mailList("history"));
   patchConversations();
   patchOnboarding();
-  if (topics.includes("state")) { await loadStateMarkers(true); await refreshStateViews(workspaceId); }
+  const stateVisible = state.activeHref === collectionTab("states", workspaceId).href || state.activeResource?.ref.kind === "state";
+  const stateOpportunityRelevant = pluginAttached("state") && (stateVisible || state.stateOpportunitiesWorkspace === workspaceId);
+  if (topics.includes("state")) { await loadStateMarkers(true); if (stateOpportunityRelevant) await loadStateOpportunities(true); await refreshStateViews(workspaceId); }
   if (topics.includes("plugins") && state.screen === "settings") {
     const focused = document.activeElement as HTMLElement | null; const row = focused?.closest<HTMLElement>(".plugin-row"); const pluginName = row?.querySelector("h3")?.textContent; const action = focused?.textContent;
     const catalog = document.querySelector(".plugin-catalog"); catalog?.replaceWith(pluginCatalog());
@@ -1925,6 +2012,7 @@ async function refreshSnapshotNow(topics: string[]) {
     if (state.conversationKind === "direct" && state.activeResource?.kind === "direct" && state.selectedConversation) void loadAgentContext(state.selectedConversation, state.navigationEpoch);
   }
   if (topics.includes("tasks") || topics.includes("repositories")) {
+    if (topics.includes("tasks") && !topics.includes("state") && stateOpportunityRelevant) { await loadStateOpportunities(true); await refreshStateViews(workspaceId); }
     if (state.activeHref === collectionTab("tasks", workspaceId).href && state.detailView !== "form") {
       const panel = document.querySelector<HTMLElement>("#conversation"); const scroll = panel?.scrollTop || 0;
       renderTaskCollection(); if (panel) panel.scrollTop = scroll;
@@ -1961,7 +2049,7 @@ async function refreshVisibleTask(workspaceId: string) {
 
 async function refreshStateViews(workspaceId: string) {
   if (state.workspace?.id !== workspaceId) return;
-  if (state.activeHref === collectionTab("states", workspaceId).href) { const panel = document.querySelector<HTMLElement>("#conversation"); const scroll = panel?.scrollTop || 0; renderStateCollection(); if (panel) panel.scrollTop = scroll; return; }
+  if (state.activeHref === collectionTab("states", workspaceId).href) { renderStateCollectionRetained(); return; }
   const active = state.activeResource;
   if (active?.ref.kind !== "state" || state.detailView === "form") return;
   const epoch = state.navigationEpoch; const panel = document.querySelector<HTMLElement>("#conversation"); if (!panel) return; const scroll = panel.scrollTop;

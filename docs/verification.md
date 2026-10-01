@@ -163,6 +163,30 @@ had already been attached during the initial attempt.
 This v0.2.0 evidence is local preparation only: no tag, signing, notarization,
 or release publication occurred. The existing public release remains v0.1.1.
 
+## State workflow enrichment — 2026-10-01
+
+The host added declarative State guidance, capability-filtered opportunities,
+and bounded transition prerequisites. Guidance remains advisory. Advances can
+require a closed qualified subject task or submitted, canonical same-workspace
+`file`, `message`, or `task` evidence; file evidence is pinned to a full Git
+SHA. State reports each transition as `ready`, `blocked`, or `needs_input`,
+with reasons, and serializes exact request retries before fresh guard checks.
+
+Formatting and host Clippy with warnings denied passed. The focused plugin suite
+passed 7 tests; the full host result was 8 unit, 35 host, and 7 plugin tests
+(50 total). The UI suite passed 30 tests in 43.7 seconds. A local debug-server
+run used the bundled `br`, real API calls, and Playwright to verify an open task
+blocked a transition, closing it changed the live State view to `needs_input`,
+and pinned-file evidence advanced it to approved. Replaying the exact advance
+after reopening the task did not append history. Opportunities excluded the
+terminal marker and displayed one pending marker; the browser recorded no page
+errors. The run log is
+`/private/tmp/orchard-workflow-browser-root.log`, and the inspected screenshot
+is `/private/tmp/orchard-workflow-opportunities.png`.
+
+This is scripted local verification, not an independent agent-review or
+provider-session run. The preview build was not signed, notarized, or released.
+
 ## Remaining integration evidence
 
 Originally tracked in Vault epic `vault-1qnss`, release gate `vault-1qnss.7`:

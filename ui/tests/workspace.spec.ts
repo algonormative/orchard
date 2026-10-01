@@ -335,6 +335,43 @@ test("a failed State list is shown once without an immediate retry loop", async 
   expect(audit.calls.filter((entry: { operation: string }) => entry.operation === "state_list")).toHaveLength(1);
 });
 
+test("State guidance and work opportunities show honest readiness and refresh with task changes", async ({ page, request }) => {
+  await unlock(page);
+  await page.goto("/w/workspace-1/~states");
+  await page.locator("#conversation").getByRole("button", { name: /Fixture release.*draft/ }).click();
+  await expect(page.locator("#conversation")).toContainText("Guidance");
+  await expect(page.locator("#conversation")).toContainText("Collect the release evidence before advancing.");
+  await expect(page.locator("#conversation")).toContainText("Relevant capabilities: release-review");
+  await expect(page.locator("#conversation")).toContainText("Observed task");
+  await expect(page.locator("#conversation")).toContainText("Needs input");
+  await expect(page.locator("#conversation")).toContainText("Attach the release checklist.");
+  await expect(page.locator("#conversation")).toContainText("File reference required");
+  await page.goto("/w/workspace-1/~states");
+  await page.getByRole("button", { name: "Work opportunities", exact: true }).click();
+  await expect(page.locator("#conversation")).toContainText("Collect the release evidence before advancing.");
+  await expect(page.locator("#conversation")).toContainText("Attach the release checklist.");
+  await request.post("/fixture/external-change", { data: { marker_state: "review", task_status: "closed", topics: ["tasks"] } });
+  await expect(page.locator("#conversation")).toContainText("1 ready");
+  await page.locator("#conversation").getByRole("button", { name: /Fixture release.*review/ }).click();
+  await expect(page.locator("#conversation")).toContainText("Subject task closed");
+});
+
+test("work opportunities have an empty and retryable error state", async ({ page, request }) => {
+  await unlock(page);
+  await request.post("/fixture/fail-state-opportunities");
+  await page.goto("/w/workspace-1/~states");
+  await page.getByRole("button", { name: "Work opportunities", exact: true }).click();
+  await expect(page.locator("#conversation")).toContainText("Work opportunities are unavailable: Fixture opportunities are unavailable");
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(page.locator("#conversation")).toContainText("Fixture release");
+  await page.getByRole("button", { name: "New workspace", exact: true }).click();
+  await page.getByLabel("Workspace name").fill("Empty opportunities");
+  await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+  await page.goto("/w/workspace-2/~states");
+  await page.getByRole("button", { name: "Work opportunities", exact: true }).click();
+  await expect(page.locator("#conversation")).toContainText("No work opportunities right now.");
+});
+
 test("draft, reply, scroll, reconnect, and polling preserve working context", async ({ page, request }) => {
   await unlock(page); await request.post("/fixture/long-history");
   const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "#general", exact: true }).click();

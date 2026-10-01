@@ -90,9 +90,11 @@ input::placeholder, textarea::placeholder { color: #93a798; }
 .plugin-row h3 { margin: 0; color: var(--lemon-cream); }
 .plugin-row p { margin: .35rem 0; }
 .plugin-row button, .state-transitions button { width: auto; margin-top: .25rem; }
-.state-history, .state-transitions { max-width: min(900px, calc(100% - (var(--content-x) * 2))); margin: .9rem var(--content-x) 0; padding: .7rem .85rem; border: 1px solid var(--lemon-line); border-radius: 7px; background: #152219; }
-.state-history h3, .state-transitions h3 { margin: 0 0 .35rem; font-size: .9rem; color: var(--lemon-cream); }
+.state-history, .state-transitions, .state-guidance, .state-observed-task { max-width: min(900px, calc(100% - (var(--content-x) * 2))); margin: .9rem var(--content-x) 0; padding: .7rem .85rem; border: 1px solid var(--lemon-line); border-radius: 7px; background: #152219; }
+.state-history h3, .state-transitions h3, .state-guidance h3, .state-observed-task h3 { margin: 0 0 .35rem; font-size: .9rem; color: var(--lemon-cream); }
 .state-history p { margin: .3rem 0; }
+.state-guidance { border-left: 3px solid var(--lemon-leaf); }.state-guidance p, .state-observed-task p, .state-transition p { margin: .3rem 0; }.state-transition { padding: .55rem 0; border-top: 1px solid var(--lemon-line); }.state-transition:first-of-type { border-top: 0; }.state-transition-reasons { color: #ffcfad; }.state-transition-ready .state-transition-reasons { color: var(--lemon-leaf); }
+.state-opportunity { margin: .55rem var(--content-x); padding: .55rem .7rem; border: 1px solid var(--lemon-line); border-radius: 7px; background: #152219; }.state-opportunity .conversation-button { margin: 0; }.state-opportunity p { margin: .28rem 0 0; }
 .task-filter { width: min(14rem, 100%); margin-block: .7rem; }
 .task-list-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .7rem; padding: .35rem .75rem; border: 1px solid var(--lemon-line); border-radius: 7px; background: #152219; }
 .task-list-row button { width: auto; margin: 0; padding-left: 0; border: 0; background: transparent; }
