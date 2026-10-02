@@ -170,6 +170,63 @@ test("live event refreshes a visible task and chat without touching draft", asyn
   await expect(page.locator(".task-metadata")).toContainText("Blocked");
 });
 
+test("a newer build after reconnect offers a calm manual reload", async ({ page, request }) => {
+  await unlock(page);
+  await expect(page.locator("#connection-status")).toHaveAttribute("data-state", "connected");
+  await request.post("/fixture/build", { data: { app_version: "0.2.1", server_version: "0.1.0", ui_hash: "a".repeat(64) } });
+  await request.post("/fixture/drop-events");
+  const update = page.locator("#build-update-notice");
+  await expect(update).toContainText("Orchard was updated.");
+  await expect(update.getByRole("button", { name: "Reload", exact: true })).toBeVisible();
+});
+
+test("an unchanged or malformed build after reconnect stays quiet", async ({ page, request }) => {
+  await unlock(page);
+  await expect(page.locator("#build-update-notice")).toBeHidden();
+  await expect(page.locator("#connection-status")).toHaveAttribute("data-state", "connected");
+  // Each reconnect re-reads /api/build; wait for that read rather than a fixed delay.
+  const rechecked = () => page.waitForResponse((response) => response.url().endsWith("/api/build"));
+  let check = rechecked(); await request.post("/fixture/drop-events"); await check;
+  await expect(page.locator("#build-update-notice")).toBeHidden();
+  await request.post("/fixture/build", { data: {} });
+  check = rechecked(); await request.post("/fixture/drop-events"); await check;
+  await expect(page.locator("#build-update-notice")).toBeHidden();
+});
+
+test("a newer-build notice leaves a composer draft intact until Reload", async ({ page, request }) => {
+  await unlock(page);
+  const composer = page.getByLabel("Message"); await composer.fill("Keep this draft until I choose reload");
+  await request.post("/fixture/build", { data: { app_version: "0.2.1", server_version: "0.1.0", ui_hash: "b".repeat(64) } });
+  await request.post("/fixture/drop-events");
+  const update = page.locator("#build-update-notice");
+  await expect(update).toBeVisible();
+  await expect(composer).toHaveValue("Keep this draft until I choose reload");
+  const navigated = page.waitForEvent("framenavigated");
+  await update.getByRole("button", { name: "Reload", exact: true }).click();
+  await navigated;
+});
+
+test("assigned in-progress work appears under its direct participant and opens its task tab", async ({ page, request }) => {
+  await unlock(page);
+  await request.post("/fixture/external-change", { data: { task_assignee: "alice", task_status: "in_progress", topics: ["tasks"] } });
+  const chats = await openTree(page, "Chats");
+  const assigned = chats.getByRole("button", { name: "fixture-1 Fixture task", exact: true });
+  await expect(assigned).toBeVisible();
+  await assigned.click();
+  await expect(page.getByRole("tab", { name: "Fixture task", exact: true })).toBeVisible();
+  await expect(page.locator(".task-metadata")).toContainText("In progress");
+});
+
+test("detached Tasks does not add assigned work beneath direct participants", async ({ page, request }) => {
+  await unlock(page);
+  await request.post("/fixture/external-change", { data: { task_assignee: "alice", task_status: "in_progress", topics: ["tasks"] } });
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.locator(".plugin-row", { hasText: "Tasks" }).getByRole("button", { name: "Detach" }).click();
+  await page.getByRole("button", { name: "Back to workspace", exact: true }).first().click();
+  const chats = await openTree(page, "Chats");
+  await expect(chats.getByRole("button", { name: "fixture-1 Fixture task", exact: true })).toHaveCount(0);
+});
+
 test("overlapping live topics drain after delayed snapshots and ongoing events do not starve", async ({ page, request }) => {
   await unlock(page);
   await expect(page.locator("#connection-status")).toHaveAttribute("data-state", "connected");

@@ -76,6 +76,9 @@ const state: {
   stateCollectionMode: "markers" | "opportunities";
   formReturn?: AppTab;
   newWorkspaceReturn?: Screen;
+  buildBaseline?: { uiHash: string; appVersion: string };
+  dismissedBuildIdentity?: string;
+  buildUpdateIdentity?: string;
 } = { workspaces: [], recentWorkspaceIds: [], conversationKind: "channel", conversationMessages: [], drafts: new Map(), pendingMail: new Map(), replyRevision: new Map(), onboarding: new Map(), taskFilter: "all", workspaceRequest: 0, snapshotRequest: 0, conversationRequest: 0, seenMessageIds: new Set(), unread: new Map(), screen: "workspace", detailEpoch: 0, taskRequest: 0, tabs: [], resourceRequest: 0, navigationEpoch: 0, connection: "disconnected", treeExpanded: new Set(["chats", "tasks", "artifacts", "states"]), artifactRoots: [], artifactEntries: new Map(), artifactExpanded: new Set(), stateMarkers: [], stateOpportunities: [], stateCollectionMode: "markers" };
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string) => {
@@ -188,6 +191,45 @@ async function loadBuildIdentity(target: HTMLElement) {
     target.replaceChildren(codeBlock(buildIdentityText(object(await response.json().catch(() => ({}))))));
   } catch {
     target.replaceChildren(codeBlock("Build identity unavailable."));
+  }
+}
+
+type BuildIdentity = { uiHash: string; appVersion: string };
+
+async function fetchBuildIdentity(): Promise<BuildIdentity | undefined> {
+  try {
+    const response = await fetch("/api/build", { credentials: "same-origin", cache: "no-cache" });
+    const value = object(await response.json().catch(() => ({})));
+    const uiHash = string(value.ui_hash); const appVersion = string(value.app_version);
+    return response.ok && uiHash && appVersion ? { uiHash, appVersion } : undefined;
+  } catch { return undefined; }
+}
+
+function buildIdentityKey(identity: BuildIdentity) { return `${identity.uiHash}\n${identity.appVersion}`; }
+
+function patchBuildUpdateNotice() {
+  const target = document.querySelector<HTMLElement>("#build-update-notice");
+  if (!target) return;
+  const visible = !!state.buildUpdateIdentity;
+  target.hidden = !visible;
+  if (visible) target.setAttribute("role", "status");
+}
+
+function dismissBuildUpdateNotice() {
+  if (!state.buildUpdateIdentity) return;
+  state.dismissedBuildIdentity = state.buildUpdateIdentity;
+  state.buildUpdateIdentity = undefined;
+  patchBuildUpdateNotice();
+}
+
+async function checkForBuildUpdate() {
+  const identity = await fetchBuildIdentity();
+  if (!identity) return;
+  if (!state.buildBaseline) { state.buildBaseline = identity; return; }
+  const key = buildIdentityKey(identity);
+  if ((identity.uiHash !== state.buildBaseline.uiHash || identity.appVersion !== state.buildBaseline.appVersion) && state.dismissedBuildIdentity !== key) {
+    state.buildUpdateIdentity = key;
+    patchBuildUpdateNotice();
   }
 }
 
@@ -386,6 +428,7 @@ window.addEventListener("keydown", (event) => {
   if (state.screen === "workspaces") { leaveWorkspaceChooser(); return; }
   if (state.screen === "new-workspace") { leaveNewWorkspace(); return; }
   if (state.detailView === "form") { const target = state.formReturn; state.formReturn = undefined; state.detailView = undefined; if (target) void activateTab(target, true); else renderEmptyViewer(); return; }
+  if (state.screen === "workspace" && state.buildUpdateIdentity) { event.preventDefault(); dismissBuildUpdateNotice(); }
 });
 
 function cycleTab(direction: number) {
@@ -563,6 +606,7 @@ function workspaceIdFromLocation(): string | undefined {
 async function bootstrap() {
   try {
     if (!await ensureBrowserSession()) throw new Error("The local browser session could not be started.");
+    await checkForBuildUpdate();
     await initialize();
   } catch (error) {
     shell("Orchard is unavailable", "The local Orchard server did not respond.");
@@ -753,8 +797,11 @@ function renderWorkspace() {
   noticeBar.id = "notice";
   noticeBar.dataset.tone = "info";
   const connection = el("span", "connection-status"); connection.id = "connection-status";
-  top.append(connection, noticeBar);
+  const buildUpdate = el("div", "build-update-notice"); buildUpdate.id = "build-update-notice"; buildUpdate.hidden = true; buildUpdate.setAttribute("role", "status");
+  buildUpdate.append(el("span", "", "Orchard was updated."), button("Reload", () => window.location.reload(), "primary"), button("Dismiss", dismissBuildUpdateNotice, "subtle"));
+  top.append(connection, noticeBar, buildUpdate);
   patchConnectionStatus();
+  patchBuildUpdateNotice();
 
   const conversations = el("aside", "sidebar resource-tree");
   conversations.id = "conversations";
@@ -799,6 +846,12 @@ function participantName(id: string): string {
 function taskAssignee(task: Json): string {
   const value = task.assignee ?? task.assignee_id;
   return string(value) || string(object(value).id);
+}
+function openTasksAssignedTo(participantId: string) {
+  return workspaceStores().flatMap((value) => {
+    const item = object(value); const store = object(item.store); const storeId = identifier(store) || string(store.store_id);
+    return array(item.tasks).map(object).filter((task) => taskAssignee(task) === participantId && !["closed", "done"].includes(string(task.status))).map((task) => ({ task, storeId }));
+  }).sort((left, right) => Number(string(right.task.status) === "in_progress") - Number(string(left.task.status) === "in_progress"));
 }
 function taskMetadata(task: Json) {
   const status = ({ open: "Open", in_progress: "In progress", blocked: "Blocked", closed: "Closed" } as Record<string, string>)[string(task.status)] || string(task.status) || "Unknown";
@@ -914,7 +967,22 @@ function patchConversations() {
   chats.append(button("New channel", showChannelForm, "tree-action subtle"));
   const people = mailList("participants").map(object).filter((person) => identifier(person) !== "owner" && identifier(person) !== "orchard");
   if (people.length) chats.append(el("p", "tree-label", "Direct"));
-  for (const person of people) { const id = identifier(person); chats.append(button(withUnread(participantLabel(string(person.name) || id), `direct:${id}`), () => selectConversation("direct", id), conversationActive("direct", id) ? "selected conversation-button" : "conversation-button")); }
+  for (const person of people) {
+    const id = identifier(person);
+    chats.append(button(withUnread(participantLabel(string(person.name) || id), `direct:${id}`), () => selectConversation("direct", id), conversationActive("direct", id) ? "selected conversation-button" : "conversation-button"));
+    if (pluginAttached("tasks", true)) {
+      const assigned = openTasksAssignedTo(id); const shown = assigned.slice(0, 3);
+      if (shown.length) {
+        const list = el("div", "agent-task-list");
+        for (const { task, storeId } of shown) {
+          const taskId = string(task.task_id) || identifier(task); const title = string(task.title) || taskId;
+          list.append(button(`${taskId} ${title}`, () => void openResource(descriptor({ kind: "task", workspace_id: state.workspace!.id, store_id: storeId, task_id: taskId }, title)), "agent-task-link"));
+        }
+        if (assigned.length > shown.length) list.append(el("p", "agent-task-more", `+${assigned.length - shown.length} more`));
+        chats.append(list);
+      }
+    }
+  }
   if (people.length) chats.append(button(withUnread("All direct messages", "direct:__all_direct__"), () => selectConversation("direct", "__all_direct__"), conversationActive("direct", "__all_direct__") ? "selected conversation-button" : "conversation-button"));
   chats.append(button(withUnread("Broadcast", "broadcast:broadcast"), () => selectConversation("broadcast", "broadcast"), conversationActive("broadcast", "broadcast") ? "selected conversation-button" : "conversation-button"));
   chats.append(button("Agents", () => void activateTab(collectionTab("agents", state.workspace!.id)), "tree-action subtle"), button("Connection settings", showAgentForm, "tree-action subtle"));
@@ -2216,6 +2284,7 @@ function startLiveUpdates() {
   const workspaceId = state.workspace.id;
   const generation = liveGeneration;
   let attempt = 0;
+  let opened = false;
   const connect = async () => {
     if (state.workspace?.id !== workspaceId || generation !== liveGeneration) return;
     state.connection = "connecting"; patchConnectionStatus();
@@ -2228,6 +2297,8 @@ function startLiveUpdates() {
         if (state.socket !== socket || generation !== liveGeneration) return;
         state.connection = "connected"; attempt = 0; patchConnectionStatus();
         if (state.poll) { window.clearInterval(state.poll); state.poll = undefined; }
+        if (opened) void checkForBuildUpdate();
+        opened = true;
       });
       socket.addEventListener("message", (event) => {
         if (state.socket !== socket || state.workspace?.id !== workspaceId || generation !== liveGeneration) return;

@@ -8,7 +8,8 @@ const dist = new URL("../dist/", import.meta.url);
 const workspace = { id: "workspace-1", name: "Fixture workspace" };
 const archivedWorkspace = { id: "archived-first", name: "Archived fixture", archived: true };
 const taskStore = { id: "default", name: "Workspace tasks", source: "owned", path: "/private/tmp/orchard-fixture-workspaces/a-very-long-workspace-identifier-that-must-wrap-within-the-details-panel/tasks" };
-const buildIdentity = { app_version: "0.2.0", server_version: "0.1.0", ui_hash: "f".repeat(64) };
+const initialBuildIdentity = { app_version: "0.2.0", server_version: "0.1.0", ui_hash: "f".repeat(64) };
+let buildIdentity = structuredClone(initialBuildIdentity);
 const projectStore = { id: "repository:example-project", name: "example-project", source: "repository", repository_id: "project-example", path: "/private/tmp/example-project/.beads" };
 let repositories = [];
 const participants = [
@@ -75,6 +76,7 @@ function emitChange(topics, workspaceId = workspace.id) {
 
 function resetFixture() {
   for (const client of subscribers) client.socket.end(); subscribers.clear(); revision = 0;
+  buildIdentity = structuredClone(initialBuildIdentity);
   for (const path of Object.keys(artifactFiles)) delete artifactFiles[path];
   Object.assign(artifactFiles, structuredClone(initialArtifactFiles));
   created = false; workspaces = []; recentWorkspaceIds = []; sessionsValid = true; sourceErrors = []; taskBackendAvailable = true;
@@ -207,6 +209,8 @@ const server = createServer(async (request, response) => {
     return send(response, 200, { ok: true });
   }
   if (url.pathname === "/fixture/reset" && request.method === "POST") { resetFixture(); return send(response, 200, { ok: true }); }
+  if (url.pathname === "/fixture/build" && request.method === "POST") { buildIdentity = await bodyOf(request); return send(response, 200, { buildIdentity }); }
+  if (url.pathname === "/fixture/drop-events" && request.method === "POST") { for (const client of subscribers) client.socket.end(); subscribers.clear(); return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/delay" && request.method === "POST") { const value = await bodyOf(request); delaySendMs = Number(value.send || 0); delayAttachMs = Number(value.attach || 0); delayTasksMs = Number(value.tasks || 0); delayActionMs = Number(value.action || 0); delaySnapshotMs = Number(value.snapshot || 0); delayStateListMs = Number(value.state_list || 0); return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/fail-upload-once" && request.method === "POST") { uploadFailures = 1; return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/fail-state-list" && request.method === "POST") { stateListFailures = 1; return send(response, 200, { ok: true }); }
@@ -218,6 +222,7 @@ const server = createServer(async (request, response) => {
   if (url.pathname === "/fixture/external-change" && request.method === "POST") {
     const value = await bodyOf(request);
     if (value.task_status) tasks[0].status = value.task_status;
+    if (value.task_assignee !== undefined) tasks[0].assignee = value.task_assignee;
     if (value.file_text) artifactFiles["README.md"] = { ...artifactFiles["README.md"], text: value.file_text };
     if (value.message) messages.push({ id: `external-${messages.length}`, sender_id: "alice", destination: { kind: "channel", id: "general" }, body: value.message, kind: "message" });
     if (value.marker_state) { markers[0].state = value.marker_state; markers[0].revision += 1; }
