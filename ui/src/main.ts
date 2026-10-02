@@ -557,7 +557,7 @@ function leaveNewWorkspace() {
 function renderCalmHome(fromHistory = false) {
   if (!fromHistory) navigate("home", undefined, true);
   shell("Orchard", "Create a workspace when you are ready.");
-  document.querySelector(".welcome")?.classList.add("welcome-home");
+  document.querySelector(".welcome")?.classList.add("welcome-home", "calm-home");
   document.querySelector(".welcome")?.append(button("Create workspace", () => renderEmptyWorkspace(), "primary"));
 }
 
@@ -813,6 +813,7 @@ function patchConversations() {
   const section = (name: "chats" | "tasks" | "artifacts" | "states", label: string) => {
     const details = document.createElement("details");
     details.className = "tree-group";
+    details.dataset.section = name;
     details.open = state.treeExpanded.has(name);
     details.addEventListener("toggle", () => {
       if (details.open) state.treeExpanded.add(name); else state.treeExpanded.delete(name);

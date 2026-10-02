@@ -11,8 +11,10 @@ as a connection. An existing workspace with a registered agent starts on the
 working surface without that first-contact prompt.
 
 The LEMON visual treatment uses citron accents, terminal labels, and a small
-mascot mark. The large synthetic orchard illustration appears on the calm home
-and workspace chooser, not over a working conversation, form, or credential.
+mascot mark on the calm home and workspace chooser. The synthetic orchard
+illustration appears only on the calm home, as a hard-edged panel beside the
+Create workspace action; it never appears on the chooser or over a working
+conversation, form, credential, or workspace list.
 
 The visible workspace is a resource browser. One global tree starts with Chats,
 Tasks, and Artifacts, and every selected resource opens in the single tabbed
