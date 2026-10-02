@@ -844,6 +844,9 @@ function decisionDeliveredToOwner(item: Json) {
   return string(destination.kind) === "channel" || string(destination.kind) === "broadcast" || string(destination.id) === "owner" || array(item.recipient_ids).map(string).includes("owner");
 }
 function openDecisions(): Json[] {
+  // The host scans the full history; the loaded window would miss older decisions.
+  const fromHost = mailSnapshot().open_decisions;
+  if (Array.isArray(fromHost)) return fromHost.map(object);
   const history = mailList("history").map(object);
   const resolved = new Set(history.filter((item) => string(item.sender_id) === "owner" && string(item.thread_id)).map((item) => string(item.thread_id)));
   return history.filter((item) => string(item.kind) === "decision" && string(item.sender_id) !== "owner" && string(item.id) && decisionDeliveredToOwner(item) && !resolved.has(string(item.id)));

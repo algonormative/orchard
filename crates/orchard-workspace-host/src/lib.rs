@@ -832,12 +832,24 @@ impl WorkspaceHost {
         let workspace_id = required_string(&args, "workspace_id")?;
         let store_id = required_string(&args, "store_id")?;
         let task_id = required_string(&args, "task_id")?;
-        self.with_store(&workspace_id, &store_id, |store| {
+        let task = self.with_store(&workspace_id, &store_id, |store| {
             self.inner
                 .beads
                 .show(store, &task_id)
                 .map_err(command_error)
-        })
+        })?;
+        // Same `{task, task_ref}` shape as the other task tools. The task's own fields stay
+        // at the top level too, for clients written against the earlier bare shape; they
+        // are deprecated.
+        let mut result = task.clone();
+        if let Some(fields) = result.as_object_mut() {
+            fields.insert("task".to_owned(), task);
+            fields.insert(
+                "task_ref".to_owned(),
+                json!({"store_id":store_id,"task_id":task_id}),
+            );
+        }
+        Ok(result)
     }
 
     fn task_dependencies(&self, args: Value) -> Result<Value, String> {
@@ -1292,6 +1304,14 @@ impl WorkspaceHost {
             }));
             json!({"participants":[],"channels":[],"history":[]})
         };
+        // Scanned after the mail lock above is released; the scan reads mail itself.
+        let mut mail_snapshot = mail_snapshot;
+        if runtime.mail.is_some() {
+            match self.open_decisions(&workspace_id) {
+                Ok(decisions) => mail_snapshot["open_decisions"] = json!(decisions),
+                Err(error) => errors.push(json!({"source":"open_decisions","error":error})),
+            }
+        }
 
         let repositories = workspace
             .repositories

@@ -233,6 +233,14 @@ test("a decision arriving mid-draft keeps the draft and its focus", async ({ pag
   await expect(composer).toBeFocused();
 });
 
+test("needs-you shows a decision older than the loaded history window", async ({ page, request }) => {
+  await unlock(page);
+  await request.post("/fixture/external-change", { data: { mail_message: { id: "decision-buried", sender_id: "alice", destination: { kind: "direct", id: "owner" }, body: "Buried question", kind: "decision" }, topics: ["mail"] } });
+  for (let index = 0; index < 60; index += 1) await request.post("/fixture/external-change", { data: { message: `noise ${index}` } });
+  await request.post("/fixture/external-change", { data: { message: "last noise", topics: ["mail"] } });
+  await expect(page.locator('#needs-you[aria-label="Needs you"]')).toContainText("Buried question");
+});
+
 test("needs-you ignores ordinary and already-resolved decisions", async ({ page, request }) => {
   await unlock(page);
   await request.post("/fixture/external-change", { data: { mail_message: { id: "ordinary-message", sender_id: "alice", destination: { kind: "channel", id: "general" }, body: "Not a decision", kind: "message" }, topics: ["mail"] } });

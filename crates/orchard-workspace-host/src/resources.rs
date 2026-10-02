@@ -1132,6 +1132,33 @@ impl WorkspaceHost {
         result
     }
 
+    /// Decisions still waiting on the owner, over the whole history: a `kind: "decision"`
+    /// message delivered to the owner (not sent by them) with no owner message in its thread.
+    /// The browser's Needs-you strip reads this instead of its bounded history window.
+    pub(crate) fn open_decisions(&self, workspace_id: &str) -> Result<Vec<Value>, String> {
+        let messages = self.all_messages(workspace_id)?;
+        let resolved = messages
+            .iter()
+            .filter(|message| message["sender_id"] == "owner")
+            .filter_map(|message| message["thread_id"].as_str())
+            .collect::<HashSet<_>>();
+        Ok(messages
+            .iter()
+            .filter(|message| message["kind"] == "decision" && message["sender_id"] != "owner")
+            .filter(|message| {
+                message["recipient_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id == "owner"))
+            })
+            .filter(|message| {
+                message["id"]
+                    .as_str()
+                    .is_some_and(|id| !resolved.contains(id))
+            })
+            .cloned()
+            .collect())
+    }
+
     fn all_messages(&self, workspace_id: &str) -> Result<Vec<Value>, String> {
         let mut after = 0_u64;
         let mut messages = Vec::new();

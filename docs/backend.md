@@ -73,7 +73,7 @@ Direct host operations are an allowlist:
 | `repository_attach` / `repository_detach` | `{workspace_id, path}` / `{workspace_id, repository_id}`; attach returns `{repository, task_store, attached, task_store_attached}` |
 | `task_store_attach` / `task_store_detach` | `{workspace_id, path}` / `{workspace_id, store_id}` |
 | `tasks_list` | `{workspace_id, store_id, status?}` |
-| `task_show` | `{workspace_id, store_id, task_id}` |
+| `task_show` | `{workspace_id, store_id, task_id}`; returns `{task, task_ref}` like the other task tools (the task's fields are also repeated at the top level for older clients; deprecated) |
 | `task_create` | `{workspace_id, store_id, request_id, title, description?, priority?, labels?}` |
 | `task_update` | `{workspace_id, store_id, task_id, request_id, title?, description?, status?, priority?, add_labels?, remove_labels?}` |
 | `task_claim` | `{workspace_id, store_id, task_id, participant_id, request_id}`; atomic claim by a registered participant |
