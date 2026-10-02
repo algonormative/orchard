@@ -885,6 +885,8 @@ fn workspace_intro_seeds_and_preserves_readme_and_reports_paths() {
         "mail_acknowledge",
         "one task or one review pass",
         "do not poll indefinitely",
+        "wait_seconds",
+        "kind: \"decision\"",
         "normal harness",
         "provider permissions",
         "why you stopped",

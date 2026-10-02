@@ -29,6 +29,10 @@ bounded revision work. To advance to `accepted`, attach a message that
 explicitly records the accepted decision (and any follow-up). `accepted`
 records that decision; it does not prove independent review.
 
+To ask the owner for that decision, send the handoff message with
+`kind: "decision"`. It appears in the owner's Needs-you strip until the owner
+replies in its thread, so the reply is also the decision record to attach.
+
 State reference prerequisites only validate that the supplied references exist
 and are canonical for this workspace; a canonical file reference must include a
 full revision. They do not evaluate the artifact, message, review quality, or
