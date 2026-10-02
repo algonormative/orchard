@@ -239,7 +239,13 @@ no-store`. See [resources.md](resources.md) for reference, Git, crosslink,
 upload, and download details.
 
 Each active workspace serves Streamable HTTP MCP at
-`/workspaces/{workspace_id}/mcp` with its own bearer token. Rotation cancels
+`/workspaces/{workspace_id}/mcp` with its own bearer token. A session idle for
+about 300 seconds is evicted (the vendored Orchard Mail router uses rmcp's
+default session manager); the next request on it gets HTTP 404 "Session not
+found", and the client must re-initialize, as the MCP Streamable HTTP
+specification requires. The packaged `orchard agent` CLI starts a fresh session
+per invocation and is unaffected. Request IDs everywhere follow the identifier
+rule: 1–128 ASCII letters, digits, `.`, `_`, or `-`. Rotation cancels
 existing router sessions before installing the new token; archive and host
 shutdown also cancel sessions. MCP exposes the mail tools, task operations, and
 sanitized `workspace_info`, orientation/status/alert operations, resource

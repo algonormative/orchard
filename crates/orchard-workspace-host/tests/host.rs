@@ -886,6 +886,8 @@ fn workspace_intro_seeds_and_preserves_readme_and_reports_paths() {
         "one task or one review pass",
         "do not poll indefinitely",
         "wait_seconds",
+        "re-initialize MCP",
+        "at most 128",
         "kind: \"decision\"",
         "normal harness",
         "provider permissions",
