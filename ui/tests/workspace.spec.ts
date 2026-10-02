@@ -464,6 +464,19 @@ test("work opportunities have an empty and retryable error state", async ({ page
   await expect(page.locator("#conversation")).toContainText("No work opportunities right now.");
 });
 
+test("thread scroll position survives a Settings round trip", async ({ page, request }) => {
+  await unlock(page); await request.post("/fixture/long-history"); await page.reload();
+  await page.locator(".message").nth(30).waitFor();
+  const thread = page.locator("#thread");
+  await thread.evaluate((node) => { node.scrollTop = 300; });
+  const before = await thread.evaluate((node) => node.scrollTop);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Back to workspace" }).first().click();
+  await page.locator(".message").nth(30).waitFor();
+  await expect.poll(() => thread.evaluate((node) => node.scrollTop)).toBeGreaterThan(before - 32);
+  expect(await thread.evaluate((node) => node.scrollTop)).toBeLessThan(before + 32);
+});
+
 test("draft, reply, scroll, reconnect, and polling preserve working context", async ({ page, request }) => {
   await unlock(page); await request.post("/fixture/long-history");
   const chats = await openTree(page, "Chats"); await chats.getByRole("button", { name: "#general", exact: true }).click();

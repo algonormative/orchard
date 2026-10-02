@@ -106,6 +106,8 @@ let stateMarkersVersion = 0;
 let stateMarkersLoadedVersion = -1;
 let focusRequest = 0;
 let composerRestorePending = false;
+let threadScrollKey: string | undefined;
+let pendingThreadScroll: { key: string; top: number } | undefined;
 let stateMarkersError = "";
 let stateOpportunitiesFlight: Promise<void> | undefined;
 let stateOpportunitiesError = "";
@@ -294,9 +296,11 @@ function isSettingsLocation(workspaceId: string) {
   return `${window.location.pathname}${window.location.search}` === workspaceSettingsHref(workspaceId) && !window.location.hash;
 }
 
+function conversationScrollKey() { return `${state.workspace?.id || ""}:${draftKey()}`; }
 function rememberConversationContext() {
   const thread = document.querySelector<HTMLElement>("#thread");
   state.threadScroll = thread?.scrollTop;
+  threadScrollKey = conversationScrollKey();
   state.composerFocused = document.activeElement?.getAttribute("aria-label") === "Message";
 }
 function restoreConversationContext() {
@@ -305,12 +309,14 @@ function restoreConversationContext() {
   const restoreComposer = state.composerFocused;
   state.composerFocused = undefined;
   composerRestorePending = !!restoreComposer;
+  // The thread is rebuilt empty and its history loads later; patchMessages applies the
+  // saved position once that conversation's messages render, independent of focus.
+  if (state.threadScroll !== undefined && threadScrollKey) pendingThreadScroll = { key: threadScrollKey, top: state.threadScroll };
+  state.threadScroll = undefined;
   const request = ++focusRequest;
   requestAnimationFrame(() => {
     if (request !== focusRequest || screen !== state.screen || workspaceRequest !== state.workspaceRequest) return;
     composerRestorePending = false;
-    const thread = document.querySelector<HTMLElement>("#thread");
-    if (thread && state.threadScroll !== undefined) thread.scrollTop = state.threadScroll;
     if (restoreComposer && screen === "workspace" && document.activeElement === document.body) {
       document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus({ preventScroll: true });
     }
@@ -1502,7 +1508,12 @@ function patchMessages() {
   const wasAtBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 32;
   thread.replaceChildren();
   renderMessageList(thread, state.conversationMessages, state.selectedConversation === "__all_direct__");
-  if (wasAtBottom) thread.scrollTop = thread.scrollHeight;
+  // A position saved before leaving the workspace applies only to the same conversation;
+  // landing anywhere else discards it.
+  const restore = pendingThreadScroll?.key === conversationScrollKey() ? pendingThreadScroll.top : undefined;
+  pendingThreadScroll = undefined;
+  if (restore !== undefined) thread.scrollTop = restore;
+  else if (wasAtBottom) thread.scrollTop = thread.scrollHeight;
   else thread.scrollTop = previousScroll;
 }
 
