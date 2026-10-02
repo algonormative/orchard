@@ -2257,8 +2257,63 @@ fn repository_view(repository: &RepositoryConfig, store: Option<&TaskStoreConfig
         "name": if repository.name.is_empty() { repository_name(&repository.path) } else { repository.name.clone() },
         "task_store_id":repository.task_store_id,
         "task_status":task_status,
-        "task_error":task_error
+        "task_error":task_error,
+        "git":repository_git(&repository.path)
     })
+}
+
+const REPOSITORY_GIT_TTL: Duration = Duration::from_secs(5);
+static REPOSITORY_GIT_CACHE: std::sync::OnceLock<
+    Mutex<HashMap<PathBuf, (std::time::Instant, Value)>>,
+> = std::sync::OnceLock::new();
+
+/// Branch, head, and tracked-change count for an attached repository. Read with git2 so the
+/// package needs no Git executable, and cached briefly because snapshots are rebuilt on every
+/// live event. `dirty` counts tracked changes, staged or not; untracked files do not count.
+fn repository_git(path: &Path) -> Value {
+    if !path.exists() {
+        return json!({"available":false,"branch":null,"head":null,"dirty":null});
+    }
+    let cache = REPOSITORY_GIT_CACHE.get_or_init(Default::default);
+    if let Some((read_at, value)) = cache.lock().unwrap().get(path) {
+        if read_at.elapsed() < REPOSITORY_GIT_TTL {
+            return value.clone();
+        }
+    }
+    let value = read_repository_git(path);
+    cache.lock().unwrap().insert(
+        path.to_path_buf(),
+        (std::time::Instant::now(), value.clone()),
+    );
+    value
+}
+
+fn read_repository_git(path: &Path) -> Value {
+    // `open`, not `discover`: a plain folder inside some other repository is not that repository.
+    let repository = match Repository::open(path) {
+        Ok(repository) if !repository.is_bare() => repository,
+        _ => return json!({"available":false,"branch":null,"head":null,"dirty":null}),
+    };
+    let head = repository.head().ok();
+    let branch = head
+        .as_ref()
+        .filter(|reference| reference.is_branch())
+        .and_then(|reference| reference.shorthand())
+        .map(str::to_owned);
+    let head_id = head
+        .as_ref()
+        .and_then(|reference| reference.target())
+        .map(|id| id.to_string());
+    let mut options = git2::StatusOptions::new();
+    options
+        .include_untracked(false)
+        .include_ignored(false)
+        .exclude_submodules(true);
+    let dirty = repository
+        .statuses(Some(&mut options))
+        .ok()
+        .map(|statuses| statuses.len());
+    json!({"available":true,"branch":branch,"head":head_id,"dirty":dirty})
 }
 
 fn task_store_view(store: &TaskStoreConfig) -> Value {

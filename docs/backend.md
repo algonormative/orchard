@@ -108,6 +108,11 @@ gateway contract.
 
 Repository views add `name`, `task_store_id`, `task_status`, and `task_error`.
 `task_status` is one of `linked`, `none`, `missing`, or `unsupported`.
+They also carry `git: {available, branch, head, dirty}`, read with libgit2 (no Git
+executable at runtime) and cached for about five seconds per repository: `branch`
+is null for a detached or unborn HEAD, `head` is the commit id, and `dirty` counts
+tracked changes, staged or not, ignoring untracked files. A repository that has
+gone missing reports `available: false` with null fields.
 Task-store views add `name`, `source`, and `repository_id`; `source` is one of
 `owned`, `repository`, or `external`. The app-owned `default` store is listed
 first when present. Manually attached legacy stores remain `external` and stay

@@ -2842,3 +2842,84 @@ fn wait_until_waiting(host: &WorkspaceHost) {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
+
+#[test]
+fn attached_repositories_report_branch_head_and_tracked_changes() {
+    let temporary = TempDir::new().unwrap();
+    let host = WorkspaceHost::open(temporary.path().join("data"), packaged_br()).unwrap();
+    let (workspace_id, _, _) = create_workspace(&host, "Repository status");
+    let committed = |name: &str| {
+        let path = temporary.path().join(name);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("tracked.txt"), "one").unwrap();
+        let repository = git2::Repository::init(&path).unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        let head = {
+            let tree = repository.find_tree(index.write_tree().unwrap()).unwrap();
+            let signature = git2::Signature::now("Test", "test@example.com").unwrap();
+            repository
+                .commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+                .unwrap()
+        };
+        (path, repository, head)
+    };
+    let (clean, _, clean_head) = committed("clean");
+    let (modified, _, _) = committed("modified");
+    fs::write(modified.join("tracked.txt"), "two").unwrap();
+    let (staged, staged_repository, _) = committed("staged");
+    fs::write(staged.join("new.txt"), "new").unwrap();
+    let mut index = staged_repository.index().unwrap();
+    index.add_path(Path::new("new.txt")).unwrap();
+    index.write().unwrap();
+    let (untracked, _, _) = committed("untracked");
+    fs::write(untracked.join("scratch.txt"), "not tracked").unwrap();
+    let (detached, detached_repository, detached_head) = committed("detached");
+    detached_repository
+        .set_head_detached(detached_head)
+        .unwrap();
+    let removed = committed("removed").0;
+
+    let attach = |path: &Path| {
+        host.call(
+            "repository_attach",
+            json!({"workspace_id":workspace_id,"path":path}),
+        )
+        .unwrap();
+    };
+    // Attach stores each repository's canonical root (/var → /private/var on macOS).
+    let [clean, modified, staged, untracked, detached, removed] =
+        [clean, modified, staged, untracked, detached, removed]
+            .map(|path| path.canonicalize().unwrap());
+    for path in [&clean, &modified, &staged, &untracked, &detached, &removed] {
+        attach(path);
+    }
+    fs::remove_dir_all(&removed).unwrap();
+
+    let snapshot = host
+        .call("workspace_snapshot", json!({"workspace_id":workspace_id}))
+        .unwrap();
+    let git = |path: &Path| {
+        snapshot["workspace"]["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|repository| repository["path"] == json!(path))
+            .unwrap_or_else(|| panic!("{path:?} is attached"))["git"]
+            .clone()
+    };
+    let branch = git(&clean)["branch"].as_str().unwrap().to_owned();
+    assert!(branch == "main" || branch == "master", "{branch}");
+    assert_eq!(git(&clean)["head"], clean_head.to_string());
+    assert_eq!(git(&clean)["dirty"], 0);
+    assert_eq!(git(&modified)["dirty"], 1);
+    assert_eq!(git(&staged)["dirty"], 1);
+    assert_eq!(git(&untracked)["dirty"], 0, "untracked files are not dirty");
+    assert_eq!(git(&detached)["available"], true);
+    assert_eq!(git(&detached)["branch"], Value::Null);
+    assert_eq!(git(&detached)["head"], detached_head.to_string());
+    // A repository deleted after attaching is reported unavailable, not from cache.
+    assert_eq!(git(&removed)["available"], false);
+    assert_eq!(git(&removed)["dirty"], Value::Null);
+}
