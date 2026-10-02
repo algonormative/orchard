@@ -14,7 +14,20 @@ struct Options {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run().await {
+    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
+    if arguments.first().and_then(|argument| argument.to_str()) == Some("agent") {
+        // The agent client distinguishes usage, connection, and tool failures by exit code.
+        return match orchard_server::agent_client::run_cli(arguments.into_iter().skip(1).collect())
+            .await
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("orchard: {error}");
+                ExitCode::from(error.code)
+            }
+        };
+    }
+    match run(arguments).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("orchard: {error}");
@@ -23,12 +36,7 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run() -> Result<(), String> {
-    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
-    if arguments.first().and_then(|argument| argument.to_str()) == Some("agent") {
-        return orchard_server::agent_client::run_cli(arguments.into_iter().skip(1).collect())
-            .await;
-    }
+async fn run(arguments: Vec<OsString>) -> Result<(), String> {
     let Some(options) = parse_args(arguments)? else {
         println!("{}", usage());
         return Ok(());

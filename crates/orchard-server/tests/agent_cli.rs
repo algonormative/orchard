@@ -78,6 +78,86 @@ fn agent_cli_prints_structured_results_and_keeps_errors_off_stdout() {
 }
 
 #[test]
+fn agent_cli_exit_codes_separate_usage_connection_and_tool_failures() {
+    let temporary = TempDir::new().unwrap();
+    let host = Arc::new(WorkspaceHost::open(temporary.path().join("data"), packaged_br()).unwrap());
+    let workspace_id = host
+        .call(
+            "workspace_create",
+            json!({"name": "CLI exit codes", "owner_name": "Owner"}),
+        )
+        .unwrap()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = runtime.block_on(host.clone().start_server()).unwrap();
+    let token = host
+        .call("connection_info", json!({"workspace_id": workspace_id}))
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let credential_file = temporary.path().join("credential");
+    std::fs::write(&credential_file, &token).unwrap();
+    let endpoint = format!("http://{}/workspaces/{workspace_id}/mcp", server.endpoint());
+    let binary = env!("CARGO_BIN_EXE_orchard");
+    let exit = |endpoint: &str, arguments: &[&str]| {
+        Command::new(binary)
+            .args(["agent", "--endpoint", endpoint, "--credential-file"])
+            .arg(&credential_file)
+            .args(arguments)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+
+    // 2: nothing was sent (invalid request ID, unknown command).
+    let invalid = [
+        "send",
+        "--sender-id",
+        "a",
+        "--channel",
+        "general",
+        "--body",
+        "x",
+        "--request-id",
+        "has space",
+    ];
+    assert_eq!(exit(&endpoint, &invalid), Some(2));
+    assert_eq!(exit(&endpoint, &["frobnicate"]), Some(2));
+    // 3: the endpoint could not be reached.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let unreachable = format!(
+        "http://{}/workspaces/{workspace_id}/mcp",
+        closed.local_addr().unwrap()
+    );
+    drop(closed);
+    assert_eq!(exit(&unreachable, &["status"]), Some(3));
+    // 4: the workspace answered and the tool reported an error.
+    let args = temporary.path().join("args.json");
+    std::fs::write(&args, "{}").unwrap();
+    assert_eq!(
+        exit(
+            &endpoint,
+            &[
+                "call",
+                "no_such_tool",
+                "--args-file",
+                args.to_str().unwrap()
+            ]
+        ),
+        Some(4)
+    );
+    // Help after a command prints usage and succeeds.
+    assert_eq!(exit(&endpoint, &["status", "--help"]), Some(0));
+
+    runtime.block_on(server.shutdown()).unwrap();
+}
+
+#[test]
 fn agent_cli_core_loop_runs_from_environment_defaults() {
     let temporary = TempDir::new().unwrap();
     let host = Arc::new(WorkspaceHost::open(temporary.path().join("data"), packaged_br()).unwrap());

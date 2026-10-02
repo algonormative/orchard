@@ -6,7 +6,8 @@ starts Orchard nor launches, configures, or authenticates an agent/provider.
 
 Every invocation needs the endpoint and a local credential file. The credential
 is read only from that file, is never accepted as an argument, and is redacted
-from client diagnostics.
+from client diagnostics. The file must hold one credential line; anything else
+(a key file, a JSON config) is refused before connecting, without printing it.
 
 The packaged app exposes the same command without relying on `PATH`:
 
@@ -75,7 +76,20 @@ orchard agent --endpoint http://127.0.0.1:4312/workspaces/WORKSPACE_ID/mcp \
 
 Uploads are limited to 512 KiB. `status` calls `workspace_status`. JSON results
 go to standard output; diagnostics go to standard error. URLs must be
-credential-free `http` loopback endpoints (`localhost`, `127.0.0.1`, or
-`::1`); the rmcp Streamable HTTP transport is configured not to follow redirects
-so credentials are not replayed elsewhere. The CLI has no saved configuration,
-no watches or wakeups, no auto-claiming, and no automatic retry of mutations.
+credential-free `http` loopback endpoints (`localhost` or `127.0.0.1`; Orchard
+binds IPv4 loopback only); the rmcp Streamable HTTP transport is configured not
+to follow redirects so credentials are not replayed elsewhere. The CLI has no
+saved configuration, no watches or wakeups, no auto-claiming, and no automatic
+retry of mutations. `--help` works before or directly after the command.
+
+Request IDs follow the workspace identifier rule: 1–128 ASCII letters, digits,
+`.`, `_`, or `-`. An invalid one is rejected before connecting.
+
+Exit codes tell an agent what to do next:
+
+| Code | Meaning | Next step |
+| --- | --- | --- |
+| 0 | Success; JSON on standard output | — |
+| 2 | Invalid usage or a local precondition failed; nothing was sent | Fix the arguments or credential file |
+| 3 | Connection, transport, or timeout failure | Retry with the same request ID |
+| 4 | The workspace tool reported an error | Fix the request; retrying will not help |

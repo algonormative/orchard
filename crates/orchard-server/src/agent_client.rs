@@ -78,7 +78,7 @@ impl Request {
             } => {
                 required_text(participant_id, "participant ID")?;
                 required_text(name, "name")?;
-                required_text(request_id, "request ID")?;
+                valid_request_id(request_id)?;
             }
             Self::Resume { participant_id } | Self::Alerts { participant_id, .. } => {
                 required_text(participant_id, "participant ID")?;
@@ -89,7 +89,7 @@ impl Request {
                 request_id,
             } => {
                 required_text(participant_id, "participant ID")?;
-                required_text(request_id, "request ID")?;
+                valid_request_id(request_id)?;
                 if message_ids.is_empty() {
                     return Err("ack requires at least one --message-id".to_owned());
                 }
@@ -105,7 +105,7 @@ impl Request {
             } => {
                 required_text(sender_id, "sender ID")?;
                 required_text(body, "message body")?;
-                required_text(request_id, "request ID")?;
+                valid_request_id(request_id)?;
                 if !destination.is_object() {
                     return Err(
                         "message destination must be a channel or direct participant".to_owned(),
@@ -118,7 +118,7 @@ impl Request {
                 request_id,
             } => {
                 required_text(path, "workspace path")?;
-                required_text(request_id, "request ID")?;
+                valid_request_id(request_id)?;
                 let metadata = fs::metadata(local_file).map_err(|error| {
                     format!(
                         "cannot inspect upload file {}: {error}",
@@ -190,19 +190,71 @@ fn resolve_connection(
     })
 }
 
+/// Exit code when nothing was sent: invalid usage or a local precondition failed.
+pub const EXIT_USAGE: u8 = 2;
+/// Exit code for a connection, transport, or timeout failure; the request may be retried
+/// with the same request ID.
+pub const EXIT_CONNECTION: u8 = 3;
+/// Exit code when the workspace tool itself reported an error; fix the request instead.
+pub const EXIT_TOOL: u8 = 4;
+/// rmcp waits up to five seconds for its session DELETE; never cut cleanup shorter.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(6);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliError {
+    pub code: u8,
+    pub message: String,
+}
+
+impl CliError {
+    fn usage(message: impl Into<String>) -> Self {
+        Self {
+            code: EXIT_USAGE,
+            message: message.into(),
+        }
+    }
+    fn connection(message: impl Into<String>) -> Self {
+        Self {
+            code: EXIT_CONNECTION,
+            message: message.into(),
+        }
+    }
+    fn tool(message: impl Into<String>) -> Self {
+        Self {
+            code: EXIT_TOOL,
+            message: message.into(),
+        }
+    }
+    fn redacted(self, credential: &str) -> Self {
+        Self {
+            message: redact(&self.message, credential),
+            ..self
+        }
+    }
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 pub async fn execute(connection: &ConnectionOptions, request: Request) -> Result<Value, String> {
     let credential_label = connection.credential_file.display().to_string();
-    execute_labeled(connection, request, &credential_label).await
+    execute_labeled(connection, request, &credential_label)
+        .await
+        .map_err(|error| error.message)
 }
 
 async fn execute_labeled(
     connection: &ConnectionOptions,
     request: Request,
     credential_label: &str,
-) -> Result<Value, String> {
-    request.preflight()?;
-    let endpoint = loopback_endpoint(&connection.endpoint)?;
-    let credential = read_credential(&connection.credential_file, credential_label)?;
+) -> Result<Value, CliError> {
+    request.preflight().map_err(CliError::usage)?;
+    let endpoint = loopback_endpoint(&connection.endpoint).map_err(CliError::usage)?;
+    let credential =
+        read_credential(&connection.credential_file, credential_label).map_err(CliError::usage)?;
     let mut client = tokio::time::timeout(INVOCATION_TIMEOUT, async {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -220,17 +272,40 @@ async fn execute_labeled(
             .map_err(|error| redact(&error.to_string(), &credential))
     })
     .await
-    .map_err(|_| "MCP session setup timed out after 15 seconds".to_owned())??;
+    .map_err(|_| CliError::connection("MCP session setup timed out after 15 seconds"))?
+    .map_err(CliError::connection)?;
     let operation = tokio::time::timeout(INVOCATION_TIMEOUT, perform(&client, request))
         .await
-        .map_err(|_| "MCP invocation timed out after 15 seconds".to_owned())?;
-    // A completed operation remains successful even when best-effort session cleanup fails.
-    let _ = tokio::time::timeout(Duration::from_secs(1), client.close()).await;
-    operation.map_err(|error| redact(&error, &credential))
+        .unwrap_or_else(|_| {
+            Err(CliError::connection(
+                "MCP invocation timed out after 15 seconds",
+            ))
+        });
+    // Close on every path, including a timeout, so the server can drop the session now
+    // rather than at its idle eviction. A completed operation stays successful even if
+    // best-effort cleanup fails.
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, client.close()).await;
+    operation.map_err(|error| error.redacted(&credential))
 }
 
 /// Parses and runs the packaged `orchard agent` command without starting a server.
-pub async fn run_cli(arguments: Vec<OsString>) -> Result<(), String> {
+pub async fn run_cli(arguments: Vec<OsString>) -> Result<(), CliError> {
+    let Some((connection, request)) = parse_invocation(arguments).map_err(CliError::usage)? else {
+        return Ok(());
+    };
+    let result =
+        execute_labeled(&connection.options, request, &connection.credential_label).await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&result).map_err(|error| CliError::tool(error.to_string()))?
+    );
+    Ok(())
+}
+
+/// Returns `None` after printing help.
+fn parse_invocation(
+    arguments: Vec<OsString>,
+) -> Result<Option<(ResolvedConnection, Request)>, String> {
     let mut values = arguments.into_iter();
     let mut endpoint = None;
     let mut credential_file = None;
@@ -251,21 +326,25 @@ pub async fn run_cli(arguments: Vec<OsString>) -> Result<(), String> {
             }
             Some("-h" | "--help") => {
                 println!("{}", usage());
-                return Ok(());
+                return Ok(None);
             }
             Some(command) => break command.to_owned(),
             None => return Err(usage().to_owned()),
         }
     };
+    let arguments: Vec<OsString> = values.collect();
+    // `orchard agent status --help`; only the first argument, so a message body or
+    // other value that happens to read "--help" is never mistaken for it.
+    if matches!(
+        arguments.first().and_then(|value| value.to_str()),
+        Some("-h" | "--help")
+    ) {
+        println!("{}", usage());
+        return Ok(None);
+    }
     let connection = resolve_connection(endpoint, credential_file, |name| std::env::var_os(name))?;
-    let request = parse_command(&command, values.collect())?;
-    let result =
-        execute_labeled(&connection.options, request, &connection.credential_label).await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?
-    );
-    Ok(())
+    let request = parse_command(&command, arguments)?;
+    Ok(Some((connection, request)))
 }
 
 pub fn usage() -> &'static str {
@@ -432,10 +511,10 @@ fn next_os(it: &mut impl Iterator<Item = OsString>, error: &str) -> Result<OsStr
 async fn perform(
     client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
     request: Request,
-) -> Result<Value, String> {
+) -> Result<Value, CliError> {
     match request {
-        Request::Tools => serde_json::to_value(client.list_all_tools().await.map_err(|error| error.to_string())?)
-            .map_err(|error| format!("cannot encode tool schemas: {error}")),
+        Request::Tools => serde_json::to_value(client.list_all_tools().await.map_err(|error| CliError::connection(error.to_string()))?)
+            .map_err(|error| CliError::tool(format!("cannot encode tool schemas: {error}"))),
         Request::Call { tool, arguments } => call(client, &tool, arguments).await,
         Request::Register { participant_id, name, request_id } => {
             call(client, "mail_register", json!({"participant_id": participant_id, "name": name, "request_id": request_id})).await
@@ -451,9 +530,9 @@ async fn perform(
             call(client, "mail_send", json!({"sender_id": sender_id, "destination": destination, "body": body, "request_id": request_id})).await
         }
         Request::Upload { local_file, path, request_id } => {
-            let content = fs::read(&local_file).map_err(|error| format!("cannot read upload file {}: {error}", local_file.display()))?;
+            let content = fs::read(&local_file).map_err(|error| CliError::usage(format!("cannot read upload file {}: {error}", local_file.display())))?;
             if content.len() as u64 > MAX_UPLOAD_BYTES {
-                return Err("upload source exceeds the 512 KiB limit".to_owned());
+                return Err(CliError::usage("upload source exceeds the 512 KiB limit"));
             }
             call(client, "artifact_upload", json!({"path": path, "content_base64": base64::engine::general_purpose::STANDARD.encode(content), "request_id": request_id})).await
         }
@@ -465,25 +544,29 @@ async fn call(
     client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
     name: &str,
     arguments: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CliError> {
     let arguments = arguments
         .as_object()
         .cloned()
-        .ok_or_else(|| "tool arguments must be a JSON object".to_owned())?;
+        .ok_or_else(|| CliError::usage("tool arguments must be a JSON object"))?;
     let result = client
         .call_tool(CallToolRequestParams::new(name.to_owned()).with_arguments(arguments))
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| CliError::connection(error.to_string()))?;
     if result.is_error == Some(true) {
         let detail = result
             .structured_content
             .or_else(|| serde_json::to_value(&result.content).ok())
             .unwrap_or(Value::Null);
-        return Err(format!("MCP tool {name:?} returned an error: {detail}"));
+        return Err(CliError::tool(format!(
+            "MCP tool {name:?} returned an error: {detail}"
+        )));
     }
-    result
-        .structured_content
-        .ok_or_else(|| format!("MCP tool {name:?} returned no structured JSON result"))
+    result.structured_content.ok_or_else(|| {
+        CliError::tool(format!(
+            "MCP tool {name:?} returned no structured JSON result"
+        ))
+    })
 }
 
 pub fn loopback_endpoint(input: &str) -> Result<Url, String> {
@@ -499,20 +582,20 @@ pub fn loopback_endpoint(input: &str) -> Result<Url, String> {
             "workspace MCP URL must be a credential-free loopback http endpoint".to_owned(),
         );
     }
+    // Orchard binds IPv4 loopback only, so `[::1]` could never connect.
     let is_loopback = match url.host() {
         Some(Host::Ipv4(address)) => address.octets() == [127, 0, 0, 1],
-        Some(Host::Ipv6(address)) => address.is_loopback(),
         Some(Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
-        None => false,
+        Some(Host::Ipv6(_)) | None => false,
     };
     if !is_loopback {
-        return Err("workspace MCP URL must target localhost, 127.0.0.1, or ::1".to_owned());
+        return Err("workspace MCP URL must target localhost or 127.0.0.1".to_owned());
     }
     let mut parts = url
         .path_segments()
         .ok_or_else(|| "workspace MCP URL must have a path".to_owned())?;
     if parts.next() != Some("workspaces")
-        || !parts.next().is_some_and(|id| !id.is_empty())
+        || parts.next().is_none_or(|id| id.is_empty())
         || parts.next() != Some("mcp")
         || parts.next().is_some()
     {
@@ -528,7 +611,31 @@ fn read_credential(path: &PathBuf, label: &str) -> Result<String, String> {
     if credential.is_empty() {
         return Err("credential file is empty".to_owned());
     }
+    // Refuse anything that is not one bounded token line (an SSH key, a JSON config)
+    // rather than send it as a bearer. The contents are never echoed.
+    let token_shaped = (16..=1024).contains(&credential.len())
+        && credential
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._~+/=-".contains(&byte));
+    if !token_shaped {
+        return Err(format!(
+            "credential file {label} does not contain a single workspace credential line"
+        ));
+    }
     Ok(credential)
+}
+
+/// The server's identifier rule: 1–128 ASCII letters, digits, dot, underscore, or hyphen.
+fn valid_request_id(value: &str) -> Result<(), String> {
+    let valid = (1..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if valid {
+        Ok(())
+    } else {
+        Err("request ID must be 1-128 ASCII letters, digits, '.', '_' or '-'".to_owned())
+    }
 }
 
 fn mutation_requires_request_id(tool: &str) -> bool {
@@ -556,14 +663,14 @@ fn mutation_requires_request_id(tool: &str) -> bool {
 }
 
 fn require_request_id(arguments: &Value) -> Result<(), String> {
-    arguments
+    let request_id = arguments
         .get("request_id")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
             "this mutation requires a non-empty request_id before connecting".to_owned()
         })?;
-    Ok(())
+    valid_request_id(request_id)
 }
 
 fn required_text(value: &str, field: &str) -> Result<(), String> {
@@ -607,6 +714,8 @@ mod tests {
         assert!(loopback_endpoint("https://localhost/mcp").is_err());
         assert!(loopback_endpoint("http://example.test/mcp").is_err());
         assert!(loopback_endpoint("http://secret@localhost/mcp").is_err());
+        // The server binds IPv4 loopback only.
+        assert!(loopback_endpoint("http://[::1]:4312/workspaces/a/mcp").is_err());
         assert_eq!(
             redact("authorization failed: secret-token", "secret-token"),
             "authorization failed: [REDACTED]"
@@ -623,6 +732,62 @@ mod tests {
             request.preflight().unwrap_err(),
             "this mutation requires a non-empty request_id before connecting"
         );
+    }
+
+    #[test]
+    fn request_ids_follow_the_server_identifier_rule_before_connecting() {
+        let send = |request_id: &str| Request::Send {
+            sender_id: "bot".to_owned(),
+            destination: json!({"kind":"channel","id":"general"}),
+            body: "hi".to_owned(),
+            request_id: request_id.to_owned(),
+        };
+        assert!(send("handoff-17.v2_a").preflight().is_ok());
+        assert!(send(&"a".repeat(128)).preflight().is_ok());
+        for invalid in [
+            "handoff 17",
+            "{uuid}",
+            "upload/report.json",
+            &"a".repeat(129),
+        ] {
+            assert!(
+                send(invalid)
+                    .preflight()
+                    .unwrap_err()
+                    .contains("request ID"),
+                "{invalid:?}"
+            );
+        }
+        let call = Request::Call {
+            tool: "task_claim".to_owned(),
+            arguments: json!({"request_id":"claim 1"}),
+        };
+        assert!(call.preflight().unwrap_err().contains("request ID"));
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_not_one_credential_line_is_refused_without_echoing_it() {
+        let temporary = TempDir::new().unwrap();
+        let key = temporary.path().join("id_ed25519");
+        let secret_line = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB";
+        fs::write(
+            &key,
+            format!("-----BEGIN OPENSSH PRIVATE KEY-----\n{secret_line}\n-----END OPENSSH PRIVATE KEY-----\n"),
+        )
+        .unwrap();
+        let error = execute_labeled(
+            &ConnectionOptions {
+                endpoint: "http://127.0.0.1:9/workspaces/t/mcp".to_owned(),
+                credential_file: key,
+            },
+            Request::Status,
+            "key-file",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, EXIT_USAGE);
+        assert!(error.message.contains("single workspace credential line"));
+        assert!(!error.message.contains(secret_line));
     }
 
     fn os_args(values: &[&str]) -> Vec<OsString> {
@@ -692,8 +857,8 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(error.contains(CREDENTIAL_FILE_ENV), "{error}");
-        assert!(!error.contains(mistaken), "{error}");
+        assert!(error.message.contains(CREDENTIAL_FILE_ENV), "{error}");
+        assert!(!error.message.contains(mistaken), "{error}");
     }
 
     #[test]

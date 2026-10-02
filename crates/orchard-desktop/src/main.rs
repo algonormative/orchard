@@ -77,7 +77,7 @@ fn main() {
             arguments.into_iter().skip(1).collect(),
         )) {
             eprintln!("Orchard agent: {error}");
-            std::process::exit(2);
+            std::process::exit(error.code.into());
         }
         return;
     }
