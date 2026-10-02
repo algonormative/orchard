@@ -185,6 +185,10 @@ The executable supplies an embedded static router to
   canonical resource permalink.
 - `GET /api/workspaces/{workspace_id}/artifact/download?...` serves a bounded
   authenticated download or a magic-verified safe raster preview.
+- `GET /api/build` (served by the embedded UI router) returns the build identity
+  described in [build-identity.md](build-identity.md). Like every `/api` read it
+  requires the exact loopback Host, and a supplied Origin must match; it needs
+  no session because it exposes no workspace data.
 - `GET /api/workspaces/{workspace_id}/events` upgrades to a browser WebSocket.
   It requires an active session cookie plus the exact loopback Host and Origin;
   URL query parameters and bearer credentials are rejected.

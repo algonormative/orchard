@@ -373,6 +373,10 @@ impl WorkspaceHost {
             )
             .layer(DefaultBodyLimit::max(1024 * 1024))
             .with_state(self.clone());
+        let ui = ui.layer(axum::middleware::from_fn_with_state(
+            self.clone(),
+            guard_ui_api_reads,
+        ));
         let app = api.merge(ui);
         let (shutdown, receiver) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -2067,6 +2071,21 @@ fn validate_browser_read(
         }
     }
     Ok(())
+}
+
+/// The embedded UI router may serve read-only `/api/*` routes such as `/api/build`;
+/// they get the same exact Host/Origin checks as the host's own browser reads.
+async fn guard_ui_api_reads(
+    State(host): State<Arc<WorkspaceHost>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if request.uri().path().starts_with("/api/") {
+        if let Err(error) = validate_browser_read(&host, request.headers()) {
+            return browser_validation_response(error);
+        }
+    }
+    next.run(request).await
 }
 
 fn validate_host(host: &WorkspaceHost, headers: &HeaderMap) -> Result<(), BrowserValidationError> {
