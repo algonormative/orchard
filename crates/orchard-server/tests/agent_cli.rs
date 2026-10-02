@@ -273,6 +273,44 @@ fn agent_cli_alerts_wait_returns_when_a_message_arrives() {
     let waited: serde_json::Value = serde_json::from_slice(&waited.stdout).unwrap();
     assert_eq!(waited["alerts"][0]["message"]["body"], "Your turn.");
 
+    // Ordinary channel posts appear only with --channels; --limit caps the page.
+    let posted = agent(&[
+        "send",
+        "--sender-id",
+        "alice",
+        "--channel",
+        "general",
+        "--body",
+        "Standup notes",
+        "--request-id",
+        "channel-post-1",
+    ])
+    .output()
+    .unwrap();
+    assert!(posted.status.success());
+    let read = |extra: &[&str]| {
+        let mut arguments = vec!["alerts", "--participant-id", "bob", "--after", "0"];
+        arguments.extend_from_slice(extra);
+        let output = agent(&arguments).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["alerts"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let has_channel_post = |alerts: &[serde_json::Value]| {
+        alerts
+            .iter()
+            .any(|alert| alert["message"]["body"] == "Standup notes")
+    };
+    assert!(!has_channel_post(&read(&[])));
+    assert!(has_channel_post(&read(&["--channels"])));
+    assert_eq!(read(&["--channels", "--limit", "1"]).len(), 1);
+
     runtime.block_on(server.shutdown()).unwrap();
 }
 

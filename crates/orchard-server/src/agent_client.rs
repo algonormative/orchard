@@ -42,6 +42,10 @@ pub enum Request {
         after: u64,
         /// Seconds the server may hold the call waiting for a first alert (0 = no wait).
         wait_seconds: u64,
+        /// Also report ordinary channel messages, not only directs/mentions/replies/broadcasts.
+        include_channels: bool,
+        /// Page size, 1-200; the server default (50) when absent.
+        limit: Option<u64>,
     },
     Acknowledge {
         participant_id: String,
@@ -378,7 +382,7 @@ fn parse_invocation(
 }
 
 pub fn usage() -> &'static str {
-    "usage: Orchard agent [--endpoint URL] [--credential-file FILE] COMMAND\n\n--endpoint and --credential-file default to ORCHARD_AGENT_ENDPOINT and ORCHARD_AGENT_CREDENTIAL_FILE (a path, never the credential itself); flags take precedence.\n\ncommands: tools | call TOOL (--args-file FILE | stdin) | join --participant-id ID --name NAME --request-id ID | resume --participant-id ID | alerts --participant-id ID --after CURSOR [--wait SECONDS] | ack --participant-id ID --message-id ID [--message-id ID ...] --request-id ID | send --sender-id ID (--channel ID | --direct ID) --body TEXT --request-id ID | upload FILE --path PATH --request-id ID | status"
+    "usage: Orchard agent [--endpoint URL] [--credential-file FILE] COMMAND\n\n--endpoint and --credential-file default to ORCHARD_AGENT_ENDPOINT and ORCHARD_AGENT_CREDENTIAL_FILE (a path, never the credential itself); flags take precedence.\n\ncommands: tools | call TOOL (--args-file FILE | stdin) | join --participant-id ID --name NAME --request-id ID | resume --participant-id ID | alerts --participant-id ID --after CURSOR [--wait SECONDS] [--channels] [--limit N] | ack --participant-id ID --message-id ID [--message-id ID ...] --request-id ID | send --sender-id ID (--channel ID | --direct ID) --body TEXT --request-id ID | upload FILE --path PATH --request-id ID | status"
 }
 fn parse_command(command: &str, arguments: Vec<OsString>) -> Result<Request, String> {
     match command {
@@ -423,7 +427,26 @@ fn parse_command(command: &str, arguments: Vec<OsString>) -> Result<Request, Str
             })
         }
         "alerts" => {
-            let v = named(arguments, &["--participant-id", "--after", "--wait"])?;
+            // `--channels` is a bare flag; the rest are `--name value` pairs.
+            let include_channels = arguments.iter().any(|argument| argument == "--channels");
+            let arguments = arguments
+                .into_iter()
+                .filter(|argument| argument != "--channels")
+                .collect();
+            let v = named(
+                arguments,
+                &["--participant-id", "--after", "--wait", "--limit"],
+            )?;
+            let limit = match v.get("--limit") {
+                None => None,
+                Some(value) => Some(
+                    value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|limit| (1..=200).contains(limit))
+                        .ok_or("--limit must be a whole number from 1 to 200")?,
+                ),
+            };
             let wait_seconds = match v.get("--wait") {
                 None => 0,
                 Some(value) => value
@@ -442,6 +465,8 @@ fn parse_command(command: &str, arguments: Vec<OsString>) -> Result<Request, Str
                     .parse()
                     .map_err(|_| "--after must be a non-negative integer")?,
                 wait_seconds,
+                include_channels,
+                limit,
             })
         }
         "ack" => {
@@ -563,8 +588,14 @@ async fn perform(
             call(client, "mail_register", json!({"participant_id": participant_id, "name": name, "request_id": request_id})).await
         }
         Request::Resume { participant_id } => call(client, "mail_resume", json!({"participant_id": participant_id})).await,
-        Request::Alerts { participant_id, after, wait_seconds } => {
+        Request::Alerts { participant_id, after, wait_seconds, include_channels, limit } => {
             let mut arguments = json!({"participant_id": participant_id, "after": after});
+            if include_channels {
+                arguments["include_channel_messages"] = json!(true);
+            }
+            if let Some(limit) = limit {
+                arguments["limit"] = json!(limit);
+            }
             if wait_seconds > 0 {
                 arguments["wait_seconds"] = json!(wait_seconds);
             }
@@ -920,7 +951,9 @@ mod tests {
             Request::Alerts {
                 participant_id: "bot".to_owned(),
                 after: 7,
-                wait_seconds: 0
+                wait_seconds: 0,
+                include_channels: false,
+                limit: None,
             }
         );
         assert_eq!(
@@ -928,7 +961,9 @@ mod tests {
             Request::Alerts {
                 participant_id: "bot".to_owned(),
                 after: 7,
-                wait_seconds: 120
+                wait_seconds: 120,
+                include_channels: false,
+                limit: None,
             }
         );
         for invalid in ["121", "-1", "soon"] {
@@ -942,6 +977,8 @@ mod tests {
             participant_id: "bot".to_owned(),
             after: 0,
             wait_seconds: u64::MAX,
+            include_channels: false,
+            limit: None,
         };
         assert!(oversized.preflight().unwrap_err().contains("--wait"));
         assert_eq!(
@@ -954,6 +991,40 @@ mod tests {
             arguments: json!({"participant_id":"bot","wait_seconds":60}),
         };
         assert_eq!(generic.wait_seconds(), 60);
+    }
+
+    #[test]
+    fn alerts_channels_flag_and_limit_are_parsed_and_bounded() {
+        let parse = |extra: &[&str]| {
+            let mut values = vec!["--participant-id", "bot", "--after", "0"];
+            values.extend_from_slice(extra);
+            parse_command("alerts", os_args(&values))
+        };
+        let Request::Alerts {
+            include_channels,
+            limit,
+            ..
+        } = parse(&["--channels", "--limit", "5"]).unwrap()
+        else {
+            panic!("alerts request");
+        };
+        assert!(include_channels);
+        assert_eq!(limit, Some(5));
+        let Request::Alerts {
+            include_channels,
+            limit,
+            ..
+        } = parse(&[]).unwrap()
+        else {
+            panic!("alerts request");
+        };
+        assert!(!include_channels);
+        assert_eq!(limit, None);
+        for invalid in ["0", "201", "many"] {
+            assert!(parse(&["--limit", invalid])
+                .unwrap_err()
+                .contains("--limit"));
+        }
     }
 
     #[test]

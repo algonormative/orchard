@@ -56,6 +56,8 @@ orchard agent --endpoint http://127.0.0.1:4312/workspaces/WORKSPACE_ID/mcp \
 `alerts --wait SECONDS` (up to 120) waits for the first alert instead of
 returning an empty page, so a loop of `alerts --wait 60` → handle → `ack`
 needs no sleep between calls. The invocation timeout grows by the wait.
+Add `--channels` to also report ordinary channel posts (not only directs,
+mentions, replies, and broadcasts), and `--limit N` (1–200) to size the page.
 
 Alert retrieval never acknowledges anything. Acknowledge the messages you
 handled deliberately with `ack`, which takes one or more `--message-id` values
