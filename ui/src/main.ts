@@ -800,8 +800,6 @@ function renderWorkspace() {
   const buildUpdate = el("div", "build-update-notice"); buildUpdate.id = "build-update-notice"; buildUpdate.hidden = true; buildUpdate.setAttribute("role", "status");
   buildUpdate.append(el("span", "", "Orchard was updated."), button("Reload", () => window.location.reload(), "primary"), button("Dismiss", dismissBuildUpdateNotice, "subtle"));
   top.append(connection, noticeBar, buildUpdate);
-  patchConnectionStatus();
-  patchBuildUpdateNotice();
 
   const conversations = el("aside", "sidebar resource-tree");
   conversations.id = "conversations";
@@ -822,6 +820,8 @@ function renderWorkspace() {
   conversations.addEventListener("click", (event) => { if (event.target instanceof Element && event.target.closest("button") && state.activeHref) observeResourceClick(state.activeHref); });
   layout.append(conversations, viewer);
   root.append(top, layout);
+  patchConnectionStatus();
+  patchBuildUpdateNotice();
   patchOnboarding();
   patchWorkspace();
   restoreConversationContext();
@@ -1550,6 +1550,7 @@ function taskBackendErrors() {
 }
 
 async function selectConversation(kind: ConversationKind, id: string, fromResource = false) {
+  const reselectingCurrentConversation = state.conversationKind === kind && state.selectedConversation === id;
   if (state.workspace) {
     const tab: AppTab = kind === "direct" && id === "__all_direct__" ? collectionTab("directs", state.workspace.id) : descriptor(kind === "channel" ? { kind: "channel", workspace_id: state.workspace.id, id } : kind === "direct" ? { kind: "direct", workspace_id: state.workspace.id, id } : { kind: "broadcast", workspace_id: state.workspace.id }, kind === "broadcast" ? "Broadcast" : kind === "channel" ? channelLabel(id) : participantLabel(participantName(id)));
     const existing = prepareTab(tab);
@@ -1560,7 +1561,7 @@ async function selectConversation(kind: ConversationKind, id: string, fromResour
   state.selectedConversation = id;
   state.conversationKind = kind;
   state.agentData = undefined; state.agentLinks = undefined;
-  state.replyTo = undefined;
+  if (!reselectingCurrentConversation) state.replyTo = undefined;
   state.conversationMessages = [];
   patchConversations();
   patchConversation();

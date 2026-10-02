@@ -82,6 +82,43 @@ test("keyboard chooser and settings navigation moves focus without leaving it on
   await expect(composer).toBeFocused();
 });
 
+test("Settings return paths preserve a reply draft and its original thread target", async ({ page }) => {
+  await unlock(page);
+  const chats = await openTree(page, "Chats");
+  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  const originalMessage = page.locator(".message").filter({ hasText: "General fixture message" });
+  const composer = page.getByLabel("Message");
+
+  await originalMessage.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(composer).toHaveAttribute("placeholder", "Write a reply");
+  await chats.getByRole("button", { name: "@Alice", exact: true }).click();
+  await expect(composer).toHaveAttribute("placeholder", "Write a message");
+
+  await chats.getByRole("button", { name: "#general", exact: true }).click();
+  await originalMessage.getByRole("button", { name: "Reply", exact: true }).click();
+  await composer.fill("Reply survives every Settings return path");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Back to workspace", exact: true }).first().click();
+  await expect(composer).toHaveValue("Reply survives every Settings return path");
+  await expect(composer).toHaveAttribute("placeholder", "Write a reply");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await expect(composer).toHaveValue("Reply survives every Settings return path");
+  await expect(composer).toHaveAttribute("placeholder", "Write a reply");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.goBack();
+  await expect(composer).toHaveValue("Reply survives every Settings return path");
+  await expect(composer).toHaveAttribute("placeholder", "Write a reply");
+
+  const sent = page.waitForResponse((response) => response.url().endsWith("/api/call") && response.request().postDataJSON().operation === "mail_send");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const payload = (await sent).request().postDataJSON();
+  expect(payload.args).toEqual(expect.objectContaining({ body: "Reply survives every Settings return path", thread_id: "general-1" }));
+});
+
 test("background refresh does not steal a focused workspace draft", async ({ page, request }) => {
   await unlock(page);
   await page.getByRole("button", { name: "New workspace", exact: true }).click();
@@ -253,6 +290,25 @@ test("a newer-build notice leaves a composer draft intact until Reload", async (
   const navigated = page.waitForEvent("framenavigated");
   await update.getByRole("button", { name: "Reload", exact: true }).click();
   await navigated;
+});
+
+test("Settings return restores live connection status and an existing build-update notice", async ({ page, request }) => {
+  await unlock(page);
+  const connection = page.locator("#connection-status");
+  const update = page.locator("#build-update-notice");
+  await expect(connection).toHaveAttribute("data-state", "connected");
+  await expect(connection).toHaveText("Live");
+  await request.post("/fixture/build", { data: { app_version: "0.2.1", server_version: "0.1.0", ui_hash: "c".repeat(64) } });
+  await request.post("/fixture/drop-events");
+  await expect(update).toBeVisible();
+  await expect(connection).toHaveAttribute("data-state", "connected");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Back to workspace", exact: true }).first().click();
+  await expect(connection).toHaveAttribute("data-state", "connected");
+  await expect(connection).toHaveText("Live");
+  await expect(update).toBeVisible();
+  await expect(update).toContainText("Orchard was updated.");
 });
 
 test("assigned in-progress work appears under its direct participant and opens its task tab", async ({ page, request }) => {
