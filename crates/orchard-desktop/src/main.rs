@@ -71,6 +71,16 @@ impl ShutdownState {
 }
 
 fn main() {
+    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
+    if arguments.first().and_then(|argument| argument.to_str()) == Some("agent") {
+        if let Err(error) = tauri::async_runtime::block_on(orchard_server::agent_client::run_cli(
+            arguments.into_iter().skip(1).collect(),
+        )) {
+            eprintln!("Orchard agent: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     let options = match LaunchOptions::parse(env::args_os().skip(1)) {
         Ok(options) => options,
         Err(error) => {

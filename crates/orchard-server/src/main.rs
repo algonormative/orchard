@@ -24,7 +24,12 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), String> {
-    let Some(options) = parse_args(env::args_os().skip(1))? else {
+    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
+    if arguments.first().and_then(|argument| argument.to_str()) == Some("agent") {
+        return orchard_server::agent_client::run_cli(arguments.into_iter().skip(1).collect())
+            .await;
+    }
+    let Some(options) = parse_args(arguments)? else {
         println!("{}", usage());
         return Ok(());
     };
@@ -114,7 +119,7 @@ fn bundled_br_for(executable: &Path) -> Result<PathBuf, String> {
 }
 
 fn usage() -> &'static str {
-    "usage: orchard [serve] --data-dir PATH [--port PORT]"
+    "usage: orchard [serve] --data-dir PATH [--port PORT]\n       orchard agent --help"
 }
 
 #[cfg(test)]

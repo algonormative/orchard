@@ -260,12 +260,19 @@ test("all workspaces chooser supports back and reload without an access key", as
 
 test("workspace settings has a canonical reloadable route and opens README in the viewer", async ({ page, request }) => {
   await unlock(page);
+  const build = await request.get("/api/build");
+  expect(build.status()).toBe(200);
+  expect(build.headers()["cache-control"]).toBe("no-cache");
+  expect(build.headers()["x-content-type-options"]).toBe("nosniff");
+  expect(await build.json()).toEqual({ app_version: "0.2.0", server_version: "0.1.0", ui_hash: "f".repeat(64) });
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(page).toHaveURL(/\/w\/workspace-1\/settings$/);
   await expect(page.getByRole("heading", { name: "Workspace settings", exact: true })).toBeVisible();
   await expect(page.getByText(/2 participants · 2 channels/)).toBeVisible();
   await expect(page.locator(".settings-section .code-block code").first()).toContainText("workspace workspace-1");
   await expect(page.locator(".settings-section .code-block code").nth(1)).toContainText("/private/tmp/orchard-fixture-workspaces/workspace-1");
+  await expect(page.locator(".build-identity .code-block code")).toContainText("App version: 0.2.0");
+  await expect(page.locator(".build-identity .code-block code")).toContainText("Revision: unavailable");
   await request.post("/fixture/revoke"); await page.reload();
   await expect(page).toHaveURL(/\/w\/workspace-1\/settings$/);
   await page.getByRole("button", { name: "Open README", exact: true }).click();

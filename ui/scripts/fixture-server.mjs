@@ -8,6 +8,7 @@ const dist = new URL("../dist/", import.meta.url);
 const workspace = { id: "workspace-1", name: "Fixture workspace" };
 const archivedWorkspace = { id: "archived-first", name: "Archived fixture", archived: true };
 const taskStore = { id: "default", name: "Workspace tasks", source: "owned", path: "/private/tmp/orchard-fixture-workspaces/a-very-long-workspace-identifier-that-must-wrap-within-the-details-panel/tasks" };
+const buildIdentity = { app_version: "0.2.0", server_version: "0.1.0", ui_hash: "f".repeat(64) };
 const projectStore = { id: "repository:example-project", name: "example-project", source: "repository", repository_id: "project-example", path: "/private/tmp/example-project/.beads" };
 let repositories = [];
 const participants = [
@@ -123,6 +124,7 @@ async function staticFile(pathname, response) {
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
   const authenticated = sessionsValid && (request.headers.cookie?.includes("orchard_session=fixture") || false);
+  if (url.pathname === "/api/build" && request.method === "GET") return send(response, 200, buildIdentity, { "cache-control": "no-cache", "x-content-type-options": "nosniff" });
   if (url.pathname === "/api/session" && request.method === "GET") return send(response, 200, { authenticated });
   if (url.pathname === "/api/session" && request.method === "POST") {
     const payload = await bodyOf(request);

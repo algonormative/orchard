@@ -10,7 +10,9 @@ remaining in their own harnesses. Core and Chat are required. Tasks is attached
 by default and can be toggled. State is optional: it provides declarative
 definitions, durable markers, and explicit transitions. Orchard supplies no
 execution scheduler and does not yet download plugins. See
-[docs/plugins.md](docs/plugins.md).
+[docs/plugins.md](docs/plugins.md), [docs/handoffs.md](docs/handoffs.md),
+[docs/agent-cli.md](docs/agent-cli.md), and
+[docs/build-identity.md](docs/build-identity.md).
 
 [Website](https://algonormative.github.io/orchard-workspace/) ·
 [Releases](https://github.com/algonormative/orchard-workspace/releases) ·

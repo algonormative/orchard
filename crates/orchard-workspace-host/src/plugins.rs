@@ -18,6 +18,10 @@ const MAX_STATES: usize = 64;
 const MAX_TRANSITIONS: usize = 256;
 const MAX_PREREQUISITES: usize = 32;
 const MAX_CAPABILITIES: usize = 32;
+const HANDOFF_EXAMPLE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/handoff.json"
+));
 
 #[derive(Clone, Copy)]
 struct Manifest {
@@ -228,6 +232,14 @@ impl WorkspaceHost {
         let item = manifest(&required_string(&args, "plugin_id")?)?;
         let mut view = self.plugin_view(&workspace_id, item)?;
         view.as_object_mut().unwrap().insert("operations".to_owned(), Value::Array(item.operations.iter().map(|name| json!({"name":name,"description":mail_definition(name).map(|tool| tool.description).unwrap_or_else(|| operation_description(name).to_owned()),"input_schema":operation_schema(name)})).collect()));
+        if item.id == STATE {
+            let handoff: Value = serde_json::from_str(HANDOFF_EXAMPLE)
+                .map_err(|error| format!("bundled handoff example is invalid JSON: {error}"))?;
+            view.as_object_mut().unwrap().insert(
+                "examples".to_owned(),
+                json!([{"name":"handoff","definition":handoff}]),
+            );
+        }
         Ok(json!({"plugin":view}))
     }
     pub(crate) fn plugin_attach(&self, args: Value) -> Result<Value, String> {

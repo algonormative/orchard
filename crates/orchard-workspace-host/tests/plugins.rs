@@ -476,6 +476,146 @@ fn state_workflow_guidance_guards_and_opportunities_are_observed_and_enforced() 
 }
 
 #[test]
+fn checked_in_handoff_definition_records_only_explicit_cooperative_transitions() {
+    let definition: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/handoff.json"
+    )))
+    .expect("checked-in handoff definition must be valid JSON");
+    assert_eq!(definition["id"], "handoff");
+    assert_eq!(
+        definition["states"],
+        json!(["working", "ready-for-review", "accepted"])
+    );
+
+    let temp = TempDir::new().unwrap();
+    let host = new_host(&temp);
+    let (workspace_id, _, _) = workspace(&host, "Handoff");
+    assert_eq!(
+        call(
+            &host,
+            "plugin_inspect",
+            &workspace_id,
+            json!({"plugin_id":"state"}),
+        )["plugin"]["examples"],
+        json!([{"name":"handoff","definition":definition}]),
+        "State inspection exposes the compiled checked-in handoff example"
+    );
+    register(&host, &workspace_id, "alice");
+    attach_state(&host, &workspace_id);
+    call(
+        &host,
+        "state_define",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"define-handoff","definition":definition}),
+    );
+    call(
+        &host,
+        "state_create",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"create-handoff","id":"handoff-marker","title":"Bounded handoff","definition_id":"handoff","definition_version":1,"subject":{"kind":"channel","id":"general"}}),
+    );
+
+    let initial = call(
+        &host,
+        "state_get",
+        &workspace_id,
+        json!({"id":"handoff-marker"}),
+    );
+    assert_eq!(initial["marker"]["state"], "working");
+    assert_eq!(initial["history"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        call(
+            &host,
+            "state_get",
+            &workspace_id,
+            json!({"id":"handoff-marker"}),
+        )["history"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "State records only change through explicit mutation calls"
+    );
+    assert!(error(&host, "state_advance", &workspace_id, json!({"participant_id":"alice","request_id":"missing-handoff-evidence","id":"handoff-marker","expected_revision":1,"to":"ready-for-review"})).contains("needs_input"));
+
+    let artifact = call(
+        &host,
+        "artifact_upload",
+        &workspace_id,
+        json!({"path":"handoff/evidence.md","content_base64":base64::engine::general_purpose::STANDARD.encode(b"checked artifact"),"request_id":"handoff-artifact"}),
+    );
+    assert!(error(&host, "state_advance", &workspace_id, json!({"participant_id":"alice","request_id":"missing-handoff-message","id":"handoff-marker","expected_revision":1,"to":"ready-for-review","references":[artifact["resource"]["ref"].clone()]})).contains("needs_input"));
+    let handoff_message = call(
+        &host,
+        "mail_send",
+        &workspace_id,
+        json!({"sender_id":"alice","destination":{"kind":"channel","id":"general"},"body":"Handoff: current alice; next bob; relinquishing handoff/evidence.md; checks passed; no open issues; next action: review.","request_id":"handoff-message"}),
+    );
+    let handoff_message_ref =
+        json!({"kind":"message","workspace_id":workspace_id,"id":handoff_message["message"]["id"]});
+    let handoff_references = json!([artifact["resource"]["ref"].clone(), handoff_message_ref]);
+    call(
+        &host,
+        "state_advance",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"ready-for-review","id":"handoff-marker","expected_revision":1,"to":"ready-for-review","references":handoff_references}),
+    );
+    assert!(error(&host, "state_advance", &workspace_id, json!({"participant_id":"alice","request_id":"stale-revision","id":"handoff-marker","expected_revision":1,"to":"working"})).contains("revision conflict"));
+    assert!(error(&host, "state_advance", &workspace_id, json!({"participant_id":"alice","request_id":"missing-revision-request","id":"handoff-marker","expected_revision":2,"to":"working"})).contains("needs_input"));
+    let revision_request = call(
+        &host,
+        "mail_send",
+        &workspace_id,
+        json!({"sender_id":"alice","destination":{"kind":"channel","id":"general"},"body":"Revision request: bob should update handoff/evidence.md and return it for review.","request_id":"revision-request"}),
+    );
+    let revision_request_ref = json!({
+        "kind":"message",
+        "workspace_id":workspace_id,
+        "id":revision_request["message"]["id"]
+    });
+    call(
+        &host,
+        "state_advance",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"request-revisions","id":"handoff-marker","expected_revision":2,"to":"working","references":[revision_request_ref]}),
+    );
+    call(
+        &host,
+        "state_advance",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"ready-again","id":"handoff-marker","expected_revision":3,"to":"ready-for-review","references":handoff_references}),
+    );
+    let accepted_message = call(
+        &host,
+        "mail_send",
+        &workspace_id,
+        json!({"sender_id":"alice","destination":{"kind":"channel","id":"general"},"body":"Accepted decision: accept this bounded handoff; no follow-up recorded.","request_id":"accepted-decision"}),
+    );
+    let accepted_message_ref = json!({"kind":"message","workspace_id":workspace_id,"id":accepted_message["message"]["id"]});
+    let accepted = call(
+        &host,
+        "state_advance",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"accept-handoff","id":"handoff-marker","expected_revision":4,"to":"accepted","references":[accepted_message_ref]}),
+    );
+    assert_eq!(accepted["marker"]["state"], "accepted");
+    assert_eq!(accepted["marker"]["revision"], 5);
+    assert_eq!(
+        call(
+            &host,
+            "state_get",
+            &workspace_id,
+            json!({"id":"handoff-marker"}),
+        )["history"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+}
+
+#[test]
 fn detach_gates_new_task_and_state_writes_but_keeps_retained_reads() {
     let temp = TempDir::new().unwrap();
     let host = new_host(&temp);

@@ -2968,10 +2968,16 @@ name = "orchard-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "orchard-workspace-host",
+ "reqwest",
+ "rmcp",
+ "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tower",
+ "url",
 ]
 
 [[package]]

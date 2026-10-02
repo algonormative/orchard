@@ -165,6 +165,28 @@ async function call(operation: string, args: Json = {}, allowSessionRefresh = tr
   return object(payload.result ?? payload);
 }
 
+function buildIdentityText(identity: Json) {
+  const dirty = identity.dirty;
+  const workingTree = typeof dirty === "boolean" ? dirty ? "dirty" : "clean" : "unavailable";
+  return [
+    `App version: ${string(identity.app_version) || "unavailable"}`,
+    `Server version: ${string(identity.server_version) || "unavailable"}`,
+    `Revision: ${string(identity.revision) || "unavailable"}`,
+    `Working tree: ${workingTree}`,
+    `Embedded UI SHA-256: ${string(identity.ui_hash) || "unavailable"}`,
+  ].join("\n");
+}
+
+async function loadBuildIdentity(target: HTMLElement) {
+  try {
+    const response = await fetch("/api/build", { credentials: "same-origin", cache: "no-cache" });
+    if (!response.ok) throw new Error("Build identity is unavailable.");
+    target.replaceChildren(codeBlock(buildIdentityText(object(await response.json().catch(() => ({}))))));
+  } catch {
+    target.replaceChildren(codeBlock("Build identity unavailable."));
+  }
+}
+
 function notice(message: string, tone: "error" | "info" = "info") {
   const target = document.querySelector<HTMLElement>("#notice");
   if (!target) return;
@@ -1882,7 +1904,8 @@ function renderSettings(fromHistory = false) {
   const readme = el("div", "readme-summary"); readme.append(el("p", "muted", "Loading README…"));
   const joining = codeBlock("Loading joining prompt…");
   const workspacePath = codeBlock("Loading workspace path…");
-  overview.append(el("h2", "", "Workspace introduction"), introduction, readme, el("h2", "", "Joining prompt"), el("p", "muted", "Paste this as a user message, not environment context, to one agent. Local agents can use the workspace credential file; other connections use Settings."), joining, el("h3", "", "Workspace path"), workspacePath);
+  const buildIdentity = el("div", "build-identity"); buildIdentity.append(codeBlock("Loading build identity…"));
+  overview.append(el("h2", "", "Workspace introduction"), introduction, readme, el("h2", "", "Joining prompt"), el("p", "muted", "Paste this as a user message, not environment context, to one agent. Local agents can use the workspace credential file; other connections use Settings."), joining, el("h3", "", "Workspace path"), workspacePath, el("h3", "", "Build identity"), el("p", "muted", "Read-only identity for this embedded UI build."), buildIdentity);
   const endpoint = codeBlock("Not loaded");
   const token = codeBlock("Not loaded");
   const claudeConfig = codeBlock("Loading configuration…");
@@ -1912,6 +1935,7 @@ function renderSettings(fromHistory = false) {
   panel?.append(back(), overview, pluginCatalog(), connection, actionRow(archive, back()));
   void loadWorkspaceIntroduction(introduction, readme, joining, workspacePath);
   void loadConnection(endpoint, token, claudeConfig, codexConfig, codexToml);
+  void loadBuildIdentity(buildIdentity);
 }
 
 async function loadWorkspaceIntroduction(introduction: HTMLElement, readme: HTMLElement, joining: HTMLElement, workspacePathBlock: HTMLElement) {

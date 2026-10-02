@@ -1,5 +1,7 @@
 //! Embedded browser assets for the Orchard workspace server.
 
+pub mod agent_client;
+
 use axum::body::Body;
 use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::Response;
@@ -12,11 +14,24 @@ include!(concat!(env!("OUT_DIR"), "/embedded_assets.rs"));
 pub fn ui_router() -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/api/build", get(build_identity))
         .route("/{*path}", get(asset_or_index))
 }
 
 async fn index() -> Response {
     asset_response("index.html").expect("index.html is checked by build.rs")
+}
+
+async fn build_identity() -> Response {
+    let mut response = response(
+        StatusCode::OK,
+        "application/json; charset=utf-8",
+        BUILD_INFO_JSON.as_bytes(),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
 }
 
 async fn asset_or_index(uri: Uri) -> Response {
@@ -107,6 +122,29 @@ mod tests {
         assert!(bytes
             .windows(b"<title>Orchard</title>".len())
             .any(|part| part == b"<title>Orchard</title>"));
+
+        let build = router
+            .clone()
+            .oneshot(Request::get("/api/build").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(build.status(), StatusCode::OK);
+        assert_eq!(
+            build.headers()[header::CONTENT_TYPE],
+            "application/json; charset=utf-8"
+        );
+        assert_eq!(build.headers()[header::CACHE_CONTROL], "no-cache");
+        assert_eq!(build.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        let bytes = to_bytes(build.into_body(), usize::MAX).await.unwrap();
+        assert!(bytes
+            .windows(b"\"app_version\"".len())
+            .any(|part| part == b"\"app_version\""));
+        assert!(bytes
+            .windows(b"\"server_version\"".len())
+            .any(|part| part == b"\"server_version\""));
+        assert!(bytes
+            .windows(b"\"ui_hash\"".len())
+            .any(|part| part == b"\"ui_hash\""));
 
         let fallback = router
             .clone()
