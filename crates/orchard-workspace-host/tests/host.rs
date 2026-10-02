@@ -2927,3 +2927,35 @@ fn attached_repositories_report_branch_head_and_tracked_changes() {
     assert_eq!(git(&removed)["available"], false);
     assert_eq!(git(&removed)["dirty"], Value::Null);
 }
+
+#[test]
+fn finder_metadata_in_workspace_repositories_does_not_take_the_workspace_offline() {
+    let temporary = TempDir::new().unwrap();
+    let data = temporary.path().join("data");
+    let (workspace_id, root) = {
+        let host = WorkspaceHost::open(data.clone(), packaged_br()).unwrap();
+        let (workspace_id, _, root) = create_workspace(&host, "Browsed in Finder");
+        (workspace_id, root)
+    };
+    // Finder browses the data folder while Orchard is stopped.
+    for repository in ["mail", "artifacts"] {
+        fs::write(root.join(repository).join(".DS_Store"), b"finder").unwrap();
+        fs::write(root.join(repository).join("._resource-fork"), b"finder").unwrap();
+    }
+    let host = WorkspaceHost::open(data.clone(), packaged_br()).unwrap();
+    let send = |request_id: &str| {
+        host.call(
+            "mail_send",
+            json!({"workspace_id":workspace_id,"request_id":request_id,"sender_id":"owner","destination":{"kind":"channel","id":"general"},"body":"still online"}),
+        )
+    };
+    send("after-reopen").expect("mail works after reopening with Finder files present");
+    host.call(
+        "artifact_upload",
+        json!({"workspace_id":workspace_id,"path":"notes.md","content_base64":"aGk=","request_id":"upload-after-finder"}),
+    )
+    .expect("artifact commits ignore Finder files");
+    // Finder writes again while Orchard runs.
+    fs::write(root.join("mail").join(".DS_Store"), b"finder again").unwrap();
+    send("while-running").expect("mail keeps working while Finder files appear");
+}

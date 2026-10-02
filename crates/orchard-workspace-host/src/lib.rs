@@ -518,6 +518,8 @@ impl WorkspaceHost {
         });
         self.initialize_workspace_actors(&runtime, &owner_name)?;
         resources::seed_workspace_readme(&workspace)?;
+        exclude_os_metadata(&workspace.mail_path);
+        exclude_os_metadata(&workspace.root.join("artifacts"));
 
         {
             let mut config = self.inner.config.lock().unwrap();
@@ -2145,11 +2147,45 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len() && bool::from(left.ct_eq(right))
 }
 
+/// OS metadata that Finder and similar tools drop into folders. Workspace-owned repositories
+/// ignore it, or browsing the data folder would leave "uncommitted changes" that take the
+/// workspace offline. Best-effort: a failure leaves behavior unchanged.
+const OS_METADATA_PATTERNS: [&str; 2] = [".DS_Store", "._*"];
+
+fn exclude_os_metadata(repository_root: &Path) {
+    let Ok(repository) = Repository::open(repository_root) else {
+        return;
+    };
+    let info = repository.path().join("info");
+    let exclude = info.join("exclude");
+    let mut text = fs::read_to_string(&exclude).unwrap_or_default();
+    let missing: Vec<&str> = OS_METADATA_PATTERNS
+        .into_iter()
+        .filter(|pattern| !text.lines().any(|line| line.trim() == *pattern))
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("# Orchard: OS metadata is never workspace content\n");
+    for pattern in missing {
+        text.push_str(pattern);
+        text.push('\n');
+    }
+    if fs::create_dir_all(&info).is_ok() {
+        let _ = fs::write(&exclude, text);
+    }
+}
+
 fn load_runtime(
     data_root: &Path,
     workspace: &WorkspaceConfig,
 ) -> Result<WorkspaceRuntime, HostError> {
     let token = read_token(data_root, &workspace.id)?;
+    exclude_os_metadata(&workspace.mail_path);
+    exclude_os_metadata(&workspace.root.join("artifacts"));
     let (mail, mail_error) = if !workspace.mail_path.exists() {
         (
             None,
