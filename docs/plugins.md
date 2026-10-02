@@ -20,6 +20,10 @@
 `plugin_list` returns `{plugins:[{id,version,name,description,required,attached,operations}]}`.
 `plugin_inspect {plugin_id}` returns
 `{plugin:{id,version,name,description,required,attached,operations:[{name,description,input_schema}]}}`.
+State's inspection also carries `examples:[{name,definition}]`: ready-to-submit
+`state_define` definitions, currently the opt-in `handoff` cycle from
+[handoffs.md](handoffs.md). Examples are discovery only; nothing is defined
+until a participant submits one.
 `plugin_attach` and `plugin_detach` accept `{plugin_id,request_id}` and return
 the changed plugin plus the discovery fields. Reusing a request ID with the
 same request replays its durable outcome; changing it is an error.

@@ -20,7 +20,7 @@ const MAX_PREREQUISITES: usize = 32;
 const MAX_CAPABILITIES: usize = 32;
 const HANDOFF_EXAMPLE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/handoff.json"
+    "/assets/handoff.json"
 ));
 
 #[derive(Clone, Copy)]

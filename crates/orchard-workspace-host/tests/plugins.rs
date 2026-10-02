@@ -479,7 +479,7 @@ fn state_workflow_guidance_guards_and_opportunities_are_observed_and_enforced() 
 fn checked_in_handoff_definition_records_only_explicit_cooperative_transitions() {
     let definition: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../examples/handoff.json"
+        "/assets/handoff.json"
     )))
     .expect("checked-in handoff definition must be valid JSON");
     assert_eq!(definition["id"], "handoff");
