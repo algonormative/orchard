@@ -1343,6 +1343,17 @@ function renderResourceDetail(resource: Json, links: Json) {
         finally { if (document.contains(claim)) claim.disabled = false; }
       }, "subtle task-claim"); controls.append(claim);
       }
+      if (tasksAttached && taskAssignee(task) === "owner" && string(task.status) !== "closed") {
+        const release = button("Release task", async () => {
+          if (release.disabled) return; release.disabled = true;
+          try {
+            await call("task_release", { workspace_id: workspaceId, store_id: ref.store_id, task_id: ref.task_id, participant_id: "owner", request_id: crypto.randomUUID() });
+            notice("Task released; it is open for anyone to claim.");
+            if (state.workspace?.id === workspaceId) { if (state.store?.id === ref.store_id) await loadTasks(); if (state.activeHref === href && state.navigationEpoch === epoch) void openResource(active, true); }
+          } catch (error) { notice(message(error), "error"); }
+          finally { if (document.contains(release)) release.disabled = false; }
+        }, "subtle task-release"); controls.append(release);
+      }
       panel.append(controls);
     }
   } else if (state.activeResource?.ref.kind === "file") {

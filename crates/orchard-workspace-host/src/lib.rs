@@ -298,6 +298,7 @@ impl WorkspaceHost {
             "task_create" => self.task_create(args),
             "task_update" => self.task_update(args),
             "task_claim" => self.task_claim(args),
+            "task_release" => self.task_release(args),
             "task_close" => self.task_close(args),
             "task_dependencies" => self.task_dependencies(args),
             "state_define" => self.state_define(args),
@@ -996,6 +997,34 @@ impl WorkspaceHost {
         )
     }
 
+    fn task_release(&self, args: Value) -> Result<Value, String> {
+        self.ensure_plugin_write(&args, "tasks")?;
+        let args = object(args)?;
+        let workspace_id = required_string(&args, "workspace_id")?;
+        let store_id = required_string(&args, "store_id")?;
+        let task_id = required_string(&args, "task_id")?;
+        let participant_id = required_string(&args, "participant_id")?;
+        let request_id = required_string(&args, "request_id")?;
+        let semantic = json!({
+            "operation":"release","store_id":store_id,"task_id":task_id,
+            "participant_id":participant_id
+        });
+        self.mutate_task(
+            &workspace_id,
+            &store_id,
+            &request_id,
+            "release",
+            Some(&task_id),
+            semantic,
+            |store| {
+                self.inner
+                    .beads
+                    .release(store, &task_id, &request_id, &participant_id)
+            },
+            |_store| Ok(None),
+        )
+    }
+
     fn task_close(&self, args: Value) -> Result<Value, String> {
         self.ensure_plugin_write(&args, "tasks")?;
         let args = object(args)?;
@@ -1359,7 +1388,7 @@ impl WorkspaceHost {
             "capabilities": {
                 "mail": MAIL_OPERATIONS,
                 "tasks": if self.inner.beads.availability().is_ok() {
-                    json!(["tasks_list","task_show","task_create","task_update","task_claim","task_close","task_dependencies"])
+                    json!(["tasks_list","task_show","task_create","task_update","task_claim","task_release","task_close","task_dependencies"])
                 } else { json!([]) },
                 "task_dependencies_mutable": false,
                 "resources": ["resource_get","resource_links","resource_link","workspace_intro","workspace_status","workspace_alerts","artifact_roots","artifact_list","artifact_history","artifact_upload","artifact_delete","artifact_commit"],
@@ -2219,7 +2248,9 @@ fn mutation_topics(operation: &str) -> Option<&'static [&'static str]> {
         | "mail_channel_create"
         | "mail_send"
         | "mail_acknowledge" => Some(&["mail"]),
-        "task_create" | "task_update" | "task_claim" | "task_close" => Some(&["tasks", "mail"]),
+        "task_create" | "task_update" | "task_claim" | "task_release" | "task_close" => {
+            Some(&["tasks", "mail"])
+        }
         "plugin_attach" | "plugin_detach" => Some(&["plugins"]),
         "state_define" | "state_create" | "state_advance" => Some(&["state"]),
         "repository_attach" | "repository_detach" | "task_store_attach" | "task_store_detach" => {

@@ -812,6 +812,20 @@ test("task status, priority, assignee and claim are visible", async ({ page, req
   expect(audit.calls.find((entry: { operation: string }) => entry.operation === "task_claim").args.participant_id).toBe("owner");
 });
 
+test("a task you hold can be released back to open", async ({ page, request }) => {
+  await unlock(page); await openTree(page, "Tasks");
+  await page.getByRole("button", { name: "All tasks", exact: true }).click();
+  await page.locator(".task-list-row").getByRole("button", { name: /Fixture task/ }).click();
+  await expect(page.getByRole("button", { name: "Release task" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Claim task" }).click();
+  await expect(page.locator(".task-metadata")).toContainText("Assigned to Owner");
+  await page.getByRole("button", { name: "Release task" }).click();
+  await expect(page.locator(".task-metadata")).toContainText("Open · P2 · Unassigned");
+  await expect(page.getByRole("button", { name: "Claim task" })).toBeVisible();
+  const audit = await (await request.get("/fixture/audit")).json();
+  expect(audit.calls.find((entry: { operation: string }) => entry.operation === "task_release").args.participant_id).toBe("owner");
+});
+
 test("responsive code surfaces stay contained and copy exact text", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:4174" });
   await unlock(page); await page.setViewportSize({ width: 390, height: 844 });

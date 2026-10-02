@@ -77,6 +77,7 @@ Direct host operations are an allowlist:
 | `task_create` | `{workspace_id, store_id, request_id, title, description?, priority?, labels?}` |
 | `task_update` | `{workspace_id, store_id, task_id, request_id, title?, description?, status?, priority?, add_labels?, remove_labels?}` |
 | `task_claim` | `{workspace_id, store_id, task_id, participant_id, request_id}`; atomic claim by a registered participant |
+| `task_release` | `{workspace_id, store_id, task_id, participant_id, request_id}`; the current assignee returns the task to open and unassigned |
 | `task_close` | `{workspace_id, store_id, task_id, request_id, reason?}` |
 | `task_dependencies` | `{workspace_id, store_id, task_id}`; read-only in this release |
 | `resource_get` / `resource_links` | `{workspace_id, ref}` |
@@ -289,7 +290,11 @@ An uncertain command result stays unknown: seeing the same assignee later is
 not proof that this request claimed it, and Orchard does not rerun the claim.
 A recorded request can be replayed after its participant leaves, but a new
 claim from an unregistered participant is rejected. `task_update` does not
-manage assignees; deliberate release or reassignment is outside this batch.
+manage assignees. `task_release` lets the current assignee hand a task back: it
+requires that exact assignee and a task that is not closed, runs Beads
+`update --assignee "" --status open` as that actor, and is receipt-backed and
+replayable like a claim, with the same unknown-outcome rule. Reassignment is a
+later claim by another participant.
 
 ## Backup and restore
 

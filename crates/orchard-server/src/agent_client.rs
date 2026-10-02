@@ -727,6 +727,7 @@ fn mutation_requires_request_id(tool: &str) -> bool {
             | "task_create"
             | "task_update"
             | "task_claim"
+            | "task_release"
             | "task_close"
             | "artifact_upload"
             | "artifact_delete"

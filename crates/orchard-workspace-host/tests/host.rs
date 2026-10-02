@@ -2959,3 +2959,66 @@ fn finder_metadata_in_workspace_repositories_does_not_take_the_workspace_offline
     fs::write(root.join("mail").join(".DS_Store"), b"finder again").unwrap();
     send("while-running").expect("mail keeps working while Finder files appear");
 }
+
+#[test]
+fn only_the_assignee_releases_a_task_and_releases_replay_and_race_safely() {
+    let temp = TempDir::new().unwrap();
+    let host = Arc::new(WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap());
+    let (workspace_id, store_id, _) = create_workspace(&host, "Releases");
+    for id in ["alice", "bob"] {
+        host.call("mail_register", json!({"workspace_id":workspace_id,"request_id":format!("register-{id}"),"participant_id":id,"name":id})).unwrap();
+    }
+    let task = host.call("task_create", json!({"workspace_id":workspace_id,"store_id":store_id,"request_id":"make","title":"Hand me back"})).unwrap();
+    let task_id = task["task"]["id"].as_str().unwrap().to_owned();
+    let args = |participant: &str, request_id: &str| json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id,"participant_id":participant,"request_id":request_id});
+
+    // Nothing to release before anyone holds it.
+    assert!(host
+        .call("task_release", args("alice", "early"))
+        .unwrap_err()
+        .contains("current assignee"));
+    host.call("task_claim", args("alice", "claim-alice"))
+        .unwrap();
+    // Someone else cannot release alice's task.
+    assert!(host
+        .call("task_release", args("bob", "steal"))
+        .unwrap_err()
+        .contains("current assignee"));
+
+    // Two concurrent releases by alice with different request ids: exactly one applies.
+    let releases = ["r1", "r2"].map(|request_id| {
+        let (host, args) = (Arc::clone(&host), args("alice", request_id));
+        std::thread::spawn(move || host.call("task_release", args))
+    });
+    let outcomes = releases.map(|release| release.join().unwrap());
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+        1,
+        "{outcomes:?}"
+    );
+    let released = outcomes
+        .iter()
+        .find_map(|outcome| outcome.as_ref().ok())
+        .unwrap();
+    assert_eq!(released["task"]["status"], "open");
+    assert!(released["task"]["assignee"]
+        .as_str()
+        .unwrap_or("")
+        .is_empty());
+    let winner = released["request_id"].as_str().unwrap().to_owned();
+
+    // The same request id replays its recorded outcome instead of running again.
+    assert_eq!(
+        host.call("task_release", args("alice", &winner)).unwrap()["idempotent_replay"],
+        true
+    );
+    // The task is claimable again, by someone else.
+    let reclaimed = host.call("task_claim", args("bob", "claim-bob")).unwrap();
+    assert_eq!(reclaimed["task"]["assignee"], "bob");
+    // A closed task cannot be released.
+    host.call("task_close", json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":task_id,"request_id":"close"})).unwrap();
+    assert!(host
+        .call("task_release", args("bob", "after-close"))
+        .unwrap_err()
+        .contains("closed"));
+}
