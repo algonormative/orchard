@@ -13,6 +13,8 @@ use url::{Host, Url};
 
 const INVOCATION_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_UPLOAD_BYTES: u64 = 512 * 1024;
+/// Matches the server's `workspace_alerts` `wait_seconds` maximum.
+const MAX_WAIT_SECONDS: u64 = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionOptions {
@@ -38,6 +40,8 @@ pub enum Request {
     Alerts {
         participant_id: String,
         after: u64,
+        /// Seconds the server may hold the call waiting for a first alert (0 = no wait).
+        wait_seconds: u64,
     },
     Acknowledge {
         participant_id: String,
@@ -59,6 +63,19 @@ pub enum Request {
 }
 
 impl Request {
+    /// The server-side wait this request asks for, which extends the invocation timeout.
+    /// The generic `call workspace_alerts` path waits as long as `--wait` does.
+    fn wait_seconds(&self) -> u64 {
+        match self {
+            Self::Alerts { wait_seconds, .. } => *wait_seconds,
+            Self::Call { tool, arguments } if tool == "workspace_alerts" => arguments
+                .get("wait_seconds")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+
     /// Checks local invariants before credentials are read or a network session is opened.
     pub fn preflight(&self) -> Result<(), String> {
         match self {
@@ -80,8 +97,18 @@ impl Request {
                 required_text(name, "name")?;
                 valid_request_id(request_id)?;
             }
-            Self::Resume { participant_id } | Self::Alerts { participant_id, .. } => {
+            Self::Resume { participant_id } => {
                 required_text(participant_id, "participant ID")?;
+            }
+            Self::Alerts {
+                participant_id,
+                wait_seconds,
+                ..
+            } => {
+                required_text(participant_id, "participant ID")?;
+                if *wait_seconds > MAX_WAIT_SECONDS {
+                    return Err(format!("--wait must be at most {MAX_WAIT_SECONDS} seconds"));
+                }
             }
             Self::Acknowledge {
                 participant_id,
@@ -274,12 +301,15 @@ async fn execute_labeled(
     .await
     .map_err(|_| CliError::connection("MCP session setup timed out after 15 seconds"))?
     .map_err(CliError::connection)?;
-    let operation = tokio::time::timeout(INVOCATION_TIMEOUT, perform(&client, request))
+    // A deliberate server-side wait extends the budget; the margin still bounds a hang.
+    let wait = Duration::from_secs(request.wait_seconds().min(MAX_WAIT_SECONDS));
+    let operation = tokio::time::timeout(INVOCATION_TIMEOUT + wait, perform(&client, request))
         .await
         .unwrap_or_else(|_| {
-            Err(CliError::connection(
-                "MCP invocation timed out after 15 seconds",
-            ))
+            Err(CliError::connection(format!(
+                "MCP invocation timed out after {} seconds",
+                (INVOCATION_TIMEOUT + wait).as_secs()
+            )))
         });
     // Close on every path, including a timeout, so the server can drop the session now
     // rather than at its idle eviction. A completed operation stays successful even if
@@ -348,7 +378,7 @@ fn parse_invocation(
 }
 
 pub fn usage() -> &'static str {
-    "usage: Orchard agent [--endpoint URL] [--credential-file FILE] COMMAND\n\n--endpoint and --credential-file default to ORCHARD_AGENT_ENDPOINT and ORCHARD_AGENT_CREDENTIAL_FILE (a path, never the credential itself); flags take precedence.\n\ncommands: tools | call TOOL (--args-file FILE | stdin) | join --participant-id ID --name NAME --request-id ID | resume --participant-id ID | alerts --participant-id ID --after CURSOR | ack --participant-id ID --message-id ID [--message-id ID ...] --request-id ID | send --sender-id ID (--channel ID | --direct ID) --body TEXT --request-id ID | upload FILE --path PATH --request-id ID | status"
+    "usage: Orchard agent [--endpoint URL] [--credential-file FILE] COMMAND\n\n--endpoint and --credential-file default to ORCHARD_AGENT_ENDPOINT and ORCHARD_AGENT_CREDENTIAL_FILE (a path, never the credential itself); flags take precedence.\n\ncommands: tools | call TOOL (--args-file FILE | stdin) | join --participant-id ID --name NAME --request-id ID | resume --participant-id ID | alerts --participant-id ID --after CURSOR [--wait SECONDS] | ack --participant-id ID --message-id ID [--message-id ID ...] --request-id ID | send --sender-id ID (--channel ID | --direct ID) --body TEXT --request-id ID | upload FILE --path PATH --request-id ID | status"
 }
 fn parse_command(command: &str, arguments: Vec<OsString>) -> Result<Request, String> {
     match command {
@@ -393,12 +423,25 @@ fn parse_command(command: &str, arguments: Vec<OsString>) -> Result<Request, Str
             })
         }
         "alerts" => {
-            let v = named(arguments, &["--participant-id", "--after"])?;
+            let v = named(arguments, &["--participant-id", "--after", "--wait"])?;
+            let wait_seconds = match v.get("--wait") {
+                None => 0,
+                Some(value) => value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|seconds| *seconds <= MAX_WAIT_SECONDS)
+                    .ok_or_else(|| {
+                        format!(
+                            "--wait must be a whole number of seconds from 0 to {MAX_WAIT_SECONDS}"
+                        )
+                    })?,
+            };
             Ok(Request::Alerts {
                 participant_id: need(&v, "--participant-id")?,
                 after: need(&v, "--after")?
                     .parse()
                     .map_err(|_| "--after must be a non-negative integer")?,
+                wait_seconds,
             })
         }
         "ack" => {
@@ -520,8 +563,12 @@ async fn perform(
             call(client, "mail_register", json!({"participant_id": participant_id, "name": name, "request_id": request_id})).await
         }
         Request::Resume { participant_id } => call(client, "mail_resume", json!({"participant_id": participant_id})).await,
-        Request::Alerts { participant_id, after } => {
-            call(client, "workspace_alerts", json!({"participant_id": participant_id, "after": after})).await
+        Request::Alerts { participant_id, after, wait_seconds } => {
+            let mut arguments = json!({"participant_id": participant_id, "after": after});
+            if wait_seconds > 0 {
+                arguments["wait_seconds"] = json!(wait_seconds);
+            }
+            call(client, "workspace_alerts", arguments).await
         }
         Request::Acknowledge { participant_id, message_ids, request_id } => {
             call(client, "mail_acknowledge", json!({"participant_id": participant_id, "message_ids": message_ids, "request_id": request_id})).await
@@ -859,6 +906,54 @@ mod tests {
         .unwrap_err();
         assert!(error.message.contains(CREDENTIAL_FILE_ENV), "{error}");
         assert!(!error.message.contains(mistaken), "{error}");
+    }
+
+    #[test]
+    fn alerts_wait_is_optional_and_bounded() {
+        let parse = |extra: &[&str]| {
+            let mut values = vec!["--participant-id", "bot", "--after", "7"];
+            values.extend_from_slice(extra);
+            parse_command("alerts", os_args(&values))
+        };
+        assert_eq!(
+            parse(&[]).unwrap(),
+            Request::Alerts {
+                participant_id: "bot".to_owned(),
+                after: 7,
+                wait_seconds: 0
+            }
+        );
+        assert_eq!(
+            parse(&["--wait", "120"]).unwrap(),
+            Request::Alerts {
+                participant_id: "bot".to_owned(),
+                after: 7,
+                wait_seconds: 120
+            }
+        );
+        for invalid in ["121", "-1", "soon"] {
+            assert!(
+                parse(&["--wait", invalid]).unwrap_err().contains("--wait"),
+                "{invalid}"
+            );
+        }
+        // Library callers get a usage error, not a timeout overflow.
+        let oversized = Request::Alerts {
+            participant_id: "bot".to_owned(),
+            after: 0,
+            wait_seconds: u64::MAX,
+        };
+        assert!(oversized.preflight().unwrap_err().contains("--wait"));
+        assert_eq!(
+            oversized.wait_seconds().min(MAX_WAIT_SECONDS),
+            MAX_WAIT_SECONDS
+        );
+        // The generic call path extends its timeout by the same wait.
+        let generic = Request::Call {
+            tool: "workspace_alerts".to_owned(),
+            arguments: json!({"participant_id":"bot","wait_seconds":60}),
+        };
+        assert_eq!(generic.wait_seconds(), 60);
     }
 
     #[test]

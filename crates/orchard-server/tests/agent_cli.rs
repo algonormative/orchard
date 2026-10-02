@@ -158,6 +158,125 @@ fn agent_cli_exit_codes_separate_usage_connection_and_tool_failures() {
 }
 
 #[test]
+fn agent_cli_alerts_wait_returns_when_a_message_arrives() {
+    use std::time::{Duration, Instant};
+    let temporary = TempDir::new().unwrap();
+    let host = Arc::new(WorkspaceHost::open(temporary.path().join("data"), packaged_br()).unwrap());
+    let workspace_id = host
+        .call(
+            "workspace_create",
+            json!({"name": "CLI waits", "owner_name": "Owner"}),
+        )
+        .unwrap()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = runtime.block_on(host.clone().start_server()).unwrap();
+    let token = host
+        .call("connection_info", json!({"workspace_id": workspace_id}))
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let credential_file = temporary.path().join("credential");
+    std::fs::write(&credential_file, &token).unwrap();
+    let endpoint = format!("http://{}/workspaces/{workspace_id}/mcp", server.endpoint());
+    let binary = env!("CARGO_BIN_EXE_orchard");
+    let agent = |arguments: &[&str]| {
+        let mut command = Command::new(binary);
+        command
+            .arg("agent")
+            .args(arguments)
+            .env("ORCHARD_AGENT_ENDPOINT", &endpoint)
+            .env("ORCHARD_AGENT_CREDENTIAL_FILE", &credential_file);
+        command
+    };
+    for id in ["alice", "bob"] {
+        let joined = agent(&[
+            "join",
+            "--participant-id",
+            id,
+            "--name",
+            id,
+            "--request-id",
+            &format!("join-{id}"),
+        ])
+        .output()
+        .unwrap();
+        assert!(joined.status.success());
+    }
+
+    // Nothing pending: the wait runs to its deadline and returns empty.
+    let started = Instant::now();
+    let idle = agent(&[
+        "alerts",
+        "--participant-id",
+        "bob",
+        "--after",
+        "0",
+        "--wait",
+        "1",
+    ])
+    .output()
+    .unwrap();
+    assert!(
+        idle.status.success(),
+        "{}",
+        String::from_utf8_lossy(&idle.stderr)
+    );
+    assert!(started.elapsed() >= Duration::from_millis(900));
+    let idle: serde_json::Value = serde_json::from_slice(&idle.stdout).unwrap();
+    assert!(idle["alerts"].as_array().unwrap().is_empty());
+
+    // A waiting call returns as soon as alice's direct message lands.
+    let started = Instant::now();
+    let waiter = agent(&[
+        "alerts",
+        "--participant-id",
+        "bob",
+        "--after",
+        "0",
+        "--wait",
+        "60",
+    ])
+    .stdout(std::process::Stdio::piped())
+    .spawn()
+    .unwrap();
+    // Send only once the CLI's call has scanned and is actually waiting on the server.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while host.waiting_alert_calls() == 0 {
+        assert!(Instant::now() < deadline, "the CLI never started waiting");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let sent = agent(&[
+        "send",
+        "--sender-id",
+        "alice",
+        "--direct",
+        "bob",
+        "--body",
+        "Your turn.",
+        "--request-id",
+        "send-wait-1",
+    ])
+    .output()
+    .unwrap();
+    assert!(sent.status.success());
+    let waited = waiter.wait_with_output().unwrap();
+    assert!(waited.status.success());
+    assert!(
+        started.elapsed() < Duration::from_secs(45),
+        "{:?}",
+        started.elapsed()
+    );
+    let waited: serde_json::Value = serde_json::from_slice(&waited.stdout).unwrap();
+    assert_eq!(waited["alerts"][0]["message"]["body"], "Your turn.");
+
+    runtime.block_on(server.shutdown()).unwrap();
+}
+
+#[test]
 fn agent_cli_core_loop_runs_from_environment_defaults() {
     let temporary = TempDir::new().unwrap();
     let host = Arc::new(WorkspaceHost::open(temporary.path().join("data"), packaged_br()).unwrap());

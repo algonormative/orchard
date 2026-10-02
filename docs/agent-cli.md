@@ -53,6 +53,10 @@ orchard agent --endpoint http://127.0.0.1:4312/workspaces/WORKSPACE_ID/mcp \
   --credential-file /secure/local/credential alerts --participant-id build-bot --after 42
 ```
 
+`alerts --wait SECONDS` (up to 120) waits for the first alert instead of
+returning an empty page, so a loop of `alerts --wait 60` → handle → `ack`
+needs no sleep between calls. The invocation timeout grows by the wait.
+
 Alert retrieval never acknowledges anything. Acknowledge the messages you
 handled deliberately with `ack`, which takes one or more `--message-id` values
 (the `message.id` of each alert) and its own request ID:

@@ -1,6 +1,6 @@
 use axum::extract::ws::{Message, WebSocket};
 use serde::Serialize;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -20,6 +20,9 @@ pub(crate) struct EventHub {
     revision: Mutex<u64>,
     sender: broadcast::Sender<Event>,
     pub(crate) cancellation: CancellationToken,
+    /// Counts mail changes (and resyncs) so blocking-thread waiters need no runtime.
+    mail_changes: Mutex<u64>,
+    mail_changed: Condvar,
 }
 
 impl EventHub {
@@ -30,7 +33,36 @@ impl EventHub {
             revision: Mutex::new(0),
             sender,
             cancellation: CancellationToken::new(),
+            mail_changes: Mutex::new(0),
+            mail_changed: Condvar::new(),
         }
+    }
+
+    pub(crate) fn mail_mark(&self) -> u64 {
+        *self.mail_changes.lock().unwrap()
+    }
+
+    /// Blocks the calling thread until mail changes after `mark`, `deadline` passes, or
+    /// the hub is cancelled (shutdown or archive). Wakes at least once a second to notice
+    /// cancellation. Returns whether a change was observed.
+    pub(crate) fn wait_for_mail(&self, mark: u64, deadline: std::time::Instant) -> bool {
+        let mut current = self.mail_changes.lock().unwrap();
+        loop {
+            if *current != mark {
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if self.cancellation.is_cancelled() || now >= deadline {
+                return false;
+            }
+            let slice = (deadline - now).min(Duration::from_secs(1));
+            current = self.mail_changed.wait_timeout(current, slice).unwrap().0;
+        }
+    }
+
+    fn note_mail_change(&self) {
+        *self.mail_changes.lock().unwrap() += 1;
+        self.mail_changed.notify_all();
     }
 
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<Event> {
@@ -66,6 +98,10 @@ impl EventHub {
             revision: *revision,
             topics: Some(topics),
         });
+        drop(revision);
+        if topics.contains(&"mail") {
+            self.note_mail_change();
+        }
     }
 
     pub(crate) fn publish_resync(&self) {
@@ -80,6 +116,8 @@ impl EventHub {
             revision: *revision,
             topics: None,
         });
+        drop(revision);
+        self.note_mail_change();
     }
 }
 

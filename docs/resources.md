@@ -72,7 +72,7 @@ ID and reject nested references to another workspace.
 | `resource_link` | `{workspace_id, source, target, label?, request_id}` | `{link}` |
 | `workspace_intro` | `{workspace_id}` | README descriptor/text, current participants/channels, introduction, and generic joining prompt |
 | `workspace_status` | `{workspace_id}` | participant/channel/message/task/root counts, participant records, artifact health, and source errors |
-| `workspace_alerts` | `{workspace_id, participant_id, after?, limit?, include_channel_messages?}` | `{alerts, next_cursor, has_more}` |
+| `workspace_alerts` | `{workspace_id, participant_id, after?, limit?, include_channel_messages?, wait_seconds?}` | `{alerts, next_cursor, has_more}` |
 | `artifact_roots` | `{workspace_id}` | `{roots}` including same-host `path` and `writable` |
 | `artifact_list` | `{workspace_id, root_id, path?, revision?}` | root, entries, and truncation state |
 | `artifact_history` | `{workspace_id, root_id, path}` | changed versions, newest first |
@@ -157,6 +157,12 @@ exclude self-authored posts and report one or more of `direct`, `mention`,
 identifier boundary and code spans/fences are ignored. Replies follow the
 thread to its authored root. Polling never acknowledges messages; agents call
 `mail_acknowledge` explicitly.
+
+`wait_seconds` (0–120, default 0) lets an agent that is already running wait
+instead of re-polling: when no alert matches, the call is held until one does,
+the wait ends (returning an empty page), or the workspace stops. Existing
+alerts always return immediately. A wait holds one server thread, so concurrent
+waits are capped; past the cap the call simply answers without waiting.
 
 ## HTTP reads
 

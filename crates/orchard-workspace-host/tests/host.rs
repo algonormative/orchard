@@ -2736,3 +2736,109 @@ fn state_plugin_detach_attach_and_retained_reads() {
         1
     );
 }
+
+#[test]
+fn alerts_wait_returns_on_a_new_alert_times_out_empty_and_stops_on_archive() {
+    use std::time::{Duration, Instant};
+    let temporary = TempDir::new().unwrap();
+    let host = Arc::new(WorkspaceHost::open(temporary.path().join("data"), packaged_br()).unwrap());
+    let (workspace_id, _, _) = create_workspace(&host, "Alert waits");
+    for (id, name) in [("alice", "Alice"), ("bob", "Bob")] {
+        host.call(
+            "mail_register",
+            json!({"workspace_id":workspace_id,"request_id":format!("register-{id}"),"participant_id":id,"name":name}),
+        )
+        .unwrap();
+    }
+    let wait = |seconds: u64| {
+        let (host, workspace_id) = (host.clone(), workspace_id.clone());
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = host.call(
+                "workspace_alerts",
+                json!({"workspace_id":workspace_id,"participant_id":"bob","after":0,"wait_seconds":seconds}),
+            );
+            (result, started.elapsed())
+        })
+    };
+
+    // An empty wait times out on schedule.
+    let (result, elapsed) = wait(1).join().unwrap();
+    assert!(result.unwrap()["alerts"].as_array().unwrap().is_empty());
+    assert!(
+        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(20),
+        "{elapsed:?}"
+    );
+
+    // A channel message bob is not alerted to does not end the wait; a direct message does.
+    let waiter = wait(30);
+    wait_until_waiting(&host);
+    host.call(
+        "mail_send",
+        json!({"workspace_id":workspace_id,"request_id":"noise","sender_id":"alice","destination":{"kind":"channel","id":"general"},"body":"not for bob"}),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!waiter.is_finished());
+    host.call(
+        "mail_send",
+        json!({"workspace_id":workspace_id,"request_id":"direct","sender_id":"alice","destination":{"kind":"direct","id":"bob"},"body":"ready for review"}),
+    )
+    .unwrap();
+    let (result, elapsed) = waiter.join().unwrap();
+    let alerts = result.unwrap()["alerts"].as_array().unwrap().clone();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0]["message"]["body"], "ready for review");
+    assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
+
+    // Existing alerts answer at once even with a long wait (well under its 30s).
+    let (result, elapsed) = wait(30).join().unwrap();
+    assert_eq!(result.unwrap()["alerts"].as_array().unwrap().len(), 1);
+    assert!(elapsed < Duration::from_secs(15), "{elapsed:?}");
+
+    assert!(host
+        .call(
+            "workspace_alerts",
+            json!({"workspace_id":workspace_id,"participant_id":"bob","wait_seconds":121}),
+        )
+        .unwrap_err()
+        .contains("wait_seconds"));
+
+    // Archiving the workspace releases a waiter within about a second.
+    let (other_id, _, _) = create_workspace(&host, "Archived while waiting");
+    host.call(
+        "mail_register",
+        json!({"workspace_id":other_id,"request_id":"register-carol","participant_id":"carol","name":"Carol"}),
+    )
+    .unwrap();
+    let archived_waiter = {
+        let (host, other_id) = (host.clone(), other_id.clone());
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = host.call(
+                "workspace_alerts",
+                json!({"workspace_id":other_id,"participant_id":"carol","wait_seconds":60}),
+            );
+            (result, started.elapsed())
+        })
+    };
+    wait_until_waiting(&host);
+    host.call("workspace_archive", json!({"workspace_id":other_id}))
+        .unwrap();
+    let (result, elapsed) = archived_waiter.join().unwrap();
+    // The waiter is released well before its 60s and reports the workspace as gone.
+    assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
+    assert!(result.unwrap_err().contains("archived"));
+}
+
+/// Blocks until some `workspace_alerts` call has finished its first scan and is waiting.
+fn wait_until_waiting(host: &WorkspaceHost) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while host.waiting_alert_calls() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no alerts call started waiting"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}

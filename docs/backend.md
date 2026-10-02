@@ -67,7 +67,7 @@ Direct host operations are an allowlist:
 | `workspace_info` | `{workspace_id}`; sanitized and also available to that workspace's MCP clients |
 | `workspace_intro` | `{workspace_id}`; README, current participants/channels, introduction, and joining prompt |
 | `workspace_status` | `{workspace_id}`; counts, participant records, artifact availability, and source errors |
-| `workspace_alerts` | `{workspace_id, participant_id, after?, limit?, include_channel_messages?}` |
+| `workspace_alerts` | `{workspace_id, participant_id, after?, limit?, include_channel_messages?, wait_seconds?}` |
 | `connection_info` | `{workspace_id}`; direct call only, returns that workspace's MCP endpoint and token |
 | `rotate_token` | `{workspace_id}` |
 | `repository_attach` / `repository_detach` | `{workspace_id, path}` / `{workspace_id, repository_id}`; attach returns `{repository, task_store, attached, task_store_attached}` |
@@ -145,7 +145,9 @@ contact as active work.
 `workspace_alerts` paginates complete Mail history with a stateless sequence
 cursor. It excludes self-authored messages, detects exact mentions outside code,
 follows reply chains to their root author, and includes ordinary channel posts
-only when requested. Scanning does not acknowledge messages. Artifact root
+only when requested. Scanning does not acknowledge messages. With
+`wait_seconds` (0–120) an empty result is held until a first alert arrives, the
+wait ends, or the workspace stops; Orchard still wakes no agent. Artifact root
 views expose absolute same-host paths and mark only the validated owned root as
 `writable`; attached repositories remain read-only. Direct commit and delete
 operations accept only explicit owned-artifact paths, require the entire Git

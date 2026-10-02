@@ -246,6 +246,11 @@ impl WorkspaceHost {
         })
     }
 
+    /// Number of `workspace_alerts` calls currently holding a wait.
+    pub fn waiting_alert_calls(&self) -> usize {
+        resources::waiting_alert_calls()
+    }
+
     pub fn call(&self, operation: &str, args: Value) -> Result<Value, String> {
         let workspace_id = args
             .get("workspace_id")

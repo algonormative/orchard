@@ -9,6 +9,42 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{object, required_string, WorkspaceConfig, WorkspaceHost};
 
+const MAX_ALERT_WAIT_SECONDS: u64 = 120;
+const MAX_ALERT_WAITERS: usize = 32;
+static ALERT_WAITERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A held slot among the bounded set of waiting `workspace_alerts` calls.
+struct AlertWaiter;
+
+impl AlertWaiter {
+    fn acquire() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        ALERT_WAITERS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_ALERT_WAITERS).then_some(count + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for AlertWaiter {
+    fn drop(&mut self) {
+        ALERT_WAITERS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// How many `workspace_alerts` calls are currently waiting (observability and tests).
+pub(crate) fn waiting_alert_calls() -> usize {
+    ALERT_WAITERS.load(std::sync::atomic::Ordering::Acquire)
+}
+
+fn has_alerts(result: &Value) -> bool {
+    result["alerts"]
+        .as_array()
+        .is_some_and(|alerts| !alerts.is_empty())
+}
+
 const MAX_UPLOAD_BYTES: usize = 512 * 1024;
 const MAX_READ_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TEXT_PREVIEW_BYTES: usize = 128 * 1024;
@@ -422,7 +458,44 @@ impl WorkspaceHost {
         }))
     }
 
+    /// With `wait_seconds`, holds the request until an alert exists, the wait ends, or the
+    /// workspace stops, so an already-running agent can wait without polling. Orchard
+    /// still wakes nobody: the caller chose to wait. Waiters hold a blocking-pool thread,
+    /// so they are capped; over the cap the call answers immediately.
     pub(crate) fn workspace_alerts(&self, args: Value) -> Result<Value, String> {
+        let wait = match args.get("wait_seconds") {
+            None => 0,
+            Some(value) => value
+                .as_u64()
+                .filter(|seconds| *seconds <= MAX_ALERT_WAIT_SECONDS)
+                .ok_or_else(|| {
+                    format!("wait_seconds must be an integer from 0 to {MAX_ALERT_WAIT_SECONDS}")
+                })?,
+        };
+        let workspace_id = required_string(&object(args.clone())?, "workspace_id")?;
+        let events = self.active_runtime(&workspace_id)?.events.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+        let mut mark = events.mail_mark();
+        let mut result = self.alerts_once(args.clone())?;
+        if wait == 0 || has_alerts(&result) {
+            return Ok(result);
+        }
+        let Some(_waiter) = AlertWaiter::acquire() else {
+            return Ok(result);
+        };
+        while !has_alerts(&result) && events.wait_for_mail(mark, deadline) {
+            mark = events.mail_mark();
+            result = self.alerts_once(args.clone())?;
+        }
+        // However the wait ended, answer from current state: this catches mail committed
+        // just before the deadline, and reports an archived workspace as an error.
+        if !has_alerts(&result) {
+            result = self.alerts_once(args)?;
+        }
+        Ok(result)
+    }
+
+    fn alerts_once(&self, args: Value) -> Result<Value, String> {
         let args = object(args)?;
         let workspace_id = required_string(&args, "workspace_id")?;
         self.active_runtime(&workspace_id)?;

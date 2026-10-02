@@ -72,12 +72,13 @@ pub(crate) fn resource_tools() -> Vec<ToolDefinition> {
         ),
         tool(
             "workspace_alerts",
-            "Poll direct messages, mentions, broadcasts, replies, and optionally all delivered channel messages after a sequence cursor. Retrieval never acknowledges messages.",
+            "Poll direct messages, mentions, broadcasts, replies, and optionally all delivered channel messages after a sequence cursor. Retrieval never acknowledges messages. With wait_seconds, the call waits up to that long for a first alert instead of returning empty; it answers immediately when alerts exist.",
             json!({
                 "type":"object","properties":{
                     "participant_id":{"type":"string"},"after":{"type":"integer","minimum":0},
                     "limit":{"type":"integer","minimum":1,"maximum":200},
-                    "include_channel_messages":{"type":"boolean","default":false}
+                    "include_channel_messages":{"type":"boolean","default":false},
+                    "wait_seconds":{"type":"integer","minimum":0,"maximum":120,"default":0}
                 },"required":["participant_id"],"additionalProperties":false
             }),
         ),

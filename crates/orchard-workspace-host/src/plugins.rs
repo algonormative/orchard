@@ -18,10 +18,8 @@ const MAX_STATES: usize = 64;
 const MAX_TRANSITIONS: usize = 256;
 const MAX_PREREQUISITES: usize = 32;
 const MAX_CAPABILITIES: usize = 32;
-const HANDOFF_EXAMPLE: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/handoff.json"
-));
+const HANDOFF_EXAMPLE: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/handoff.json"));
 
 #[derive(Clone, Copy)]
 struct Manifest {
