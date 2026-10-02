@@ -190,9 +190,15 @@ button.message-time { color: var(--faint); }
 button.message-time:hover { background: transparent; color: var(--citron); text-decoration: underline; }
 .resource-message-meta { padding-top: 1rem; }
 .resource-message-meta .message-time { margin-left: 0; }
-.reply-button { display: inline-block; margin-top: .45rem; padding: .1rem 0; border: 0; color: var(--faint); background: transparent; font: 700 .68rem/1.2 var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+.reply-button { display: block; width: fit-content; margin-top: .6rem; padding: .1rem 0; border: 0; color: var(--faint); background: transparent; font: 700 .68rem/1.2 var(--mono); letter-spacing: .12em; text-transform: uppercase; }
 button.reply-button:hover { color: var(--citron); background: transparent; }
 .message a { color: var(--citron); }
+/* Attached references: a row of compact chips under the body, not a stack of buttons. */
+.message > .reference-text { display: inline-block; max-width: 100%; margin: .5rem .35rem 0 0; vertical-align: top; }
+.reference-text > button { display: inline-flex; align-items: baseline; gap: .4rem; max-width: 100%; padding: .2rem .55rem; border: 1px solid var(--rule); background: var(--ink); color: var(--muted); font: 600 .76rem/1.4 var(--mono); overflow-wrap: anywhere; white-space: normal; }
+.reference-text > button::before { content: "→" / ""; flex: none; color: var(--leaf); }
+.reference-text > button:hover { border-color: var(--citron); background: var(--slab); color: var(--cream); }
+.reference-text > button:hover::before { color: var(--citron); }
 
 /* Composer: the working slab at the foot of the thread. */
 .composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .55rem .75rem; padding: .8rem var(--content-x) .95rem; border-top: 1px solid var(--rule-strong); background: var(--slab); }
