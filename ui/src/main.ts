@@ -807,6 +807,7 @@ function renderWorkspace() {
   conversations.id = "conversations";
   const viewer = el("section", "viewer-shell");
   const tabs = el("nav", "tabstrip"); tabs.id = "tabs"; tabs.setAttribute("aria-label", "Open resources");
+  const needsYou = el("section", "needs-you"); needsYou.id = "needs-you"; needsYou.hidden = true; needsYou.setAttribute("aria-label", "Needs you");
   const main = el("section", "conversation");
   main.id = "conversation";
   main.tabIndex = -1;
@@ -817,7 +818,7 @@ function renderWorkspace() {
       if (state.activeHref) keepTab(state.activeHref);
     }
   }, true);
-  viewer.append(tabs, main);
+  viewer.append(tabs, needsYou, main);
   conversations.addEventListener("click", (event) => { if (event.target instanceof Element && event.target.closest("button") && state.activeHref) observeResourceClick(state.activeHref); });
   layout.append(conversations, viewer);
   root.append(top, layout);
@@ -837,6 +838,61 @@ function snapshotList(...keys: string[]) {
 function mailSnapshot(): Json { return object(state.snapshot?.mail); }
 function mailList(name: string): unknown[] {
   return array(mailSnapshot()[name]);
+}
+function decisionDeliveredToOwner(item: Json) {
+  const destination = object(item.destination);
+  return string(destination.kind) === "channel" || string(destination.kind) === "broadcast" || string(destination.id) === "owner" || array(item.recipient_ids).map(string).includes("owner");
+}
+function openDecisions(): Json[] {
+  const history = mailList("history").map(object);
+  const resolved = new Set(history.filter((item) => string(item.sender_id) === "owner" && string(item.thread_id)).map((item) => string(item.thread_id)));
+  return history.filter((item) => string(item.kind) === "decision" && string(item.sender_id) !== "owner" && string(item.id) && decisionDeliveredToOwner(item) && !resolved.has(string(item.id)));
+}
+function decisionExcerpt(item: Json) {
+  const body = (string(item.body) || string(item.content)).replace(/\s+/g, " ").trim();
+  return body.length > 140 ? `${body.slice(0, 137)}…` : body || "No message body";
+}
+function decisionReplyDestination(item: Json): Json {
+  const destination = object(item.destination); const kind = string(destination.kind);
+  if (kind === "direct") return { kind, id: string(item.sender_id) };
+  return kind === "channel" ? { kind, id: string(destination.id) } : { kind: "broadcast" };
+}
+async function replyToDecision(item: Json) {
+  const destination = decisionReplyDestination(item); const kind = string(destination.kind) as ConversationKind;
+  const id = kind === "broadcast" ? "broadcast" : string(destination.id);
+  if (!id) return notice("This decision has no reply destination.", "error");
+  await selectConversation(kind, id);
+  state.replyTo = string(item.id);
+  const revisionKey = `${state.workspace?.id}:${draftKey()}`;
+  state.replyRevision.set(revisionKey, (state.replyRevision.get(revisionKey) || 0) + 1);
+  patchConversation();
+}
+function patchNeedsYou() {
+  const strip = document.querySelector<HTMLElement>("#needs-you");
+  if (!strip || !state.workspace) return;
+  const decisions = openDecisions();
+  const signature = decisions.map((item) => [string(item.id), string(item.sender_id), string(item.body) || string(item.content), JSON.stringify(object(item.destination))].join("\u0000")).join("\u0001");
+  if (strip.dataset.signature === signature && strip.hidden === !decisions.length) return;
+  strip.dataset.signature = signature;
+  strip.hidden = !decisions.length;
+  strip.replaceChildren();
+  if (!decisions.length) return;
+  strip.append(el("h2", "needs-you-title", "Needs you"));
+  for (const item of decisions) {
+    const row = el("div", "needs-you-item");
+    row.append(el("span", "needs-you-sender", participantLabel(participantName(string(item.sender_id)))), el("span", "needs-you-excerpt", decisionExcerpt(item)));
+    const reply = button("Reply", () => void replyToDecision(item), "subtle needs-you-action");
+    const decide = button("Mark decided", async () => {
+      if (!state.workspace || decide.disabled) return;
+      decide.disabled = true;
+      try {
+        await call("mail_send", { workspace_id: state.workspace.id, request_id: crypto.randomUUID(), sender_id: "owner", destination: decisionReplyDestination(item), body: "Decided.", kind: "message", thread_id: string(item.id) });
+        await refreshSnapshot(["mail"]);
+      } catch (error) { notice(message(error), "error"); }
+      finally { if (document.contains(decide)) decide.disabled = false; }
+    }, "subtle needs-you-action");
+    row.append(reply, decide); strip.append(row);
+  }
 }
 function workspaceStores(): unknown[] { return snapshotList("task_stores"); }
 function participantName(id: string): string {
@@ -920,6 +976,7 @@ function patchOnboarding() {
 
 function patchWorkspace() {
   patchConversations();
+  patchNeedsYou();
   patchTabs();
   const active = state.tabs.find((tab) => tab.href === state.activeHref);
   if (active) void activateTab(active, true);
@@ -991,14 +1048,37 @@ function patchConversations() {
   if (!pluginAttached("tasks", true)) tasks.remove();
   else {
   tasks.append(button("All tasks", openTasks, "tree-action subtle"), button("Add project", () => void attachRepository(), "tree-action subtle"));
+  const attachedRepositories = array(object(state.snapshot?.workspace).repositories).map(object);
+  const renderedRepositoryIds = new Set<string>();
+  const repositoryStatus = (repository: Json) => {
+    const git = object(repository.git);
+    if (git.available !== true) return undefined;
+    const branch = git.branch === null ? "detached" : string(git.branch);
+    if (!branch) return undefined;
+    const dirty = typeof git.dirty === "number" && git.dirty > 0 ? ` · ${git.dirty} changed` : "";
+    return `${branch}${dirty}`;
+  };
   for (const value of workspaceStores()) {
     const item = object(value); const store = object(item.store); const storeId = identifier(store) || string(store.store_id);
     const storeName = string(store.name) || basename(string(store.path)) || storeId;
     const group = el("div", "tree-subgroup"); group.append(button(storeName, () => { selectStore(item); void activateTab(collectionTab("tasks", state.workspace!.id)); }, "store-button subtle"));
+    for (const repository of attachedRepositories.filter((candidate) => string(candidate.task_store_id) === storeId || string(candidate.id) === string(store.repository_id))) {
+      renderedRepositoryIds.add(string(repository.id));
+      const status = repositoryStatus(repository);
+      if (status) group.append(el("p", "repository-git-status", status));
+    }
     for (const value of array(item.tasks)) {
       const task = object(value); const taskId = string(task.task_id) || identifier(task);
       if (taskId) group.append(button(string(task.title) || taskId, () => void openResource(descriptor({ kind: "task", workspace_id: state.workspace!.id, store_id: storeId, task_id: taskId }, string(task.title) || taskId)), "conversation-button task-tree-item"));
     }
+    tasks.append(group);
+  }
+  for (const repository of attachedRepositories) {
+    if (renderedRepositoryIds.has(string(repository.id))) continue;
+    const group = el("div", "tree-subgroup repository-tree-item");
+    group.append(el("p", "repository-name", string(repository.name) || basename(string(repository.path)) || string(repository.id)));
+    const status = repositoryStatus(repository);
+    if (status) group.append(el("p", "repository-git-status", status));
     tasks.append(group);
   }
   }
@@ -2142,6 +2222,7 @@ async function refreshSnapshotNow(topics: string[]) {
   if (state.workspace?.id !== workspaceId || generation !== liveGeneration) return;
   observeMessages(mailList("history"));
   patchConversations();
+  patchNeedsYou();
   patchOnboarding();
   const stateVisible = state.activeHref === collectionTab("states", workspaceId).href || state.activeResource?.ref.kind === "state";
   const stateOpportunityRelevant = pluginAttached("state") && (stateVisible || state.stateOpportunitiesWorkspace === workspaceId);

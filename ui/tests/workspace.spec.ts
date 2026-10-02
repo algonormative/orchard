@@ -170,6 +170,55 @@ test("live event refreshes a visible task and chat without touching draft", asyn
   await expect(page.locator(".task-metadata")).toContainText("Blocked");
 });
 
+test("needs-you decisions can be replied to or marked decided", async ({ page, request }) => {
+  await unlock(page);
+  await request.post("/fixture/external-change", { data: { mail_message: { id: "decision-direct", sender_id: "alice", destination: { kind: "direct", id: "owner" }, body: "Choose the release window", kind: "decision" }, topics: ["mail"] } });
+  const needsYou = page.locator('#needs-you[aria-label="Needs you"]');
+  await expect(needsYou).toContainText("@Alice");
+  await expect(needsYou).toContainText("Choose the release window");
+  await needsYou.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "@Alice", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Message")).toHaveAttribute("placeholder", "Write a reply");
+  await needsYou.getByRole("button", { name: "Mark decided", exact: true }).click();
+  await expect(needsYou).toBeHidden();
+  const audit = await (await request.get("/fixture/audit")).json();
+  expect(audit.messages).toContainEqual(expect.objectContaining({ sender_id: "owner", destination: { kind: "direct", id: "alice" }, body: "Decided.", kind: "message", thread_id: "decision-direct" }));
+});
+
+test("a decision arriving mid-draft keeps the draft and its focus", async ({ page, request }) => {
+  await unlock(page);
+  const composer = page.getByLabel("Message");
+  await composer.fill("Half-written thought");
+  await composer.focus();
+  await request.post("/fixture/external-change", { data: { mail_message: { id: "decision-midway", sender_id: "alice", destination: { kind: "channel", id: "general" }, body: "Ship today?", kind: "decision" }, topics: ["mail"] } });
+  await expect(page.locator('#needs-you[aria-label="Needs you"]')).toContainText("Ship today?");
+  await expect(composer).toHaveValue("Half-written thought");
+  await expect(composer).toBeFocused();
+});
+
+test("needs-you ignores ordinary and already-resolved decisions", async ({ page, request }) => {
+  await unlock(page);
+  await request.post("/fixture/external-change", { data: { mail_message: { id: "ordinary-message", sender_id: "alice", destination: { kind: "channel", id: "general" }, body: "Not a decision", kind: "message" }, topics: ["mail"] } });
+  await request.post("/fixture/external-change", { data: { mail_message: { id: "resolved-decision", sender_id: "alice", destination: { kind: "broadcast" }, body: "Already resolved", kind: "decision" }, topics: ["mail"] } });
+  await request.post("/fixture/external-change", { data: { mail_message: { id: "resolved-reply", sender_id: "owner", destination: { kind: "broadcast" }, body: "Decided.", kind: "message", thread_id: "resolved-decision" }, topics: ["mail"] } });
+  await expect(page.locator('#needs-you[aria-label="Needs you"]')).toBeHidden();
+});
+
+test("repository rows show available git status", async ({ page, request }) => {
+  await unlock(page);
+  const tasks = await openTree(page, "Tasks");
+  await tasks.getByRole("button", { name: "Add project", exact: true }).click();
+  await page.getByLabel("Project path").fill("/private/tmp/example-project");
+  await page.getByRole("button", { name: "Add project", exact: true }).last().click();
+  await request.post("/fixture/external-change", { data: { repository_git: { branch: "feature/needs-you", dirty: 3 }, topics: ["repositories"] } });
+  const status = tasks.locator(".repository-git-status");
+  await expect(status).toContainText("feature/needs-you · 3 changed");
+  await request.post("/fixture/external-change", { data: { repository_git: { branch: null, dirty: 0 }, topics: ["repositories"] } });
+  await expect(status).toContainText("detached");
+  await request.post("/fixture/external-change", { data: { repository_git: { available: false }, topics: ["repositories"] } });
+  await expect(status).toHaveCount(0);
+});
+
 test("a newer build after reconnect offers a calm manual reload", async ({ page, request }) => {
   await unlock(page);
   await expect(page.locator("#connection-status")).toHaveAttribute("data-state", "connected");

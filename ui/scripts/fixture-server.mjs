@@ -177,7 +177,7 @@ const server = createServer(async (request, response) => {
     if (payload.operation === "repository_attach") {
       if (delayAttachMs) await sleep(delayAttachMs);
       const isPlain = args.path.includes("plain");
-      const repository = { id: `project-${repositories.length + 1}`, path: args.path, name: args.path.split("/").filter(Boolean).at(-1), task_store_id: isPlain ? null : projectStore.id, task_status: isPlain ? "none" : "linked", task_error: null };
+      const repository = { id: `project-${repositories.length + 1}`, path: args.path, name: args.path.split("/").filter(Boolean).at(-1), task_store_id: isPlain ? null : projectStore.id, task_status: isPlain ? "none" : "linked", task_error: null, git: { available: true, branch: "main", head: "0123456789abcdef0123456789abcdef01234567", dirty: 0 } };
       repositories = [...repositories, repository];
       emitChange(["repositories", "tasks", "artifacts"], args.workspace_id);
       return send(response, 200, { result: { repository, task_store: isPlain ? null : projectStore, attached: true, task_store_attached: !isPlain } });
@@ -225,8 +225,10 @@ const server = createServer(async (request, response) => {
     if (value.task_assignee !== undefined) tasks[0].assignee = value.task_assignee;
     if (value.file_text) artifactFiles["README.md"] = { ...artifactFiles["README.md"], text: value.file_text };
     if (value.message) messages.push({ id: `external-${messages.length}`, sender_id: "alice", destination: { kind: "channel", id: "general" }, body: value.message, kind: "message" });
+    if (value.mail_message && typeof value.mail_message === "object") messages.push({ id: `external-${messages.length}`, sender_id: "alice", destination: { kind: "channel", id: "general" }, body: "Fixture message", kind: "message", ...value.mail_message });
+    if (value.repository_git && repositories[0]) repositories[0].git = { ...repositories[0].git, ...value.repository_git };
     if (value.marker_state) { markers[0].state = value.marker_state; markers[0].revision += 1; }
-    emitChange(value.topics || ["tasks", "mail"], value.workspace_id || workspace.id);
+    emitChange(value.topics || (value.repository_git ? ["repositories"] : ["tasks", "mail"]), value.workspace_id || workspace.id);
     return send(response, 200, { ok: true });
   }
   if (url.pathname === "/fixture/revoke" && request.method === "POST") { sessionsValid = false; for (const client of subscribers) client.socket.end(); subscribers.clear(); return send(response, 200, { revoked: true }); }

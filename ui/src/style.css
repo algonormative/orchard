@@ -132,6 +132,9 @@ h1, h2, h3, h4 { letter-spacing: -.015em; }
 .sidebar button.tree-action { color: var(--faint); font: 600 .74rem/1.45 var(--mono); letter-spacing: .02em; }
 .sidebar button.tree-action:hover { color: var(--citron); }
 .sidebar button.store-button { color: var(--muted); font: 700 .74rem/1.45 var(--mono); }
+.repository-name, .repository-git-status { margin: .2rem .6rem; overflow-wrap: anywhere; font: .68rem/1.35 var(--mono); }
+.repository-name { color: var(--muted); }
+.repository-git-status { color: var(--faint); }
 .task-tree-item { padding-left: .8rem !important; font-size: .84rem !important; }
 .agent-task-list { margin: 0 0 .3rem 1.15rem; padding-left: .45rem; border-left: 1px solid var(--rule); }
 .sidebar .agent-task-link { padding: .2rem .35rem; border-color: transparent; background: transparent; color: var(--muted); font: .72rem/1.35 var(--mono); overflow-wrap: anywhere; }
@@ -170,6 +173,16 @@ h1, h2, h3, h4 { letter-spacing: -.015em; }
 .tab-menu button:hover, .tab-menu button:focus-visible { background: var(--citron); border-color: var(--citron); color: var(--ink); }
 .tab-menu button:disabled { color: var(--faint); }
 .tab-menu button:disabled:hover { background: transparent; border-color: transparent; color: var(--faint); }
+
+/* Decisions stay visible without replacing the working conversation below. */
+.needs-you:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem .7rem; padding: calc(.6rem + 4px) var(--content-x) .6rem; border-bottom: 1px solid var(--rule-strong); background: var(--stripe) top / 100% 4px no-repeat, var(--slab-raised); }
+.needs-you-title, .needs-you-sender { margin: 0; color: var(--cream); font: 700 .7rem/1.3 var(--mono); letter-spacing: .08em; }
+.needs-you-title { color: var(--citron); }
+.needs-you-item { display: flex; min-width: min(100%, 24rem); flex: 1 1 24rem; align-items: baseline; gap: .45rem; }
+.needs-you-sender { flex: none; color: var(--leaf); }
+.needs-you-excerpt { min-width: 4rem; flex: 1; overflow: hidden; color: var(--muted); font-size: .82rem; text-overflow: ellipsis; white-space: nowrap; }
+.needs-you-action { width: auto; min-width: 0; padding: .25rem .42rem; border-color: var(--rule-strong); color: var(--cream); font: 700 .68rem/1.2 var(--mono); }
+.needs-you-action:hover { border-color: var(--citron); background: var(--citron); color: var(--ink); }
 
 /* ── Viewer ─────────────────────────────────────────────────────────── */
 .conversation { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; overflow-y: auto; background: var(--ink); }

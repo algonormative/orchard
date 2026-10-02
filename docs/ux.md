@@ -47,6 +47,13 @@ the original request ID and content for a retry. The composer labels that
 uncertainty and asks the user to retry the original or explicitly keep an edited
 draft as a new message, warning that the first send may already have landed.
 
+Open decisions addressed to the owner appear in a compact Needs-you strip above
+the viewer: these are `kind: "decision"` messages without an owner thread reply.
+The strip offers the existing reply flow and a Mark decided action, and updates
+from loaded mail history without replacing a working composer. Attached project
+repositories show a small branch (or detached) and tracked-change count line in
+the Tasks tree when Git status is available.
+
 Chat, task, agent, artifact, and attachment detail opens only when selected.
 Each canonical resource offers Copy link, Add link, outgoing links, and
 backlinks in the viewer. References remain readable, navigable records. The
