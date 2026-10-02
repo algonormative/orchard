@@ -104,6 +104,8 @@ let statePatchPending = false;
 let stateMarkersFlight: Promise<void> | undefined;
 let stateMarkersVersion = 0;
 let stateMarkersLoadedVersion = -1;
+let focusRequest = 0;
+let composerRestorePending = false;
 let stateMarkersError = "";
 let stateOpportunitiesFlight: Promise<void> | undefined;
 let stateOpportunitiesError = "";
@@ -298,10 +300,40 @@ function rememberConversationContext() {
   state.composerFocused = document.activeElement?.getAttribute("aria-label") === "Message";
 }
 function restoreConversationContext() {
+  const screen = state.screen;
+  const workspaceRequest = state.workspaceRequest;
+  const restoreComposer = state.composerFocused;
+  state.composerFocused = undefined;
+  composerRestorePending = !!restoreComposer;
+  const request = ++focusRequest;
   requestAnimationFrame(() => {
+    if (request !== focusRequest || screen !== state.screen || workspaceRequest !== state.workspaceRequest) return;
+    composerRestorePending = false;
     const thread = document.querySelector<HTMLElement>("#thread");
     if (thread && state.threadScroll !== undefined) thread.scrollTop = state.threadScroll;
-    if (state.composerFocused) document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus();
+    if (restoreComposer && screen === "workspace" && document.activeElement === document.body) {
+      document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus({ preventScroll: true });
+    }
+  });
+}
+
+function focusView(target: "heading" | "create" | "workspace") {
+  // A remembered composer owns the workspace return focus.
+  if (target === "workspace" && composerRestorePending) return;
+  const screen = state.screen;
+  const workspaceRequest = state.workspaceRequest;
+  composerRestorePending = false;
+  const request = ++focusRequest;
+  requestAnimationFrame(() => {
+    if (request !== focusRequest || screen !== state.screen || workspaceRequest !== state.workspaceRequest) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body && root.contains(active)) return;
+    const destination = target === "create"
+      ? document.querySelector<HTMLElement>("#workspace-name")
+      : target === "workspace"
+        ? document.querySelector<HTMLElement>("#conversation")
+        : document.querySelector<HTMLElement>(".welcome h1");
+    destination?.focus({ preventScroll: true });
   });
 }
 
@@ -316,25 +348,26 @@ window.addEventListener("popstate", (event) => {
   if (screen === "workspaces") {
     state.workspaceRequest += 1; state.navigationEpoch += 1;
     state.screen = screen; state.detailView = undefined; state.detailEpoch += 1;
-    renderWorkspaceChooser(true);
+    renderWorkspaceChooser(true, true);
     return;
   }
-  if (workspaceId && workspaceId !== state.workspace?.id) { void chooseWorkspace(workspaceId, true, false, screen, detailView); return; }
+  if (workspaceId && workspaceId !== state.workspace?.id) { void chooseWorkspace(workspaceId, true, false, screen, detailView, true); return; }
   state.screen = screen;
   state.detailView = detailView;
   state.detailEpoch += 1;
-  if (state.screen === "settings") renderSettings(true);
-  else if (state.screen === "new-workspace") renderEmptyWorkspace(true);
-  else if (state.screen === "home") renderCalmHome(true);
+  if (state.screen === "settings") renderSettings(true, true);
+  else if (state.screen === "new-workspace") renderEmptyWorkspace(true, true);
+  else if (state.screen === "home") renderCalmHome(true, true);
   else if (state.workspace) {
     renderWorkspace();
+    focusView("workspace");
     if (resourceHref) {
       const local = state.tabs.find((tab) => tab.href === resourceHref);
       if (local) void activateTab(local, true);
       else { const collection = collectionFromHref(resourceHref, state.workspace.id); const ref = parseHref(resourceHref, state.workspace.id); if (collection) void activateTab(collection, true); else if (ref) void openResource(descriptor(ref, "Resource"), true); }
     } else renderEmptyViewer();
   }
-  else renderCalmHome(true);
+  else renderCalmHome(true, true);
 });
 
 window.addEventListener("keydown", (event) => {
@@ -473,7 +506,9 @@ function shell(title: string, detail: string) {
   root.replaceChildren();
   const panel = el("section", "welcome");
   const noticeBar = el("p", "notice"); noticeBar.id = "notice"; noticeBar.dataset.tone = "info";
-  panel.append(el("p", "eyebrow", "ORCHARD"), el("h1", "", title), el("p", "muted", detail), noticeBar);
+  const heading = el("h1", "", title);
+  heading.tabIndex = -1;
+  panel.append(el("p", "eyebrow", "ORCHARD"), heading, el("p", "muted", detail), noticeBar);
   root.append(panel);
 }
 
@@ -529,7 +564,7 @@ async function bootstrap() {
   }
 }
 
-function renderEmptyWorkspace(fromHistory = false) {
+function renderEmptyWorkspace(fromHistory = false, focus = false) {
   if (!fromHistory) {
     state.newWorkspaceReturn = state.screen;
     navigate("new-workspace");
@@ -538,15 +573,17 @@ function renderEmptyWorkspace(fromHistory = false) {
   shell("Start a workspace", "Create one workspace, then connect the people, channels and task stores that belong in it.");
   const form = el("form", "stack");
   const name = document.createElement("input");
+  name.id = "workspace-name";
   name.name = "name";
   name.placeholder = "Workspace name";
-  name.setAttribute("aria-label", "Workspace name");
   name.autocomplete = "off";
   name.required = true;
   const purpose = document.createElement("textarea");
+  purpose.id = "workspace-purpose";
   purpose.name = "purpose"; purpose.rows = 3; purpose.maxLength = 2000;
   purpose.placeholder = "What is this workspace for? (optional)";
-  purpose.setAttribute("aria-label", "Workspace purpose (optional)");
+  const nameLabel = el("label", "", "Workspace name"); nameLabel.htmlFor = name.id;
+  const purposeLabel = el("label", "", "Workspace purpose (optional)"); purposeLabel.htmlFor = purpose.id;
   const submit = button("Create workspace", async () => {
     if (!name.value.trim()) return notice("Give the workspace a name.", "error");
     if (submit.disabled) return;
@@ -565,22 +602,24 @@ function renderEmptyWorkspace(fromHistory = false) {
     leaveNewWorkspace();
   }, "subtle");
   form.classList.add("workspace-create-form");
-  form.append(name, purpose, actionRow(submit, cancel));
+  form.append(nameLabel, name, purposeLabel, purpose, actionRow(submit, cancel));
   document.querySelector(".welcome")?.append(form);
+  if (focus) focusView("create");
 }
 
 function leaveNewWorkspace() {
   if (state.newWorkspaceReturn === "workspaces") { state.newWorkspaceReturn = undefined; history.back(); return; }
   state.newWorkspaceReturn = undefined;
-  if (state.workspace) { navigate("workspace"); renderWorkspace(); }
-  else renderCalmHome();
+  if (state.workspace) { navigate("workspace"); renderWorkspace(); focusView("workspace"); }
+  else renderCalmHome(false, true);
 }
 
-function renderCalmHome(fromHistory = false) {
+function renderCalmHome(fromHistory = false, focus = false) {
   if (!fromHistory) navigate("home", undefined, true);
   shell("Orchard", "Create a workspace when you are ready.");
   document.querySelector(".welcome")?.classList.add("welcome-home", "calm-home");
-  document.querySelector(".welcome")?.append(button("Create workspace", () => renderEmptyWorkspace(), "primary"));
+  document.querySelector(".welcome")?.append(button("Create workspace", () => renderEmptyWorkspace(false, true), "primary"));
+  if (focus) focusView("heading");
 }
 
 function orderedWorkspaces() {
@@ -591,10 +630,10 @@ function orderedWorkspaces() {
 
 function leaveWorkspaceChooser() {
   if (state.workspace && string(object(history.state).workspaceId)) { history.back(); return; }
-  if (state.workspace) { void chooseWorkspace(state.workspace.id, false, true); return; }
+  if (state.workspace) { void chooseWorkspace(state.workspace.id, false, true, "workspace", undefined, true); return; }
   const first = orderedWorkspaces()[0];
-  if (first) void chooseWorkspace(first.id, false, true);
-  else renderCalmHome();
+  if (first) void chooseWorkspace(first.id, false, true, "workspace", undefined, true);
+  else renderCalmHome(false, true);
 }
 
 function recordWorkspaceVisit(id: string) {
@@ -602,23 +641,24 @@ function recordWorkspaceVisit(id: string) {
   void call("workspace_visit", { workspace_id: id }).catch((error) => console.warn("Could not record workspace visit", error));
 }
 
-function renderWorkspaceChooser(fromHistory = false) {
+function renderWorkspaceChooser(fromHistory = false, focus = false) {
   if (!fromHistory) navigate("workspaces", undefined, false, "/workspaces");
   shell("All Workspaces", "Choose a workspace or create a new one.");
   document.querySelector(".welcome")?.classList.add("welcome-home");
   const list = el("div", "stack workspace-list");
   for (const workspace of orderedWorkspaces()) {
-    list.append(button(workspace.name, () => void chooseWorkspace(workspace.id), "workspace-choice"));
+    list.append(button(workspace.name, () => void chooseWorkspace(workspace.id, false, false, "workspace", undefined, true), "workspace-choice"));
   }
   const back = button("Back", leaveWorkspaceChooser, "subtle");
-  document.querySelector(".welcome")?.append(list, actionRow(button("Create workspace", () => renderEmptyWorkspace(), "primary"), back));
+  document.querySelector(".welcome")?.append(list, actionRow(button("Create workspace", () => renderEmptyWorkspace(false, true), "primary"), back));
+  if (focus) focusView("heading");
 }
 
 function message(error: unknown) {
   return error instanceof Error ? error.message : String(error || "That action could not be completed.");
 }
 
-async function chooseWorkspace(id: string, fromHistory = false, replaceHistory = false, targetScreen: Screen = "workspace", targetDetail?: DetailView) {
+async function chooseWorkspace(id: string, fromHistory = false, replaceHistory = false, targetScreen: Screen = "workspace", targetDetail?: DetailView, focus = false) {
   const requestedUrl = window.location.href;
   const enteredFromChooser = window.location.pathname === "/workspaces";
   const workspace = state.workspaces.find((item) => item.id === id);
@@ -660,13 +700,14 @@ async function chooseWorkspace(id: string, fromHistory = false, replaceHistory =
   state.senderId = "owner";
   if (targetScreen === "settings") {
     if (!fromHistory) navigate("settings", undefined, replaceHistory, workspaceSettingsHref(id));
-    renderSettings(true);
+    renderSettings(true, focus);
     recordWorkspaceVisit(id);
     return;
   }
-  if (targetScreen === "new-workspace") { renderEmptyWorkspace(true); return; }
-  if (targetScreen === "home") { renderCalmHome(true); return; }
+  if (targetScreen === "new-workspace") { renderEmptyWorkspace(true, focus); return; }
+  if (targetScreen === "home") { renderCalmHome(true, focus); return; }
   renderWorkspace();
+  if (focus) focusView("workspace");
   recordWorkspaceVisit(id);
   const requestedCollection = collectionFromHref(new URL(requestedUrl).pathname, id);
   const requested = parseHref(requestedUrl, id);
@@ -699,9 +740,9 @@ function renderWorkspace() {
     option.selected = workspace.id === state.workspace.id;
     select.append(option);
   }
-  select.addEventListener("change", () => void chooseWorkspace(select.value));
+  select.addEventListener("change", () => void chooseWorkspace(select.value, false, false, "workspace", undefined, true));
   state.screen = "workspace";
-  top.append(el("strong", "brand", "Orchard"), select, button("All workspaces", () => { rememberConversationContext(); renderWorkspaceChooser(); }), button("New workspace", () => { rememberConversationContext(); renderEmptyWorkspace(); }), button("Settings", () => { rememberConversationContext(); renderSettings(); }));
+  top.append(el("strong", "brand", "Orchard"), select, button("All workspaces", () => { rememberConversationContext(); renderWorkspaceChooser(false, true); }), button("New workspace", () => { rememberConversationContext(); renderEmptyWorkspace(false, true); }), button("Settings", () => { rememberConversationContext(); renderSettings(false, true); }));
   const noticeBar = el("p", "notice");
   noticeBar.id = "notice";
   noticeBar.dataset.tone = "info";
@@ -715,6 +756,7 @@ function renderWorkspace() {
   const tabs = el("nav", "tabstrip"); tabs.id = "tabs"; tabs.setAttribute("aria-label", "Open resources");
   const main = el("section", "conversation");
   main.id = "conversation";
+  main.tabIndex = -1;
   main.addEventListener("input", () => { if (state.activeHref) keepTab(state.activeHref); });
   main.addEventListener("change", () => { if (state.activeHref) keepTab(state.activeHref); });
   main.addEventListener("click", (event) => {
@@ -1794,7 +1836,7 @@ function showChannelForm() {
 }
 
 function showAgentForm() {
-  renderSettings();
+  renderSettings(false, true);
 }
 
 async function attachRepository() {
@@ -1867,6 +1909,8 @@ function openWorkspaceFromSettings() {
   const href = state.activeHref || workspaceRootHref(state.workspace.id);
   navigate("workspace", undefined, false, href);
   renderWorkspace();
+  // A non-composer return lands on the stable viewer region.
+  focusView("workspace");
   const active = state.tabs.find((tab) => tab.href === state.activeHref);
   if (active) void activateTab(active, true); else renderEmptyViewer();
 }
@@ -1887,14 +1931,14 @@ function pluginCatalog() {
         catch (error) { notice(message(error), "error"); }
         finally { if (document.contains(control)) control.disabled = false; }
       }, "subtle"); control.disabled = item.available === false; row.append(control);
-      if (item.attached === false && item.available !== false) row.append(button("View retained data", () => { renderWorkspace(); if (id === "tasks") openTasks(); else void activateTab(collectionTab("states", state.workspace!.id)); }, "subtle"));
+      if (item.attached === false && item.available !== false) row.append(button("View retained data", () => { renderWorkspace(); focusView("workspace"); if (id === "tasks") openTasks(); else void activateTab(collectionTab("states", state.workspace!.id)); }, "subtle"));
     }
     section.append(row);
   }
   return section;
 }
 
-function renderSettings(fromHistory = false) {
+function renderSettings(fromHistory = false, focus = false) {
   if (!state.workspace) return;
   if (!fromHistory) navigate("settings", undefined, false, workspaceSettingsHref(state.workspace.id));
   shell("Workspace settings", "Share the workspace context with collaborators, or configure another already-running agent.");
@@ -1936,6 +1980,7 @@ function renderSettings(fromHistory = false) {
   void loadWorkspaceIntroduction(introduction, readme, joining, workspacePath);
   void loadConnection(endpoint, token, claudeConfig, codexConfig, codexToml);
   void loadBuildIdentity(buildIdentity);
+  if (focus) focusView("heading");
 }
 
 async function loadWorkspaceIntroduction(introduction: HTMLElement, readme: HTMLElement, joining: HTMLElement, workspacePathBlock: HTMLElement) {

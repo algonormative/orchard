@@ -40,6 +40,8 @@ button.subtle { background: transparent; color: var(--muted); }
 button.subtle:hover { color: var(--cream); background: var(--slab-hover); }
 button.selected { background: var(--citron-wash); border-color: var(--citron); color: var(--cream); }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--citron); outline-offset: 2px; }
+/* Programmatic navigation targets (view heading, viewer region) are not controls: no ring. The next Tab shows one. */
+h1[tabindex="-1"]:focus-visible, .conversation[tabindex="-1"]:focus-visible { outline: none; }
 input, textarea, select { width: 100%; background: var(--ink); border: 1px solid var(--rule-strong); border-radius: 0; padding: .58rem .7rem; transition: border-color .12s ease, box-shadow .12s ease; }
 input:hover, textarea:hover, select:hover { border-color: var(--muted); }
 input:focus, textarea:focus, select:focus { border-color: var(--citron); box-shadow: 3px 3px 0 var(--citron-deep); }
@@ -175,7 +177,7 @@ h1, h2, h3, h4 { letter-spacing: -.015em; }
 .form-view { max-width: 700px; }
 .form-view h2 { margin: .2rem 0 .9rem; font-size: 1.35rem; font-weight: 800; }
 .form-view .stack { width: 100%; max-width: 640px; margin: 0; }
-.form-view label { color: var(--muted); font: 700 .68rem/1.2 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+.form-view label, .workspace-create-form label { color: var(--muted); font: 700 .68rem/1.2 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
 
 /* Ledger messages: log entries, not bubbles. */
 .thread { flex: 1; overflow-y: auto; padding: .35rem var(--content-x) 1.25rem; }

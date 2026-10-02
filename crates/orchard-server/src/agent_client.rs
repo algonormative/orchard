@@ -39,6 +39,11 @@ pub enum Request {
         participant_id: String,
         after: u64,
     },
+    Acknowledge {
+        participant_id: String,
+        message_ids: Vec<String>,
+        request_id: String,
+    },
     Send {
         sender_id: String,
         destination: Value,
@@ -77,6 +82,20 @@ impl Request {
             }
             Self::Resume { participant_id } | Self::Alerts { participant_id, .. } => {
                 required_text(participant_id, "participant ID")?;
+            }
+            Self::Acknowledge {
+                participant_id,
+                message_ids,
+                request_id,
+            } => {
+                required_text(participant_id, "participant ID")?;
+                required_text(request_id, "request ID")?;
+                if message_ids.is_empty() {
+                    return Err("ack requires at least one --message-id".to_owned());
+                }
+                for message_id in message_ids {
+                    required_text(message_id, "message ID")?;
+                }
             }
             Self::Send {
                 sender_id,
@@ -119,10 +138,71 @@ impl Request {
     }
 }
 
+/// Environment defaults for `--endpoint` and `--credential-file`; flags take precedence.
+pub const ENDPOINT_ENV: &str = "ORCHARD_AGENT_ENDPOINT";
+pub const CREDENTIAL_FILE_ENV: &str = "ORCHARD_AGENT_CREDENTIAL_FILE";
+
+#[derive(Debug)]
+struct ResolvedConnection {
+    options: ConnectionOptions,
+    /// How diagnostics refer to the credential file. An environment value is never
+    /// echoed, in case a credential was pasted there instead of a path.
+    credential_label: String,
+}
+
+fn resolve_connection(
+    endpoint: Option<String>,
+    credential_file: Option<PathBuf>,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Result<ResolvedConnection, String> {
+    let from_env = |name: &str| env(name).filter(|value| !value.is_empty());
+    let endpoint = match endpoint {
+        Some(endpoint) => endpoint,
+        None => from_env(ENDPOINT_ENV)
+            .ok_or_else(|| format!("--endpoint (or {ENDPOINT_ENV}) is required\n{}", usage()))?
+            .into_string()
+            .map_err(|_| format!("{ENDPOINT_ENV} must be valid UTF-8"))?,
+    };
+    let (credential_file, credential_label) = match credential_file {
+        Some(path) => {
+            let label = path.display().to_string();
+            (path, label)
+        }
+        None => {
+            let path = from_env(CREDENTIAL_FILE_ENV).ok_or_else(|| {
+                format!(
+                    "--credential-file (or {CREDENTIAL_FILE_ENV}) is required\n{}",
+                    usage()
+                )
+            })?;
+            (
+                PathBuf::from(path),
+                format!("named by {CREDENTIAL_FILE_ENV}"),
+            )
+        }
+    };
+    Ok(ResolvedConnection {
+        options: ConnectionOptions {
+            endpoint,
+            credential_file,
+        },
+        credential_label,
+    })
+}
+
 pub async fn execute(connection: &ConnectionOptions, request: Request) -> Result<Value, String> {
+    let credential_label = connection.credential_file.display().to_string();
+    execute_labeled(connection, request, &credential_label).await
+}
+
+async fn execute_labeled(
+    connection: &ConnectionOptions,
+    request: Request,
+    credential_label: &str,
+) -> Result<Value, String> {
     request.preflight()?;
     let endpoint = loopback_endpoint(&connection.endpoint)?;
-    let credential = read_credential(&connection.credential_file)?;
+    let credential = read_credential(&connection.credential_file, credential_label)?;
     let mut client = tokio::time::timeout(INVOCATION_TIMEOUT, async {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -177,13 +257,10 @@ pub async fn run_cli(arguments: Vec<OsString>) -> Result<(), String> {
             None => return Err(usage().to_owned()),
         }
     };
-    let connection = ConnectionOptions {
-        endpoint: endpoint.ok_or_else(|| format!("--endpoint is required\n{}", usage()))?,
-        credential_file: credential_file
-            .ok_or_else(|| format!("--credential-file is required\n{}", usage()))?,
-    };
+    let connection = resolve_connection(endpoint, credential_file, |name| std::env::var_os(name))?;
     let request = parse_command(&command, values.collect())?;
-    let result = execute(&connection, request).await?;
+    let result =
+        execute_labeled(&connection.options, request, &connection.credential_label).await?;
     println!(
         "{}",
         serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?
@@ -192,7 +269,7 @@ pub async fn run_cli(arguments: Vec<OsString>) -> Result<(), String> {
 }
 
 pub fn usage() -> &'static str {
-    "usage: Orchard agent --endpoint URL --credential-file FILE COMMAND\n\ncommands: tools | call TOOL (--args-file FILE | stdin) | join --participant-id ID --name NAME --request-id ID | resume --participant-id ID | alerts --participant-id ID --after CURSOR | send --sender-id ID (--channel ID | --direct ID) --body TEXT --request-id ID | upload FILE --path PATH --request-id ID | status"
+    "usage: Orchard agent [--endpoint URL] [--credential-file FILE] COMMAND\n\n--endpoint and --credential-file default to ORCHARD_AGENT_ENDPOINT and ORCHARD_AGENT_CREDENTIAL_FILE (a path, never the credential itself); flags take precedence.\n\ncommands: tools | call TOOL (--args-file FILE | stdin) | join --participant-id ID --name NAME --request-id ID | resume --participant-id ID | alerts --participant-id ID --after CURSOR | ack --participant-id ID --message-id ID [--message-id ID ...] --request-id ID | send --sender-id ID (--channel ID | --direct ID) --body TEXT --request-id ID | upload FILE --path PATH --request-id ID | status"
 }
 fn parse_command(command: &str, arguments: Vec<OsString>) -> Result<Request, String> {
     match command {
@@ -243,6 +320,38 @@ fn parse_command(command: &str, arguments: Vec<OsString>) -> Result<Request, Str
                 after: need(&v, "--after")?
                     .parse()
                     .map_err(|_| "--after must be a non-negative integer")?,
+            })
+        }
+        "ack" => {
+            let mut it = arguments.into_iter();
+            let (mut participant_id, mut request_id, mut message_ids) = (None, None, Vec::new());
+            while let Some(key) = it.next() {
+                let key = key
+                    .into_string()
+                    .map_err(|_| "agent arguments must be valid UTF-8")?;
+                if !matches!(
+                    key.as_str(),
+                    "--participant-id" | "--message-id" | "--request-id"
+                ) {
+                    return Err(format!("unknown agent argument {key:?}"));
+                }
+                let value = next_text(&mut it, &format!("{key} requires a value"))?;
+                let single = match key.as_str() {
+                    "--message-id" => {
+                        message_ids.push(value);
+                        continue;
+                    }
+                    "--participant-id" => &mut participant_id,
+                    _ => &mut request_id,
+                };
+                if single.replace(value).is_some() {
+                    return Err(format!("{key} may be specified only once"));
+                }
+            }
+            Ok(Request::Acknowledge {
+                participant_id: participant_id.ok_or("--participant-id is required")?,
+                message_ids,
+                request_id: request_id.ok_or("--request-id is required")?,
             })
         }
         "send" => {
@@ -335,6 +444,9 @@ async fn perform(
         Request::Alerts { participant_id, after } => {
             call(client, "workspace_alerts", json!({"participant_id": participant_id, "after": after})).await
         }
+        Request::Acknowledge { participant_id, message_ids, request_id } => {
+            call(client, "mail_acknowledge", json!({"participant_id": participant_id, "message_ids": message_ids, "request_id": request_id})).await
+        }
         Request::Send { sender_id, destination, body, request_id } => {
             call(client, "mail_send", json!({"sender_id": sender_id, "destination": destination, "body": body, "request_id": request_id})).await
         }
@@ -409,9 +521,9 @@ pub fn loopback_endpoint(input: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-fn read_credential(path: &PathBuf) -> Result<String, String> {
+fn read_credential(path: &PathBuf, label: &str) -> Result<String, String> {
     let credential = fs::read_to_string(path)
-        .map_err(|error| format!("cannot read credential file {}: {error}", path.display()))?;
+        .map_err(|error| format!("cannot read credential file {label}: {error}"))?;
     let credential = credential.trim().to_owned();
     if credential.is_empty() {
         return Err("credential file is empty".to_owned());
@@ -511,6 +623,126 @@ mod tests {
             request.preflight().unwrap_err(),
             "this mutation requires a non-empty request_id before connecting"
         );
+    }
+
+    fn os_args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn flags_take_precedence_over_environment_defaults() {
+        let env = |name: &str| match name {
+            ENDPOINT_ENV => Some(OsString::from("http://127.0.0.1:1/workspaces/env/mcp")),
+            CREDENTIAL_FILE_ENV => Some(OsString::from("/env/credential")),
+            _ => None,
+        };
+        let defaults = resolve_connection(None, None, env).unwrap();
+        assert_eq!(
+            defaults.options.endpoint,
+            "http://127.0.0.1:1/workspaces/env/mcp"
+        );
+        assert_eq!(
+            defaults.options.credential_file,
+            PathBuf::from("/env/credential")
+        );
+        assert!(!defaults.credential_label.contains("/env/credential"));
+
+        let flags = resolve_connection(
+            Some("http://127.0.0.1:2/workspaces/flag/mcp".to_owned()),
+            Some(PathBuf::from("/flag/credential")),
+            env,
+        )
+        .unwrap();
+        assert_eq!(
+            flags.options.endpoint,
+            "http://127.0.0.1:2/workspaces/flag/mcp"
+        );
+        assert_eq!(
+            flags.options.credential_file,
+            PathBuf::from("/flag/credential")
+        );
+    }
+
+    #[test]
+    fn missing_connection_values_name_the_flag_and_environment_variable() {
+        let unset = |_: &str| None;
+        let endpoint = resolve_connection(None, Some(PathBuf::from("/c")), unset).unwrap_err();
+        assert!(endpoint.contains("--endpoint") && endpoint.contains(ENDPOINT_ENV));
+        let credential = resolve_connection(Some("http://x".to_owned()), None, unset).unwrap_err();
+        assert!(
+            credential.contains("--credential-file") && credential.contains(CREDENTIAL_FILE_ENV)
+        );
+        let empty = |_: &str| Some(OsString::new());
+        assert!(resolve_connection(None, None, empty).is_err());
+    }
+
+    #[tokio::test]
+    async fn an_environment_credential_value_is_never_echoed() {
+        let mistaken = "pasted-credential-instead-of-a-path";
+        let env = |name: &str| match name {
+            ENDPOINT_ENV => Some(OsString::from("http://127.0.0.1:9/workspaces/t/mcp")),
+            CREDENTIAL_FILE_ENV => Some(OsString::from(mistaken)),
+            _ => None,
+        };
+        let resolved = resolve_connection(None, None, env).unwrap();
+        let error = execute_labeled(
+            &resolved.options,
+            Request::Status,
+            &resolved.credential_label,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains(CREDENTIAL_FILE_ENV), "{error}");
+        assert!(!error.contains(mistaken), "{error}");
+    }
+
+    #[test]
+    fn ack_accepts_repeated_message_ids_and_requires_a_request_id() {
+        let request = parse_command(
+            "ack",
+            os_args(&[
+                "--participant-id",
+                "bot",
+                "--message-id",
+                "m_1",
+                "--message-id",
+                "m_2",
+                "--request-id",
+                "ack-1",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            Request::Acknowledge {
+                participant_id: "bot".to_owned(),
+                message_ids: vec!["m_1".to_owned(), "m_2".to_owned()],
+                request_id: "ack-1".to_owned(),
+            }
+        );
+        assert!(parse_command(
+            "ack",
+            os_args(&["--participant-id", "bot", "--message-id", "m_1"])
+        )
+        .unwrap_err()
+        .contains("--request-id"));
+        let without_messages = parse_command(
+            "ack",
+            os_args(&["--participant-id", "bot", "--request-id", "ack-2"]),
+        )
+        .unwrap();
+        assert!(without_messages
+            .preflight()
+            .unwrap_err()
+            .contains("--message-id"));
+        assert!(
+            parse_command("ack", os_args(&["--request-id", "a", "--request-id", "b"]))
+                .unwrap_err()
+                .contains("only once")
+        );
+        assert!(parse_command("ack", os_args(&["--participant"]))
+            .unwrap_err()
+            .contains("unknown agent argument"));
     }
 
     #[tokio::test]

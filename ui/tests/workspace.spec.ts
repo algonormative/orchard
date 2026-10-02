@@ -28,6 +28,70 @@ test("first launch is calm and exitable", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Create workspace", exact: true })).toBeVisible();
 });
 
+test("keyboard creation keeps visible labels and restores focus through Escape and Back", async ({ page }) => {
+  await unlock(page, false);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "Orchard", exact: true })).toBeFocused();
+  const create = page.getByRole("button", { name: "Create workspace", exact: true });
+  await create.focus(); await page.keyboard.press("Enter");
+  const name = page.getByLabel("Workspace name", { exact: true });
+  const purpose = page.getByLabel("Workspace purpose (optional)", { exact: true });
+  await expect(name).toBeFocused();
+  await name.fill("Keyboard workspace");
+  await expect(page.locator('label[for="workspace-name"]')).toBeVisible();
+  await expect(page.locator('label[for="workspace-purpose"]')).toBeVisible();
+  await expect(purpose).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "Orchard", exact: true })).toBeFocused();
+
+  await create.focus(); await page.keyboard.press("Enter");
+  await expect(name).toBeFocused();
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "Orchard", exact: true })).toBeFocused();
+});
+
+test("keyboard chooser and settings navigation moves focus without leaving it on body", async ({ page }) => {
+  await unlock(page);
+  const allWorkspaces = page.getByRole("button", { name: "All workspaces", exact: true });
+  await allWorkspaces.focus(); await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "All Workspaces", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#conversation")).toBeFocused();
+
+  await allWorkspaces.focus(); await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "All Workspaces", exact: true })).toBeFocused();
+  await page.goBack();
+  await expect(page.locator("#conversation")).toBeFocused();
+
+  const settings = page.getByRole("button", { name: "Settings", exact: true });
+  await settings.focus(); await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Workspace settings", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#conversation")).toBeFocused();
+
+  await settings.focus(); await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Workspace settings", exact: true })).toBeFocused();
+  await page.goBack();
+  await expect(page.locator("#conversation")).toBeFocused();
+
+  const composer = page.getByLabel("Message");
+  await composer.focus();
+  await settings.evaluate((button: HTMLButtonElement) => button.click());
+  await expect(page.getByRole("heading", { name: "Workspace settings", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(composer).toBeFocused();
+});
+
+test("background refresh does not steal a focused workspace draft", async ({ page, request }) => {
+  await unlock(page);
+  await page.getByRole("button", { name: "New workspace", exact: true }).click();
+  const name = page.getByLabel("Workspace name", { exact: true });
+  await name.fill("Draft that stays focused");
+  await request.post("/fixture/external-change", { data: { message: "Background update", topics: ["mail"] } });
+  await expect(name).toBeFocused();
+  await expect(name).toHaveValue("Draft that stays focused");
+});
+
 test("collection routes load directly and survive reload", async ({ page }) => {
   await unlock(page);
   for (const [route, title] of [["~tasks", "Tasks"], ["~agents", "Agents"], ["~directs", "All direct messages"]]) {

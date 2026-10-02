@@ -22,6 +22,18 @@ orchard agent --endpoint http://127.0.0.1:4312/workspaces/WORKSPACE_ID/mcp \
   --credential-file /secure/local/credential call workspace_info --args-file request.json
 ```
 
+To avoid repeating both flags, set `ORCHARD_AGENT_ENDPOINT` and
+`ORCHARD_AGENT_CREDENTIAL_FILE` in the agent's own environment. Flags still take
+precedence. The second variable holds the credential file's *path*, never the
+credential itself; if it names a file that cannot be read, diagnostics refer to
+the variable by name and do not echo its value.
+
+```sh
+export ORCHARD_AGENT_ENDPOINT=http://127.0.0.1:4312/workspaces/WORKSPACE_ID/mcp
+export ORCHARD_AGENT_CREDENTIAL_FILE=/secure/local/credential
+orchard agent status
+```
+
 `call` accepts one JSON object from `--args-file FILE` or the literal `stdin`.
 It is the general escape hatch: inspect `tools` first and supply the exact
 schema the endpoint advertises. Known mutating tools are rejected locally if
@@ -40,8 +52,16 @@ orchard agent --endpoint http://127.0.0.1:4312/workspaces/WORKSPACE_ID/mcp \
   --credential-file /secure/local/credential alerts --participant-id build-bot --after 42
 ```
 
-Alert retrieval never acknowledges anything. Acknowledge deliberately with the
-generic call and its own request ID. Sending and uploads also require one:
+Alert retrieval never acknowledges anything. Acknowledge the messages you
+handled deliberately with `ack`, which takes one or more `--message-id` values
+(the `message.id` of each alert) and its own request ID:
+
+```sh
+orchard agent ack --participant-id build-bot \
+  --message-id m_00000000000000000042 --request-id ack-build-bot-42
+```
+
+Sending and uploads also require a request ID:
 
 ```sh
 orchard agent --endpoint http://127.0.0.1:4312/workspaces/WORKSPACE_ID/mcp \
