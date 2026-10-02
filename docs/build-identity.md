@@ -16,9 +16,16 @@ runtime Git information.
 `ui_hash` is SHA-256 over sorted embedded UI entries. Each entry contributes
 its slash-normalized relative path, a NUL byte, its big-endian byte length, and
 its contents. This makes both a renamed asset and a changed asset produce a
-different identity. The build script watches the embedded distribution,
-desktop manifest, Git HEAD/ref/index/packed refs, and source directories so
-new, deleted, staged, and working-tree changes refresh the identity.
+different identity.
+
+`dirty` means tracked files differ from `HEAD`, staged or not, matching
+`git describe --dirty`; untracked files do not count. The build script runs Git
+with `--no-optional-locks` so it never touches the repository it describes, and
+watches only files that exist: the embedded distribution, the desktop manifest,
+`HEAD`, the current branch ref, `index`, `packed-refs` when present, and each
+tracked file. Edits, staging, commits, and branch switches refresh the identity,
+while repeated builds of an unchanged tree do not rerun the script. Outside a
+Git checkout no Git paths are watched.
 
 Settings fetches the endpoint once when opened and renders it with the shared
 copyable code block. A failed or malformed response shows an unavailable

@@ -33,7 +33,9 @@ fn main() {
     }
     let ui_hash = embedded_ui_hash(&dist, &files);
     let git = git_identity(&workspace);
-    emit_git_reruns(&workspace);
+    if git.revision.is_some() {
+        emit_git_reruns(&workspace);
+    }
     let build_info = build_info_json(&app_version, &server_version, &ui_hash, git);
 
     let output =
@@ -140,30 +142,30 @@ fn git_identity(workspace: &Path) -> GitIdentity {
     let revision = git_output(workspace, &["rev-parse", "--verify", "HEAD"])
         .and_then(|value| value.trim().as_bytes().try_into().ok())
         .filter(|revision: &[u8; 40]| revision.iter().all(u8::is_ascii_hexdigit));
-    let dirty = git_output(workspace, &["status", "--porcelain"]).map(|value| !value.is_empty());
+    // Dirty means tracked changes (staged or not), like `git describe --dirty`;
+    // untracked files do not count.
+    let dirty = git_output(
+        workspace,
+        &["status", "--porcelain", "--untracked-files=no"],
+    )
+    .map(|value| !value.is_empty());
     GitIdentity { revision, dirty }
 }
 
+/// Watches only files that exist. Watching the `.git` directory, or a path that is
+/// missing (such as an absent `packed-refs`), makes Cargo rerun this script on every
+/// build. Tracked files are watched individually, so working-tree edits refresh the
+/// dirty flag without watching `ui/node_modules` or test output.
 fn emit_git_reruns(workspace: &Path) {
-    println!(
-        "cargo:rerun-if-changed={}",
-        workspace.join(".git").display()
-    );
+    let mut paths = Vec::new();
     for path in ["HEAD", "index", "packed-refs"] {
-        if let Some(path) = git_path(workspace, path) {
-            println!("cargo:rerun-if-changed={}", path.display());
-        }
-    }
-    for directory in ["crates", "ui", "docs", "scripts", "examples"] {
-        println!(
-            "cargo:rerun-if-changed={}",
-            workspace.join(directory).display()
-        );
+        paths.extend(git_path(workspace, path));
     }
     if let Some(reference) = git_output(workspace, &["symbolic-ref", "-q", "HEAD"]) {
-        if let Some(path) = git_path(workspace, reference.trim()) {
-            println!("cargo:rerun-if-changed={}", path.display());
-        }
+        paths.extend(git_path(workspace, reference.trim()));
+    }
+    for path in paths.into_iter().filter(|path| path.is_file()) {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
     if let Some(files) = git_output_bytes(workspace, &["ls-files", "-z"]) {
         for relative in files
@@ -171,10 +173,12 @@ fn emit_git_reruns(workspace: &Path) {
             .filter(|path| !path.is_empty())
         {
             if let Ok(relative) = std::str::from_utf8(relative) {
-                println!(
-                    "cargo:rerun-if-changed={}",
-                    workspace.join(relative).display()
-                );
+                let path = workspace.join(relative);
+                // A deleted tracked file was watched by the previous run, so its removal
+                // still reruns this script once; watching a missing path would rerun forever.
+                if path.exists() {
+                    println!("cargo:rerun-if-changed={}", path.display());
+                }
             }
         }
     }
@@ -196,7 +200,9 @@ fn git_output(workspace: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn git_output_bytes(workspace: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    // Optional locks would let `git status` touch `.git` and the index during the build.
     let output = Command::new("git")
+        .arg("--no-optional-locks")
         .args(args)
         .current_dir(workspace)
         .output()
