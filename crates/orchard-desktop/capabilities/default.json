@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Orchard has no native webview windows.",
+  "description": "No window gets Tauri commands; the About window shows a local page only.",
   "windows": [],
   "permissions": ["opener:default", "dialog:default", "clipboard-manager:allow-write-text"]
 }

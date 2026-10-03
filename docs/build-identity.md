@@ -31,9 +31,9 @@ Settings fetches the endpoint once when opened and renders it with the shared
 copyable code block. A failed or malformed response shows an unavailable
 identity without polling or changing application chrome.
 
-The menu bar offers the same identity natively. **About Orchard** brings
-Orchard forward and opens the system About panel with the name, version, and
-icon from the app bundle. **Build Identity…** shows the embedded identity as
-text: app and server versions, the 12-character revision with its clean,
-dirty, or unknown state, and the full UI hash, with Copy identity and Open
-notices actions.
+**About Orchard** in the menu bar opens a small native window showing the
+embedded `about.html` page: the version, a GitHub link, third-party notices,
+and a collapsed **Build info** section with this same identity and a Copy
+action. The window gets no Tauri commands. It shows only that page: notices
+open the bundled folder, https links open in the default browser, and any
+other navigation is refused. Closing the window leaves Orchard running.

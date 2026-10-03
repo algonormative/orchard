@@ -54,7 +54,8 @@ async fn asset_or_index(uri: Uri) -> Response {
 fn asset_response(path: &str) -> Option<Response> {
     let (_, bytes) = ASSETS.iter().find(|(candidate, _)| *candidate == path)?;
     let mut response = response(StatusCode::OK, content_type(path), bytes);
-    let cache = if path == "index.html" {
+    // Pages name hashed assets, so every page is revalidated; the assets are immutable.
+    let cache = if path.ends_with(".html") {
         "no-cache"
     } else {
         "public, max-age=31536000, immutable"
@@ -145,6 +146,15 @@ mod tests {
         assert!(bytes
             .windows(b"\"ui_hash\"".len())
             .any(|part| part == b"\"ui_hash\""));
+
+        // The About window's page is embedded and, like every page, revalidated.
+        let about = router
+            .clone()
+            .oneshot(Request::get("/about.html").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(about.status(), StatusCode::OK);
+        assert_eq!(about.headers()[header::CACHE_CONTROL], "no-cache");
 
         let fallback = router
             .clone()

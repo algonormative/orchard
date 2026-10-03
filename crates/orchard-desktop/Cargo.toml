@@ -23,11 +23,6 @@ tauri-plugin-clipboard-manager = "=2.3.3"
 tauri-plugin-opener = "=2.5.5"
 tokio = { version = "=1.47.1", features = ["time"] }
 
-# Already in the build through Tauri; used for the system About panel. Only safe calls.
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "=0.6.4"
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder"] }
-
 [build-dependencies]
 tauri-build = { version = "=2.6.3", features = [] }
 

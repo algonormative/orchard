@@ -1,4 +1,5 @@
 import "./style.css";
+import { buildIdentityText } from "./build-identity";
 import { canonicalHref, parseHref, type Descriptor, type ResourceRef } from "./resources";
 import { stateDiagram } from "./state-diagram";
 
@@ -170,18 +171,6 @@ async function call(operation: string, args: Json = {}, allowSessionRefresh = tr
     throw new Error(string(payload.error) || `Orchard service returned ${response.status}.`);
   }
   return object(payload.result ?? payload);
-}
-
-function buildIdentityText(identity: Json) {
-  const dirty = identity.dirty;
-  const workingTree = typeof dirty === "boolean" ? dirty ? "dirty" : "clean" : "unavailable";
-  return [
-    `App version: ${string(identity.app_version) || "unavailable"}`,
-    `Server version: ${string(identity.server_version) || "unavailable"}`,
-    `Revision: ${string(identity.revision) || "unavailable"}`,
-    `Working tree: ${workingTree}`,
-    `Embedded UI SHA-256: ${string(identity.ui_hash) || "unavailable"}`,
-  ].join("\n");
 }
 
 async function loadBuildIdentity(target: HTMLElement) {

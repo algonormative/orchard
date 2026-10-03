@@ -845,3 +845,22 @@ test("responsive code surfaces stay contained and copy exact text", async ({ pag
   expect(geometry.page).toBeLessThanOrEqual(geometry.viewport);
   expect(geometry.blocks.some((block) => block.scroll >= block.client)).toBeTruthy();
 });
+
+test("the About page shows the version, source link, and copyable build info", async ({ page, context, request }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:4174" });
+  await request.post("/fixture/build", { data: { app_version: "0.2.0", server_version: "0.1.0", ui_hash: "a".repeat(64), revision: "4a4ceae265b38ccbff197882be48acfd8bf74d93", dirty: false } });
+  await page.setViewportSize({ width: 400, height: 560 });
+  await page.goto("/about.html");
+  await expect(page.getByRole("heading", { name: "Orchard", exact: true })).toBeVisible();
+  await expect(page.getByText("Version 0.2.0", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "GitHub" })).toHaveAttribute("href", "https://github.com/algonormative/orchard");
+  const build = page.locator("#about-build-text");
+  await expect(build).toBeHidden();
+  await page.getByText("Build info", { exact: true }).click();
+  await expect(build).toContainText("Revision: 4a4ceae265b38ccbff197882be48acfd8bf74d93");
+  await expect(build).toContainText("Working tree: clean");
+  await page.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(page.getByRole("status")).toHaveText("Copied.");
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(await build.textContent());
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+});

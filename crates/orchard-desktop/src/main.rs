@@ -19,9 +19,7 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_dialog::{
-    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
-};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
 const TRAY_ID: &str = "orchard-tray";
@@ -164,7 +162,12 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("failed to build Orchard desktop shell")
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                // Closing the About window (the only window) is not a request to quit.
+                if code.is_none() {
+                    api.prevent_exit();
+                    return;
+                }
                 if let Some(state) = app.try_state::<Arc<DesktopState>>() {
                     let phase = state.shutdown.lock().unwrap().phase;
                     if phase != ShutdownPhase::Stopped {
@@ -408,8 +411,6 @@ fn build_menu<R: Runtime>(
         MenuItem::with_id(app, "all-workspaces", "All Workspaces…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let about = MenuItem::with_id(app, "about", "About Orchard", true, None::<&str>)?;
-    let build_identity =
-        MenuItem::with_id(app, "build-identity", "Build Identity…", true, None::<&str>)?;
     let updates = MenuItem::with_id(
         app,
         "check-updates",
@@ -421,7 +422,6 @@ fn build_menu<R: Runtime>(
     menu.append(&all_workspaces)?;
     menu.append(&separator)?;
     menu.append(&about)?;
-    menu.append(&build_identity)?;
     menu.append(&updates)?;
     menu.append(&quit)?;
     Ok(menu)
@@ -466,8 +466,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
         "create-workspace" => open_local(app, &state.base_url, "/"),
         "all-workspaces" => open_local(app, &state.base_url, "/workspaces"),
-        "about" => show_system_about(app),
-        "build-identity" => show_build_identity(app),
+        "about" => show_about(app, &state.base_url),
         "check-updates" => {
             check_for_updates(app.clone(), state.inner().clone());
         }
@@ -659,88 +658,85 @@ fn copy_text<R: Runtime>(app: &AppHandle<R>, text: String) {
     }
 }
 
-/// A build-info field, or "unknown" when it is missing or empty.
-fn build_field<'a>(build_info: &'a Value, name: &str) -> &'a str {
-    build_info[name]
-        .as_str()
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown")
+const ABOUT_WINDOW: &str = "about";
+const ABOUT_PAGE: &str = "/about.html";
+const ABOUT_NOTICES: &str = "/about/notices";
+
+/// Where a navigation inside the About window goes.
+#[derive(Debug, PartialEq, Eq)]
+enum AboutNavigation {
+    /// The About page itself loads in the window.
+    Stay,
+    /// The notices link opens the bundled notices folder.
+    Notices,
+    /// An https link opens in the default browser.
+    Browser,
+    /// Anything else is refused.
+    Refuse,
 }
 
-/// The 12-character revision and its working-tree state; without a revision the state is
-/// unknown, never clean.
-fn build_revision(build_info: &Value) -> (String, &'static str) {
-    let revision = build_info["revision"]
-        .as_str()
-        .map(|revision| revision.chars().take(12).collect::<String>())
-        .filter(|revision| !revision.is_empty());
-    let state = match (revision.as_ref(), build_info["dirty"].as_bool()) {
-        (Some(_), Some(true)) => "dirty",
-        (Some(_), Some(false)) => "clean",
-        _ => "unknown",
-    };
-    (revision.unwrap_or_else(|| "unknown".to_owned()), state)
-}
-
-fn format_build_identity(build_info_json: &str) -> String {
-    let build_info = serde_json::from_str::<Value>(build_info_json).unwrap_or(Value::Null);
-    let (revision, state) = build_revision(&build_info);
-    format!(
-        "App version: {}\nServer version: {}\nRevision: {revision}\nWorking tree: {state}\nEmbedded UI SHA-256: {}",
-        build_field(&build_info, "app_version"),
-        build_field(&build_info, "server_version"),
-        build_field(&build_info, "ui_hash")
-    )
-}
-
-/// Shows the system About panel (name, version, and icon from the bundle). Orchard is a
-/// menu-bar app that is never active on its own, so it is activated first; otherwise the
-/// panel opens behind the frontmost app. Build Identity… carries the revision and UI hash.
-#[cfg(target_os = "macos")]
-fn show_system_about<R: Runtime>(app: &AppHandle<R>) {
-    let shown = app.run_on_main_thread(|| {
-        let Some(main_thread) = objc2::MainThreadMarker::new() else {
-            return;
-        };
-        let application = objc2_app_kit::NSApplication::sharedApplication(main_thread);
-        // `activate` needs macOS 14; Orchard supports 13.
-        #[allow(deprecated)]
-        application.activateIgnoringOtherApps(true);
-        application.orderFrontStandardAboutPanel(None);
-    });
-    if let Err(error) = shown {
-        show_action_error(app, &format!("Could not show About Orchard: {error}"));
+fn about_navigation(base_url: &str, url: &tauri::Url) -> AboutNavigation {
+    let local = tauri::Url::parse(base_url)
+        .map(|base| base.origin() == url.origin())
+        .unwrap_or(false);
+    match (local, url.path()) {
+        (true, ABOUT_PAGE) => AboutNavigation::Stay,
+        (true, ABOUT_NOTICES) => AboutNavigation::Notices,
+        (false, _) if url.scheme() == "https" => AboutNavigation::Browser,
+        _ => AboutNavigation::Refuse,
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn show_system_about<R: Runtime>(app: &AppHandle<R>) {
-    show_build_identity(app);
-}
-
-fn show_build_identity<R: Runtime>(app: &AppHandle<R>) {
-    let identity = format_build_identity(orchard_server::BUILD_INFO_JSON);
-    let app_for_action = app.clone();
-    app.dialog()
-        .message(identity.clone())
-        .title("Orchard Build Identity")
-        .kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::YesNoCancelCustom(
-            "Copy identity".to_owned(),
-            "Open notices".to_owned(),
-            "Close".to_owned(),
-        ))
-        .show_with_result(move |result| match result {
-            MessageDialogResult::Custom(label) if label == "Copy identity" => {
-                copy_text(&app_for_action, identity)
-            }
-            MessageDialogResult::Custom(label) if label == "Open notices" => {
-                if let Err(error) = open_notices(&app_for_action) {
-                    show_action_error(&app_for_action, &error);
+/// Opens (or brings forward) the About window: the embedded About page with the version,
+/// a GitHub link, and an expandable build identity. The page is plain local content with
+/// no Tauri commands; links leave the window through [`about_navigation`].
+fn show_about<R: Runtime>(app: &AppHandle<R>, base_url: &str) {
+    if let Some(window) = app.get_webview_window(ABOUT_WINDOW) {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    let url = match tauri::Url::parse(&format!("{base_url}{ABOUT_PAGE}")) {
+        Ok(url) => url,
+        Err(error) => {
+            return show_action_error(app, &format!("Could not open About Orchard: {error}"))
+        }
+    };
+    let handle = app.clone();
+    let base = base_url.to_owned();
+    let built =
+        tauri::WebviewWindowBuilder::new(app, ABOUT_WINDOW, tauri::WebviewUrl::External(url))
+            .title("About Orchard")
+            .inner_size(400.0, 560.0)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .center()
+            .on_navigation(move |url| match about_navigation(&base, url) {
+                AboutNavigation::Stay => true,
+                AboutNavigation::Notices => {
+                    if let Err(error) = open_notices(&handle) {
+                        show_action_error(&handle, &error);
+                    }
+                    false
                 }
-            }
-            _ => {}
-        });
+                AboutNavigation::Browser => {
+                    if let Err(error) = handle.opener().open_url(url.as_str(), None::<&str>) {
+                        show_action_error(&handle, &format!("Could not open the link: {error}"));
+                    }
+                    false
+                }
+                AboutNavigation::Refuse => false,
+            })
+            .build();
+    match built {
+        // A menu-bar app is never active on its own; focusing activates it so the window
+        // opens in front.
+        Ok(window) => {
+            let _ = window.set_focus();
+        }
+        Err(error) => show_action_error(app, &format!("Could not open About Orchard: {error}")),
+    }
 }
 
 fn open_notices<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -877,32 +873,26 @@ mod tests {
     }
 
     #[test]
-    fn build_identity_formats_dirty_revision_and_full_ui_hash() {
-        let ui_hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        let identity = format_build_identity(&format!(
-            r#"{{"app_version":"1.2.3","server_version":"4.5.6","ui_hash":"{ui_hash}","revision":"123456789abcdef","dirty":true}}"#
-        ));
+    fn about_window_keeps_its_page_and_sends_links_out() {
+        let base = "http://127.0.0.1:64640";
+        let go = |url: &str| about_navigation(base, &tauri::Url::parse(url).unwrap());
         assert_eq!(
-            identity,
-            format!(
-                "App version: 1.2.3\nServer version: 4.5.6\nRevision: 123456789abc\nWorking tree: dirty\nEmbedded UI SHA-256: {ui_hash}"
-            )
+            go("http://127.0.0.1:64640/about.html"),
+            AboutNavigation::Stay
         );
-    }
-
-    #[test]
-    fn build_identity_does_not_claim_clean_for_unknown_metadata() {
-        let missing_revision = format_build_identity(
-            r#"{"app_version":"1.2.3","server_version":"4.5.6","ui_hash":"hash","dirty":false}"#,
+        assert_eq!(
+            go("http://127.0.0.1:64640/about/notices"),
+            AboutNavigation::Notices
         );
-        assert!(missing_revision.contains("Revision: unknown"));
-        assert!(missing_revision.contains("Working tree: unknown"));
-        assert!(!missing_revision.contains("Working tree: clean"));
-
-        let missing_dirty = format_build_identity(
-            r#"{"app_version":"1.2.3","server_version":"4.5.6","ui_hash":"hash","revision":"123456789abcdef"}"#,
+        assert_eq!(
+            go("https://github.com/algonormative/orchard"),
+            AboutNavigation::Browser
         );
-        assert!(missing_dirty.contains("Working tree: unknown"));
+        // Other local pages, other ports, and plain http stay out of the window.
+        assert_eq!(go("http://127.0.0.1:64640/w/x"), AboutNavigation::Refuse);
+        assert_eq!(go("http://127.0.0.1:1/about.html"), AboutNavigation::Refuse);
+        assert_eq!(go("http://example.com/"), AboutNavigation::Refuse);
+        assert_eq!(go("file:///etc/passwd"), AboutNavigation::Refuse);
     }
 
     #[test]

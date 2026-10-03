@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>About Orchard</title>
+  </head>
+  <body class="about-page">
+    <main class="about">
+      <img class="about-mark" src="/brand/lemon-chan-v1.png" alt="" width="88" height="88" />
+      <h1>Orchard</h1>
+      <p class="about-version" id="about-version">Version unavailable</p>
+      <p class="about-summary">A local workspace for people and their already-running agents.</p>
+      <p class="about-links">
+        <a id="about-source" href="https://github.com/algonormative/orchard">GitHub</a>
+        <a href="/about/notices">Third-party notices</a>
+      </p>
+      <details class="about-build">
+        <summary>Build info</summary>
+        <pre><code id="about-build-text">Build identity unavailable.</code></pre>
+        <div class="about-build-actions">
+          <button type="button" id="about-copy">Copy</button>
+          <span id="about-copy-status" role="status"></span>
+        </div>
+      </details>
+      <p class="about-copyright">Copyright 2026 Orchard contributors</p>
+    </main>
+    <script type="module" src="/src/about.ts"></script>
+  </body>
+</html>

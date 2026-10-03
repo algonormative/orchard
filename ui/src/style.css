@@ -431,3 +431,23 @@ button.reply-button:hover { color: var(--citron); background: transparent; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0s !important; animation-duration: 0s !important; }
   button:active:not(:disabled), button.primary:hover, button.primary:active:not(:disabled) { transform: none; }
 }
+
+/* ── About window ───────────────────────────────────────────────────── */
+.about-page { min-height: 100vh; }
+.about { display: grid; justify-items: center; gap: .55rem; padding: 1.6rem 1.4rem 1.2rem; text-align: center; border-top: 6px solid var(--citron); }
+.about-mark { width: 88px; height: 88px; image-rendering: auto; border: 1px solid var(--rule-strong); background: var(--slab); }
+.about h1 { margin: .35rem 0 0; font-size: 1.6rem; letter-spacing: .02em; }
+.about-version { margin: 0; font: 600 .9rem/1.4 var(--mono); color: var(--citron); }
+.about-summary { margin: 0; max-width: 30ch; color: var(--muted); }
+.about-links { display: flex; flex-wrap: wrap; justify-content: center; gap: .4rem 1.1rem; margin: .2rem 0; }
+.about-links a { color: var(--cream); text-decoration: underline; text-decoration-color: var(--citron-deep); text-underline-offset: 3px; }
+.about-links a:hover, .about-links a:focus-visible { color: var(--citron); text-decoration-color: var(--citron); }
+.about-build { width: 100%; text-align: left; border: 1px solid var(--rule); background: var(--slab); }
+.about-build summary { padding: .5rem .7rem; cursor: pointer; font: 600 .78rem/1.4 var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.about-build[open] summary { color: var(--citron); border-bottom: 1px solid var(--rule); }
+.about-build pre { margin: 0; padding: .6rem .7rem; font: .74rem/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.about-build-actions button { padding: .3rem .7rem; font-size: .82rem; }
+.about-build-actions { display: flex; align-items: center; gap: .7rem; padding: 0 .7rem .6rem; }
+.about-build-actions [role="status"] { font-size: .8rem; color: var(--leaf); }
+.about-copyright { margin: .3rem 0 0; font-size: .75rem; color: var(--faint); }
+
