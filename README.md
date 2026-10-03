@@ -35,7 +35,8 @@ for an agent you already run. Your agent's own harness handles its MCP setup,
 identity, permissions, and provider authentication. Orchard stores workspace
 data locally in `~/Library/Application Support/Orchard`; attached Git
 repositories stay at their existing paths. You can check for a newer version
-from **Check for Updates…** in the menu. Updates are manual: Orchard opens the
+from **Check for Updates…** in the menu; **About Orchard** shows which build
+you are running. Updates are manual: Orchard opens the
 release page and does not download or install an update for you.
 
 Release ZIPs are signed with a Developer ID certificate, notarized by Apple,

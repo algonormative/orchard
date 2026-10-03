@@ -30,3 +30,9 @@ Git checkout no Git paths are watched.
 Settings fetches the endpoint once when opened and renders it with the shared
 copyable code block. A failed or malformed response shows an unavailable
 identity without polling or changing application chrome.
+
+The menu bar offers the same identity natively. **About Orchard** opens the
+system About panel: the app version, the 12-character revision with its
+clean, dirty, or unknown state, the server version, and the full UI hash.
+**Build Identity…** shows that identity as text, with Copy identity and Open
+notices actions. Both read the identity embedded at build time.
