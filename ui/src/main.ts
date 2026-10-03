@@ -848,7 +848,17 @@ function openDecisions(): Json[] {
   const fromHost = mailSnapshot().open_decisions;
   if (Array.isArray(fromHost)) return fromHost.map(object);
   const history = mailList("history").map(object);
-  const resolved = new Set(history.filter((item) => string(item.sender_id) === "owner" && string(item.thread_id)).map((item) => string(item.thread_id)));
+  // An owner message answers the nearest decision up its reply chain.
+  const byId = new Map(history.map((item) => [string(item.id), item]));
+  const resolved = new Set<string>();
+  for (const reply of history.filter((item) => string(item.sender_id) === "owner")) {
+    const seen = new Set<string>(); let parent = string(reply.thread_id);
+    while (parent && !seen.has(parent) && byId.has(parent)) {
+      seen.add(parent); const message = byId.get(parent)!;
+      if (string(message.kind) === "decision") { resolved.add(parent); break; }
+      parent = string(message.thread_id);
+    }
+  }
   return history.filter((item) => string(item.kind) === "decision" && string(item.sender_id) !== "owner" && string(item.id) && decisionDeliveredToOwner(item) && !resolved.has(string(item.id)));
 }
 function decisionExcerpt(item: Json) {

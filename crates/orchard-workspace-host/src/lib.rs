@@ -841,12 +841,14 @@ impl WorkspaceHost {
         // Same `{task, task_ref}` shape as the other task tools. The task's own fields stay
         // at the top level too, for clients written against the earlier bare shape; they
         // are deprecated.
+        // The canonical ID comes from the task itself; `task_id` may be an accepted alias.
+        let canonical_id = task["id"].as_str().unwrap_or(&task_id).to_owned();
         let mut result = task.clone();
         if let Some(fields) = result.as_object_mut() {
             fields.insert("task".to_owned(), task);
             fields.insert(
                 "task_ref".to_owned(),
-                json!({"store_id":store_id,"task_id":task_id}),
+                json!({"store_id":store_id,"task_id":canonical_id}),
             );
         }
         Ok(result)

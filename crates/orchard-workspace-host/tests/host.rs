@@ -3136,3 +3136,153 @@ fn task_show_returns_the_same_task_shape_as_other_task_tools() {
     // The earlier bare fields remain for existing clients.
     assert_eq!(shown["id"], created["task"]["id"]);
 }
+
+#[test]
+fn owner_reply_answers_the_nearest_decision_up_its_reply_chain() {
+    let temp = TempDir::new().unwrap();
+    let host = WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap();
+    let (workspace_id, _, _) = create_workspace(&host, "Decisions");
+    host.call("mail_register", json!({"workspace_id":workspace_id,"request_id":"register-alice","participant_id":"alice","name":"Alice"})).unwrap();
+    let send = |request_id: &str,
+                sender: &str,
+                destination: Value,
+                body: &str,
+                kind: &str,
+                thread: Option<&str>| {
+        let mut args = json!({"workspace_id":workspace_id,"request_id":request_id,"sender_id":sender,"destination":destination,"body":body,"kind":kind});
+        if let Some(thread) = thread {
+            args["thread_id"] = json!(thread);
+        }
+        host.call("mail_send", args).unwrap()["message"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let to_owner = json!({"kind":"direct","id":"owner"});
+    let old = send(
+        "old-decision",
+        "alice",
+        to_owner.clone(),
+        "Ship the release?",
+        "decision",
+        None,
+    );
+    let answered = send(
+        "answered-decision",
+        "alice",
+        to_owner.clone(),
+        "Rename the repo?",
+        "decision",
+        None,
+    );
+    send(
+        "owner-own",
+        "owner",
+        json!({"kind":"channel","id":"general"}),
+        "My own note",
+        "decision",
+        None,
+    );
+    send(
+        "plain",
+        "alice",
+        to_owner.clone(),
+        "Just FYI",
+        "message",
+        None,
+    );
+    let follow_up = send(
+        "follow-up",
+        "alice",
+        to_owner.clone(),
+        "Any update?",
+        "message",
+        Some(&answered),
+    );
+    send(
+        "answer",
+        "owner",
+        json!({"kind":"direct","id":"alice"}),
+        "No.",
+        "message",
+        Some(&follow_up),
+    );
+    // A decision asked inside another decision's thread: answering the inner one leaves
+    // the outer one open.
+    let outer = send(
+        "outer-decision",
+        "alice",
+        to_owner.clone(),
+        "Which region?",
+        "decision",
+        None,
+    );
+    let inner = send(
+        "inner-decision",
+        "alice",
+        to_owner.clone(),
+        "Which zone in us-east?",
+        "decision",
+        Some(&outer),
+    );
+    send(
+        "inner-answer",
+        "owner",
+        json!({"kind":"direct","id":"alice"}),
+        "us-east-1a.",
+        "message",
+        Some(&inner),
+    );
+    for index in 0..60 {
+        send(
+            &format!("noise-{index}"),
+            "alice",
+            json!({"kind":"channel","id":"general"}),
+            "noise",
+            "message",
+            None,
+        );
+    }
+    let snapshot = host
+        .call(
+            "workspace_snapshot",
+            json!({"workspace_id":workspace_id,"history_limit":5}),
+        )
+        .unwrap();
+    let history = snapshot["mail"]["history"].as_array().unwrap();
+    assert!(
+        history.iter().all(|message| message["id"] != json!(old)),
+        "the decision is outside the window"
+    );
+    let open = snapshot["mail"]["open_decisions"].as_array().unwrap();
+    assert_eq!(open.len(), 2, "{open:?}");
+    assert_eq!(open[0]["id"], json!(old));
+    assert_eq!(open[0]["body"], "Ship the release?");
+    assert_eq!(open[1]["id"], json!(outer));
+}
+
+#[test]
+fn task_show_by_alias_returns_the_canonical_task_ref() {
+    let temp = TempDir::new().unwrap();
+    let host = WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap();
+    let (workspace_id, store_id, _) = create_workspace(&host, "Task shapes");
+    let created = host
+        .call("task_create", json!({"workspace_id":workspace_id,"store_id":store_id,"request_id":"shape","title":"Same shape"}))
+        .unwrap();
+    let task_id = created["task"]["id"].as_str().unwrap().to_owned();
+    let alias = task_id.split_once('-').unwrap().1;
+    let shown = host
+        .call(
+            "task_show",
+            json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":alias}),
+        )
+        .unwrap();
+    assert_eq!(shown["task"]["id"], created["task"]["id"]);
+    assert_eq!(shown["task"]["title"], "Same shape");
+    assert_eq!(
+        shown["task_ref"],
+        json!({"store_id":store_id,"task_id":task_id})
+    );
+    // The earlier bare fields remain for existing clients.
+    assert_eq!(shown["id"], created["task"]["id"]);
+}

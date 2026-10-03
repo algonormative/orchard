@@ -103,7 +103,17 @@ function snapshot(workspaceId = workspace.id) {
   const selected = workspaces.find((item) => item.id === workspaceId) || workspace;
   const joining = freshWorkspace && !agentJoined;
   // Like the host: a bounded history window plus open decisions over the full history.
-  const resolved = new Set(messages.filter((item) => item.sender_id === "owner" && item.thread_id).map((item) => item.thread_id));
+  // An owner message answers the nearest decision up its reply chain.
+  const byId = new Map(messages.map((item) => [item.id, item]));
+  const resolved = new Set();
+  for (const reply of messages.filter((item) => item.sender_id === "owner")) {
+    const seen = new Set(); let parent = reply.thread_id;
+    while (parent && !seen.has(parent) && byId.has(parent)) {
+      seen.add(parent); const message = byId.get(parent);
+      if (message.kind === "decision") { resolved.add(parent); break; }
+      parent = message.thread_id;
+    }
+  }
   const deliveredToOwner = (item) => ["channel", "broadcast"].includes(item.destination?.kind) || (item.destination?.kind === "direct" && item.destination?.id === "owner");
   const openDecisions = messages.filter((item) => item.kind === "decision" && item.sender_id !== "owner" && deliveredToOwner(item) && !resolved.has(item.id));
   return { workspace: { ...selected, repositories, task_stores: stores.map((item) => item.store) }, mail: { participants: joining ? participants.slice(0, 1) : participants, channels, history: joining ? [] : messages.slice(-50), open_decisions: joining ? [] : openDecisions }, task_stores: stores, plugins, errors: sourceErrors };

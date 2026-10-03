@@ -3,7 +3,7 @@ use git2::{Commit, ObjectType, Oid, Repository, Signature, Tree};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -1133,15 +1133,32 @@ impl WorkspaceHost {
     }
 
     /// Decisions still waiting on the owner, over the whole history: a `kind: "decision"`
-    /// message delivered to the owner (not sent by them) with no owner message in its thread.
+    /// message delivered to the owner (not sent by them) that no owner message answers.
+    /// An owner message answers the nearest decision up its reply chain, so a reply to a
+    /// follow-up inside a decision's thread counts, while an outer decision stays open.
     /// The browser's Needs-you strip reads this instead of its bounded history window.
     pub(crate) fn open_decisions(&self, workspace_id: &str) -> Result<Vec<Value>, String> {
         let messages = self.all_messages(workspace_id)?;
-        let resolved = messages
+        let by_id = messages
+            .iter()
+            .filter_map(|message| Some((message["id"].as_str()?, message)))
+            .collect::<HashMap<_, _>>();
+        let mut resolved = HashSet::new();
+        for reply in messages
             .iter()
             .filter(|message| message["sender_id"] == "owner")
-            .filter_map(|message| message["thread_id"].as_str())
-            .collect::<HashSet<_>>();
+        {
+            let mut seen = HashSet::new();
+            let mut parent = reply["thread_id"].as_str();
+            while let Some(id) = parent.filter(|id| seen.insert(*id)) {
+                let Some(message) = by_id.get(id) else { break };
+                if message["kind"] == "decision" {
+                    resolved.insert(id);
+                    break;
+                }
+                parent = message["thread_id"].as_str();
+            }
+        }
         Ok(messages
             .iter()
             .filter(|message| message["kind"] == "decision" && message["sender_id"] != "owner")
