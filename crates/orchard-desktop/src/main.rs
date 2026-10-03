@@ -19,7 +19,9 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 use tauri_plugin_opener::OpenerExt;
 
 const TRAY_ID: &str = "orchard-tray";
@@ -405,6 +407,7 @@ fn build_menu<R: Runtime>(
     let all_workspaces =
         MenuItem::with_id(app, "all-workspaces", "All Workspaces…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
+    let about = MenuItem::with_id(app, "about", "About Orchard", true, None::<&str>)?;
     let updates = MenuItem::with_id(
         app,
         "check-updates",
@@ -415,6 +418,7 @@ fn build_menu<R: Runtime>(
     let quit = MenuItem::with_id(app, "quit", "Quit Orchard", true, None::<&str>)?;
     menu.append(&all_workspaces)?;
     menu.append(&separator)?;
+    menu.append(&about)?;
     menu.append(&updates)?;
     menu.append(&quit)?;
     Ok(menu)
@@ -459,6 +463,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
         "create-workspace" => open_local(app, &state.base_url, "/"),
         "all-workspaces" => open_local(app, &state.base_url, "/workspaces"),
+        "about" => show_about(app),
         "check-updates" => {
             check_for_updates(app.clone(), state.inner().clone());
         }
@@ -650,6 +655,68 @@ fn copy_text<R: Runtime>(app: &AppHandle<R>, text: String) {
     }
 }
 
+fn format_build_identity(build_info_json: &str) -> String {
+    let build_info = serde_json::from_str::<Value>(build_info_json).unwrap_or(Value::Null);
+    let field = |name| {
+        build_info[name]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("unknown")
+    };
+    let revision = build_info["revision"]
+        .as_str()
+        .map(|revision| revision.chars().take(12).collect::<String>())
+        .filter(|revision| !revision.is_empty());
+    let state = match (revision.as_ref(), build_info["dirty"].as_bool()) {
+        (Some(_), Some(true)) => "dirty",
+        (Some(_), Some(false)) => "clean",
+        _ => "unknown",
+    };
+    let revision = revision.unwrap_or_else(|| "unknown".to_owned());
+    format!(
+        "App version: {}\nServer version: {}\nRevision: {revision}\nWorking tree: {state}\nEmbedded UI SHA-256: {}",
+        field("app_version"),
+        field("server_version"),
+        field("ui_hash")
+    )
+}
+
+fn show_about<R: Runtime>(app: &AppHandle<R>) {
+    let identity = format_build_identity(orchard_server::BUILD_INFO_JSON);
+    let app_for_action = app.clone();
+    app.dialog()
+        .message(identity.clone())
+        .title("About Orchard")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
+            "Copy identity".to_owned(),
+            "Open notices".to_owned(),
+            "Close".to_owned(),
+        ))
+        .show_with_result(move |result| match result {
+            MessageDialogResult::Custom(label) if label == "Copy identity" => {
+                copy_text(&app_for_action, identity)
+            }
+            MessageDialogResult::Custom(label) if label == "Open notices" => {
+                if let Err(error) = open_notices(&app_for_action) {
+                    show_action_error(&app_for_action, &error);
+                }
+            }
+            _ => {}
+        });
+}
+
+fn open_notices<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let notices = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("Could not locate notices: {error}"))?
+        .join("notices");
+    app.opener()
+        .open_path(notices.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|error| format!("Could not open notices: {error}"))
+}
+
 fn show_action_error<R: Runtime>(app: &AppHandle<R>, message: &str) {
     app.dialog()
         .message(message)
@@ -770,6 +837,35 @@ mod tests {
     fn malformed_port_env_uses_the_error_path() {
         assert!(parse_port("not-a-port").is_err());
         assert!(parse_port("0").is_err());
+    }
+
+    #[test]
+    fn build_identity_formats_dirty_revision_and_full_ui_hash() {
+        let ui_hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let identity = format_build_identity(&format!(
+            r#"{{"app_version":"1.2.3","server_version":"4.5.6","ui_hash":"{ui_hash}","revision":"123456789abcdef","dirty":true}}"#
+        ));
+        assert_eq!(
+            identity,
+            format!(
+                "App version: 1.2.3\nServer version: 4.5.6\nRevision: 123456789abc\nWorking tree: dirty\nEmbedded UI SHA-256: {ui_hash}"
+            )
+        );
+    }
+
+    #[test]
+    fn build_identity_does_not_claim_clean_for_unknown_metadata() {
+        let missing_revision = format_build_identity(
+            r#"{"app_version":"1.2.3","server_version":"4.5.6","ui_hash":"hash","dirty":false}"#,
+        );
+        assert!(missing_revision.contains("Revision: unknown"));
+        assert!(missing_revision.contains("Working tree: unknown"));
+        assert!(!missing_revision.contains("Working tree: clean"));
+
+        let missing_dirty = format_build_identity(
+            r#"{"app_version":"1.2.3","server_version":"4.5.6","ui_hash":"hash","revision":"123456789abcdef"}"#,
+        );
+        assert!(missing_dirty.contains("Working tree: unknown"));
     }
 
     #[test]
