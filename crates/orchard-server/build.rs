@@ -24,10 +24,13 @@ fn main() {
         )
     });
     files.sort();
-    assert!(
-        files.iter().any(|path| path == "index.html"),
-        "ui/dist/index.html is missing; run `npm --prefix ui run build` first"
-    );
+    // The browser UI and the desktop About window each need their page.
+    for page in ["index.html", "about.html"] {
+        assert!(
+            files.iter().any(|path| path == page),
+            "ui/dist/{page} is missing; run `npm --prefix ui run build` first"
+        );
+    }
     for relative in &files {
         println!("cargo:rerun-if-changed={}", dist.join(relative).display());
     }

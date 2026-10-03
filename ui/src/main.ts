@@ -1,5 +1,6 @@
 import "./style.css";
 import { buildIdentityText } from "./build-identity";
+import { codeBlock as sharedCodeBlock, copyTextButton as sharedCopyTextButton } from "./code-block";
 import { canonicalHref, parseHref, type Descriptor, type ResourceRef } from "./resources";
 import { stateDiagram } from "./state-diagram";
 
@@ -240,23 +241,9 @@ function actionRow(...items: HTMLElement[]) {
   const row = el("div", "form-actions"); row.append(...items); return row;
 }
 
-/** The only renderer for copyable block code.  Keep its source as text, never HTML. */
-function copyTextButton(source: () => string, label = "Copy") {
-  return button(label, async () => {
-    try { await navigator.clipboard.writeText(source()); notice("Copied."); }
-    catch { notice("Copying is unavailable in this window.", "error"); }
-  }, "copy-button subtle");
-}
-function codeBlock(content: string, label = "Copy") {
-  const block = el("section", "code-block");
-  const pre = el("pre", "connection-value");
-  const code = el("code");
-  code.textContent = content;
-  pre.append(code);
-  const copy = copyTextButton(() => code.textContent || "", label);
-  block.append(pre, copy);
-  return block;
-}
+// Copyable block code comes only from the shared renderer; copy feedback goes to the notice.
+function copyTextButton(source: () => string, label = "Copy") { return sharedCopyTextButton(source, notice, label); }
+function codeBlock(content: string, label = "Copy") { return sharedCodeBlock(content, notice, label); }
 
 function channelLabel(value: string) { return `#${value.replace(/^#+/, "")}`; }
 function participantLabel(value: string) { return `@${value.replace(/^@+/, "")}`; }

@@ -854,8 +854,8 @@ test("the About page shows the version, source link, and copyable build info", a
   await expect(page.getByRole("heading", { name: "Orchard", exact: true })).toBeVisible();
   await expect(page.getByText("Version 0.2.0", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "GitHub" })).toHaveAttribute("href", "https://github.com/algonormative/orchard");
-  const build = page.locator("#about-build-text");
-  await expect(build).toBeHidden();
+  const build = page.locator(".about-build .code-block code");
+  await expect(page.getByRole("button", { name: "Copy", exact: true })).toBeHidden();
   await page.getByText("Build info", { exact: true }).click();
   await expect(build).toContainText("Revision: 4a4ceae265b38ccbff197882be48acfd8bf74d93");
   await expect(build).toContainText("Working tree: clean");
@@ -863,4 +863,13 @@ test("the About page shows the version, source link, and copyable build info", a
   await expect(page.getByRole("status")).toHaveText("Copied.");
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(await build.textContent());
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+  // Expanded, everything fits the fixed-size window.
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight)).toBeTruthy();
+  // Without a revision the tree is never reported clean.
+  await request.post("/fixture/build", { data: { app_version: "0.2.0", server_version: "0.1.0", ui_hash: "a".repeat(64), dirty: false } });
+  await page.reload(); await page.getByText("Build info", { exact: true }).click();
+  await expect(build).toContainText("Working tree: unavailable");
+  // Escape asks the desktop shell to close the window.
+  await page.keyboard.press("Escape");
+  await page.waitForURL("**/about/close");
 });

@@ -36,4 +36,5 @@ embedded `about.html` page: the version, a GitHub link, third-party notices,
 and a collapsed **Build info** section with this same identity and a Copy
 action. The window gets no Tauri commands. It shows only that page: notices
 open the bundled folder, https links open in the default browser, and any
-other navigation is refused. Closing the window leaves Orchard running.
+other navigation is refused. Escape or the title-bar close button closes it, and
+Orchard keeps running.

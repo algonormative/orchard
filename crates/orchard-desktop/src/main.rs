@@ -661,6 +661,7 @@ fn copy_text<R: Runtime>(app: &AppHandle<R>, text: String) {
 const ABOUT_WINDOW: &str = "about";
 const ABOUT_PAGE: &str = "/about.html";
 const ABOUT_NOTICES: &str = "/about/notices";
+const ABOUT_CLOSE: &str = "/about/close";
 
 /// Where a navigation inside the About window goes.
 #[derive(Debug, PartialEq, Eq)]
@@ -669,6 +670,8 @@ enum AboutNavigation {
     Stay,
     /// The notices link opens the bundled notices folder.
     Notices,
+    /// Escape on the page asks for the window to close.
+    Close,
     /// An https link opens in the default browser.
     Browser,
     /// Anything else is refused.
@@ -682,6 +685,7 @@ fn about_navigation(base_url: &str, url: &tauri::Url) -> AboutNavigation {
     match (local, url.path()) {
         (true, ABOUT_PAGE) => AboutNavigation::Stay,
         (true, ABOUT_NOTICES) => AboutNavigation::Notices,
+        (true, ABOUT_CLOSE) => AboutNavigation::Close,
         (false, _) if url.scheme() == "https" => AboutNavigation::Browser,
         _ => AboutNavigation::Refuse,
     }
@@ -717,6 +721,12 @@ fn show_about<R: Runtime>(app: &AppHandle<R>, base_url: &str) {
                 AboutNavigation::Notices => {
                     if let Err(error) = open_notices(&handle) {
                         show_action_error(&handle, &error);
+                    }
+                    false
+                }
+                AboutNavigation::Close => {
+                    if let Some(window) = handle.get_webview_window(ABOUT_WINDOW) {
+                        let _ = window.close();
                     }
                     false
                 }
@@ -883,6 +893,10 @@ mod tests {
         assert_eq!(
             go("http://127.0.0.1:64640/about/notices"),
             AboutNavigation::Notices
+        );
+        assert_eq!(
+            go("http://127.0.0.1:64640/about/close"),
+            AboutNavigation::Close
         );
         assert_eq!(
             go("https://github.com/algonormative/orchard"),

@@ -445,9 +445,9 @@ button.reply-button:hover { color: var(--citron); background: transparent; }
 .about-build { width: 100%; text-align: left; border: 1px solid var(--rule); background: var(--slab); }
 .about-build summary { padding: .5rem .7rem; cursor: pointer; font: 600 .78rem/1.4 var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
 .about-build[open] summary { color: var(--citron); border-bottom: 1px solid var(--rule); }
-.about-build pre { margin: 0; padding: .6rem .7rem; font: .74rem/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.about-build-actions button { padding: .3rem .7rem; font-size: .82rem; }
-.about-build-actions { display: flex; align-items: center; gap: .7rem; padding: 0 .7rem .6rem; }
-.about-build-actions [role="status"] { font-size: .8rem; color: var(--leaf); }
+.about-build .code-block { margin: .6rem; }
+.about-build .connection-value { font-size: .74rem; }
+.about-copy-status { margin: 0 .7rem .6rem; font-size: .8rem; color: var(--leaf); }
+.about-copy-status:empty { display: none; }
 .about-copyright { margin: .3rem 0 0; font-size: .75rem; color: var(--faint); }
 
