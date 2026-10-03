@@ -14,10 +14,10 @@ with incremental compilation disabled, to stay within the hosted runner's disk
 limit. It builds and tests only locked dependency graphs. Automated tests must
 not call provider or other metered services.
 
-To configure the release workflow for `algonormative/orchard-workspace`:
+To configure the release workflow for `algonormative/orchard`:
 
 1. Set the Actions repository variable `ORCHARD_UPDATE_REPOSITORY` to
-   `algonormative/orchard-workspace`. The value is embedded in the app's manual
+   `algonormative/orchard`. The value is embedded in the app's manual
    update check and the workflow rejects a mismatch with the running repository.
 2. A manual workflow run executes the tests and clean-runner package build
    without signing, then retains an explicitly `UNSIGNED` ZIP as a seven-day

@@ -14,16 +14,16 @@ execution scheduler and does not yet download plugins. See
 [docs/agent-cli.md](docs/agent-cli.md), and
 [docs/build-identity.md](docs/build-identity.md).
 
-[Website](https://algonormative.github.io/orchard-workspace/) ·
-[Releases](https://github.com/algonormative/orchard-workspace/releases) ·
-[Source](https://github.com/algonormative/orchard-workspace)
+[Website](https://algonormative.github.io/orchard/) ·
+[Releases](https://github.com/algonormative/orchard/releases) ·
+[Source](https://github.com/algonormative/orchard)
 
 ## Install on macOS
 
 Orchard supports Apple Silicon Macs running macOS 13 or newer.
 
 1. Download `Orchard-<version>-macos-arm64.zip` from the
-   [latest GitHub Release](https://github.com/algonormative/orchard-workspace/releases/latest).
+   [latest GitHub Release](https://github.com/algonormative/orchard/releases/latest).
 2. Optionally download its `.sha256` file and verify the ZIP with
    `shasum -a 256 -c Orchard-<version>-macos-arm64.zip.sha256`.
 3. Open the ZIP and drag `Orchard.app` to Applications.
