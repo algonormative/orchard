@@ -31,8 +31,9 @@ Settings fetches the endpoint once when opened and renders it with the shared
 copyable code block. A failed or malformed response shows an unavailable
 identity without polling or changing application chrome.
 
-The menu bar offers the same identity natively. **About Orchard** opens the
-system About panel: the app version, the 12-character revision with its
-clean, dirty, or unknown state, the server version, and the full UI hash.
-**Build Identity…** shows that identity as text, with Copy identity and Open
-notices actions. Both read the identity embedded at build time.
+The menu bar offers the same identity natively. **About Orchard** brings
+Orchard forward and opens the system About panel with the name, version, and
+icon from the app bundle. **Build Identity…** shows the embedded identity as
+text: app and server versions, the 12-character revision with its clean,
+dirty, or unknown state, and the full UI hash, with Copy identity and Open
+notices actions.

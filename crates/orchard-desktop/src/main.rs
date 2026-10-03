@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::image::Image;
-use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -407,19 +407,7 @@ fn build_menu<R: Runtime>(
     let all_workspaces =
         MenuItem::with_id(app, "all-workspaces", "All Workspaces…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    // The system About panel, filled with this build's identity.
-    let (version, build, credits) = about_panel_text(orchard_server::BUILD_INFO_JSON);
-    let about = PredefinedMenuItem::about(
-        app,
-        Some("About Orchard"),
-        Some(AboutMetadata {
-            name: Some("Orchard".to_owned()),
-            version: Some(version),
-            short_version: Some(build),
-            credits: Some(credits),
-            ..Default::default()
-        }),
-    )?;
+    let about = MenuItem::with_id(app, "about", "About Orchard", true, None::<&str>)?;
     let build_identity =
         MenuItem::with_id(app, "build-identity", "Build Identity…", true, None::<&str>)?;
     let updates = MenuItem::with_id(
@@ -478,6 +466,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
         "create-workspace" => open_local(app, &state.base_url, "/"),
         "all-workspaces" => open_local(app, &state.base_url, "/workspaces"),
+        "about" => show_system_about(app),
         "build-identity" => show_build_identity(app),
         "check-updates" => {
             check_for_updates(app.clone(), state.inner().clone());
@@ -704,20 +693,29 @@ fn format_build_identity(build_info_json: &str) -> String {
     )
 }
 
-/// The standard About panel's application version, its parenthesised build line, and
-/// its credits.
-fn about_panel_text(build_info_json: &str) -> (String, String, String) {
-    let build_info = serde_json::from_str::<Value>(build_info_json).unwrap_or(Value::Null);
-    let (revision, state) = build_revision(&build_info);
-    (
-        build_field(&build_info, "app_version").to_owned(),
-        format!("{revision}, {state}"),
-        format!(
-            "Server {}\nEmbedded UI SHA-256\n{}",
-            build_field(&build_info, "server_version"),
-            build_field(&build_info, "ui_hash")
-        ),
-    )
+/// Shows the system About panel (name, version, and icon from the bundle). Orchard is a
+/// menu-bar app that is never active on its own, so it is activated first; otherwise the
+/// panel opens behind the frontmost app. Build Identity… carries the revision and UI hash.
+#[cfg(target_os = "macos")]
+fn show_system_about<R: Runtime>(app: &AppHandle<R>) {
+    let shown = app.run_on_main_thread(|| {
+        let Some(main_thread) = objc2::MainThreadMarker::new() else {
+            return;
+        };
+        let application = objc2_app_kit::NSApplication::sharedApplication(main_thread);
+        // `activate` needs macOS 14; Orchard supports 13.
+        #[allow(deprecated)]
+        application.activateIgnoringOtherApps(true);
+        application.orderFrontStandardAboutPanel(None);
+    });
+    if let Err(error) = shown {
+        show_action_error(app, &format!("Could not show About Orchard: {error}"));
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_system_about<R: Runtime>(app: &AppHandle<R>) {
+    show_build_identity(app);
 }
 
 fn show_build_identity<R: Runtime>(app: &AppHandle<R>) {
@@ -890,20 +888,6 @@ mod tests {
                 "App version: 1.2.3\nServer version: 4.5.6\nRevision: 123456789abc\nWorking tree: dirty\nEmbedded UI SHA-256: {ui_hash}"
             )
         );
-    }
-
-    #[test]
-    fn about_panel_shows_version_revision_state_and_full_ui_hash() {
-        let (version, build, credits) = about_panel_text(
-            r#"{"app_version":"1.2.3","server_version":"4.5.6","ui_hash":"abc123","revision":"123456789abcdef","dirty":false}"#,
-        );
-        assert_eq!(version, "1.2.3");
-        assert_eq!(build, "123456789abc, clean");
-        assert_eq!(credits, "Server 4.5.6\nEmbedded UI SHA-256\nabc123");
-
-        let (version, build, _) = about_panel_text("not json");
-        assert_eq!(version, "unknown");
-        assert_eq!(build, "unknown, unknown");
     }
 
     #[test]
