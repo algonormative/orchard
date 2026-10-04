@@ -12,10 +12,11 @@ const initialBuildIdentity = { app_version: "0.2.0", server_version: "0.1.0", ui
 let buildIdentity = structuredClone(initialBuildIdentity);
 const projectStore = { id: "repository:example-project", name: "example-project", source: "repository", repository_id: "project-example", path: "/private/tmp/example-project/.beads" };
 let repositories = [];
-const participants = [
-  { id: "owner", name: "Owner" },
-  { id: "alice", name: "Alice", last_contact_at: "2026-09-15T12:00:00Z" },
+const initialParticipants = [
+  { id: "owner", name: "Owner", registered: true },
+  { id: "alice", name: "Alice", registered: true, last_contact_at: "2026-09-15T12:00:00Z" },
 ];
+let participants = structuredClone(initialParticipants);
 const channels = [{ id: "general", name: "general" }, { id: "orchard-system", name: "orchard-system" }];
 let created = false;
 let workspaces = [];
@@ -42,10 +43,14 @@ let plugins = [
   { id: "chat", version: "0.2.0", name: "Chat", description: "Conversations for participants.", required: true, attached: true },
   { id: "tasks", version: "0.2.0", name: "Tasks", description: "Workspace task store.", required: false, attached: true },
   { id: "state", version: "0.2.0", name: "State", description: "Agent-managed state markers.", required: false, attached: true, integrations: ["tasks"] },
+  { id: "roles", version: "0.2.0", name: "Roles", description: "Owner-defined roles and agents' self-declared roles and skills (advisory).", required: false, attached: true },
 ];
 let markers = [{ id: "marker-1", title: "Fixture release", definition_id: "release", definition_version: "1", state: "draft", revision: 1, subject: { kind: "task", workspace_id: "workspace-1", store_id: "default", task_id: "fixture-1" }, created_by: "alice" }];
 let stateDefinition = { id: "release", version: "1", label: "Release", states: ["draft", "review", "shipped"], initial: "draft", transitions: [{ from: "draft", to: "review" }, { from: "review", to: "shipped" }] };
 let tasks = [{ id: "fixture-1", task_id: "fixture-1", title: "Fixture task", status: "open", priority: 2, description: "Fixture task description" }];
+const rolesByWorkspace = new Map();
+const declarationsByWorkspace = new Map();
+const roleReceipts = new Map();
 const messages = [
   { id: "general-1", sender_id: "alice", destination: { kind: "channel", id: "general" }, body: "General fixture message\nhttps://example.com/docs and /w/workspace-1/files/fixture-root?path=README.md\n```sh\nprintf 'https://example.com/plain-code'\n```", kind: "message" },
   { id: "direct-1", sender_id: "owner", destination: { kind: "direct", id: "alice" }, body: "Owner to Alice", kind: "message" },
@@ -74,6 +79,103 @@ function emitChange(topics, workspaceId = workspace.id) {
   for (const client of subscribers) if (client.workspaceId === workspaceId) client.socket.write(frame({ type: "changed", workspace_id: workspaceId, revision, topics }));
 }
 
+function recordsFor(store, workspaceId) {
+  let records = store.get(workspaceId);
+  if (!records) { records = []; store.set(workspaceId, records); }
+  return records;
+}
+
+function pluginAttached(id) { return plugins.find((item) => item.id === id)?.attached === true; }
+
+function requiredFixtureString(value, field) {
+  if (typeof value !== "string" || !value) throw new Error(`${field} must be a non-empty string`);
+  return value;
+}
+
+function boundedFixtureString(value, maximum, field) {
+  requiredFixtureString(value, field);
+  if (Buffer.byteLength(value, "utf8") > maximum || value.includes("\0")) throw new Error(`${field} exceeds ${maximum} bytes`);
+  return value;
+}
+
+function roleText(value, maximum, field, allowEmpty) {
+  if (typeof value !== "string" || (!allowEmpty && !value) || Array.from(value).length > maximum || value.includes("\0")) {
+    throw new Error(`${field} must contain ${allowEmpty ? 0 : 1}..${maximum} characters`);
+  }
+  return value;
+}
+
+function roleId(value, field) {
+  if (typeof value !== "string" || !value || value.length > 64 || value.startsWith("-") || !/^[a-z0-9-]+$/.test(value)) {
+    throw new Error(`${field} must be a 1..64 character lowercase role id`);
+  }
+  return value;
+}
+
+function fixtureRole(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("role must be an object");
+  const allowed = new Set(["id", "label", "instructions", "capabilities", "needed", "tier_hint"]);
+  if (Object.keys(value).some((field) => !allowed.has(field))) throw new Error("role contains unknown fields");
+  const id = roleId(value.id, "role.id");
+  const label = roleText(value.label, 120, "label", false);
+  const instructions = roleText(value.instructions, 4000, "instructions", true);
+  if (!Array.isArray(value.capabilities) || value.capabilities.length > 32) throw new Error("role.capabilities must contain at most 32 strings");
+  const capabilities = value.capabilities.map((capability) => {
+    if (typeof capability !== "string") throw new Error("role.capabilities must contain strings");
+    return roleText(capability, 128, "role.capability", false);
+  });
+  if (!Number.isInteger(value.needed) || value.needed < 0 || value.needed > 20) throw new Error("role.needed must be an integer from 0 through 20");
+  const role = { id, label, instructions, capabilities, needed: value.needed };
+  if (Object.hasOwn(value, "tier_hint")) role.tier_hint = roleText(value.tier_hint, 64, "tier_hint", true);
+  return role;
+}
+
+function declaredRoles(value) {
+  if (!Array.isArray(value) || value.length > 16) throw new Error("roles must contain at most 16 role ids");
+  return value.map((role) => roleId(role, "role"));
+}
+
+function declaredSkills(value) {
+  if (!Array.isArray(value) || value.length > 32) throw new Error("skills must contain at most 32 strings");
+  return value.map((skill) => {
+    if (typeof skill !== "string") throw new Error("skills must contain strings");
+    return roleText(skill, 200, "skill", false);
+  });
+}
+
+function optionalDeclaredText(value, maximum, field) {
+  if (value === undefined) return undefined;
+  return roleText(value, maximum, field, true);
+}
+
+function roleListing(workspaceId) {
+  const registered = new Set(participants.filter((participant) => participant.id !== "orchard" && participant.registered === true).map((participant) => participant.id));
+  const declarations = recordsFor(declarationsByWorkspace, workspaceId)
+    .filter((declaration) => registered.has(declaration.participant_id))
+    .sort((left, right) => left.participant_id.localeCompare(right.participant_id));
+  const roles = recordsFor(rolesByWorkspace, workspaceId)
+    .slice()
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((role) => {
+      const declared_by = declarations.filter((declaration) => declaration.roles.includes(role.id)).map((declaration) => declaration.participant_id);
+      return { ...structuredClone(role), filled: declared_by.length, open: role.needed > 0 && declared_by.length < role.needed, declared_by };
+    });
+  return { roles, declarations: structuredClone(declarations) };
+}
+
+function receiptKey(workspaceId, requestId) { return `${workspaceId}\u0000${requestId}`; }
+
+function replayRoleReceipt(workspaceId, requestId, fingerprint) {
+  const receipt = roleReceipts.get(receiptKey(workspaceId, requestId));
+  if (!receipt) return undefined;
+  if (receipt.fingerprint !== fingerprint) throw new Error("request_id was already used for a different request");
+  return { ...structuredClone(receipt.result), idempotent_replay: true };
+}
+
+function saveRoleReceipt(workspaceId, requestId, fingerprint, result) {
+  roleReceipts.set(receiptKey(workspaceId, requestId), { fingerprint, result: structuredClone(result) });
+}
+
 function resetFixture() {
   for (const client of subscribers) client.socket.end(); subscribers.clear(); revision = 0;
   buildIdentity = structuredClone(initialBuildIdentity);
@@ -83,7 +185,8 @@ function resetFixture() {
   repositories = []; delaySendMs = 0; delayAttachMs = 0; delayTasksMs = 0; delaySnapshotMs = 0; delayStateListMs = 0; stateListFailures = 0; stateOpportunitiesFailures = 0;
   delayActionMs = 0; uploadFailures = 0; resourceLinks = [];
   loseMailResponseOnce = false; sentRequestIds.clear(); freshWorkspace = false; agentJoined = false;
-  plugins = structuredClone([{ id: "core", version: "0.2.0", name: "Core", description: "Workspace records and resources.", required: true, attached: true }, { id: "chat", version: "0.2.0", name: "Chat", description: "Conversations for participants.", required: true, attached: true }, { id: "tasks", version: "0.2.0", name: "Tasks", description: "Workspace task store.", required: false, attached: true }, { id: "state", version: "0.2.0", name: "State", description: "Agent-managed state markers.", required: false, attached: true }]);
+  participants = structuredClone(initialParticipants); rolesByWorkspace.clear(); declarationsByWorkspace.clear(); roleReceipts.clear();
+  plugins = structuredClone([{ id: "core", version: "0.2.0", name: "Core", description: "Workspace records and resources.", required: true, attached: true }, { id: "chat", version: "0.2.0", name: "Chat", description: "Conversations for participants.", required: true, attached: true }, { id: "tasks", version: "0.2.0", name: "Tasks", description: "Workspace task store.", required: false, attached: true }, { id: "state", version: "0.2.0", name: "State", description: "Agent-managed state markers.", required: false, attached: true }, { id: "roles", version: "0.2.0", name: "Roles", description: "Owner-defined roles and agents' self-declared roles and skills (advisory).", required: false, attached: true }]);
   markers = [{ id: "marker-1", title: "Fixture release", definition_id: "release", definition_version: "1", state: "draft", revision: 1, subject: { kind: "task", workspace_id: "workspace-1", store_id: "default", task_id: "fixture-1" }, created_by: "alice" }];
   stateDefinition = { id: "release", version: "1", label: "Release", states: ["draft", "review", "shipped"], initial: "draft", transitions: [{ from: "draft", to: "review" }, { from: "review", to: "shipped" }] };
   tasks = [{ id: "fixture-1", task_id: "fixture-1", title: "Fixture task", status: "open", priority: 2, description: "Fixture task description" }];
@@ -116,7 +219,8 @@ function snapshot(workspaceId = workspace.id) {
   }
   const deliveredToOwner = (item) => ["channel", "broadcast"].includes(item.destination?.kind) || (item.destination?.kind === "direct" && item.destination?.id === "owner");
   const openDecisions = messages.filter((item) => item.kind === "decision" && item.sender_id !== "owner" && deliveredToOwner(item) && !resolved.has(item.id));
-  return { workspace: { ...selected, repositories, task_stores: stores.map((item) => item.store) }, mail: { participants: joining ? participants.slice(0, 1) : participants, channels, history: joining ? [] : messages.slice(-50), open_decisions: joining ? [] : openDecisions }, task_stores: stores, plugins, errors: sourceErrors };
+  const plugin_sections = { roles: roleListing(workspaceId) };
+  return { workspace: { ...selected, repositories, task_stores: stores.map((item) => item.store) }, mail: { participants: joining ? participants.slice(0, 1) : participants, channels, history: joining ? [] : messages.slice(-50), open_decisions: joining ? [] : openDecisions }, task_stores: stores, plugins, plugin_sections, errors: sourceErrors };
 }
 
 function history(args) {
@@ -158,8 +262,47 @@ const server = createServer(async (request, response) => {
     if (payload.operation === "workspace_visit") { const selected = workspaces.find((item) => item.id === args.workspace_id); if (!selected) return send(response, 400, { error: "Unknown or archived workspace." }); recentWorkspaceIds = [selected.id, ...recentWorkspaceIds.filter((id) => id !== selected.id)].slice(0, 20); return send(response, 200, { result: { workspace_id: selected.id } }); }
     if (payload.operation === "workspace_archive") { const selected = workspaces.find((item) => item.id === args.workspace_id) || workspace; workspaces = workspaces.filter((item) => item.id !== args.workspace_id); created = workspaces.length > 0; return send(response, 200, { result: { workspace: { ...selected, archived: true } } }); }
     if (payload.operation === "workspace_snapshot") { if (delaySnapshotMs) await sleep(delaySnapshotMs); return send(response, 200, { result: snapshot(args.workspace_id) }); }
-    if (payload.operation === "plugin_attach" || payload.operation === "plugin_detach") { const item = plugins.find((entry) => entry.id === args.plugin_id); if (!item || item.required) return send(response, 400, { error: "Plugin cannot be changed" }); item.attached = payload.operation === "plugin_attach"; emitChange(["plugins", args.plugin_id === "state" ? "state" : "tasks"], args.workspace_id); return send(response, 200, { result: { plugin: item } }); }
+    if (payload.operation === "plugin_attach" || payload.operation === "plugin_detach") { const item = plugins.find((entry) => entry.id === args.plugin_id); if (!item || item.required) return send(response, 400, { error: "Plugin cannot be changed" }); item.attached = payload.operation === "plugin_attach"; emitChange(["plugins", args.plugin_id === "state" ? "state" : args.plugin_id === "roles" ? "roles" : "tasks"], args.workspace_id); return send(response, 200, { result: { plugin: item } }); }
     if (payload.operation === "plugin_list") return send(response, 200, { result: { plugins } });
+    if (payload.operation === "role_put") {
+      try {
+        const workspaceId = requiredFixtureString(args.workspace_id, "workspace_id");
+        const requestId = boundedFixtureString(args.request_id, 200, "request_id");
+        const role = fixtureRole(args.role);
+        const fingerprint = JSON.stringify({ operation: "role_put", role });
+        const replay = replayRoleReceipt(workspaceId, requestId, fingerprint);
+        if (replay) return send(response, 200, { result: replay });
+        if (!pluginAttached("roles")) return send(response, 400, { error: "plugin \"roles\" is detached; attach it before writing" });
+        const roles = recordsFor(rolesByWorkspace, workspaceId);
+        const index = roles.findIndex((entry) => entry.id === role.id);
+        const previous = index < 0 ? undefined : roles[index];
+        const stored = { ...role, revision: (previous?.revision || 0) + 1, updated_at: Math.floor(Date.now() / 1000) };
+        if (index < 0) roles.push(stored); else roles[index] = stored;
+        const result = { role: structuredClone(stored) };
+        saveRoleReceipt(workspaceId, requestId, fingerprint, result);
+        emitChange(["roles"], workspaceId);
+        return send(response, 200, { result });
+      } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+    }
+    if (payload.operation === "role_delete") {
+      try {
+        const workspaceId = requiredFixtureString(args.workspace_id, "workspace_id");
+        const requestId = boundedFixtureString(args.request_id, 200, "request_id");
+        const role_id = roleId(args.role_id, "role_id");
+        const fingerprint = JSON.stringify({ operation: "role_delete", role_id });
+        const replay = replayRoleReceipt(workspaceId, requestId, fingerprint);
+        if (replay) return send(response, 200, { result: replay });
+        if (!pluginAttached("roles")) return send(response, 400, { error: "plugin \"roles\" is detached; attach it before writing" });
+        const roles = recordsFor(rolesByWorkspace, workspaceId);
+        const index = roles.findIndex((entry) => entry.id === role_id);
+        if (index < 0) return send(response, 400, { error: `unknown role ${JSON.stringify(role_id)}` });
+        roles.splice(index, 1);
+        const result = { deleted: role_id };
+        saveRoleReceipt(workspaceId, requestId, fingerprint, result);
+        emitChange(["roles"], workspaceId);
+        return send(response, 200, { result });
+      } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+    }
     if (payload.operation === "state_list") { if (stateListFailures > 0) { stateListFailures -= 1; return send(response, 503, { error: "Fixture State store is unavailable" }); } const listed = structuredClone(args.workspace_id === workspace.id ? markers : []); if (delayStateListMs) await sleep(delayStateListMs); return send(response, 200, { result: { markers: listed } }); }
     if (payload.operation === "state_opportunities") { if (stateOpportunitiesFailures > 0) { stateOpportunitiesFailures -= 1; return send(response, 503, { error: "Fixture opportunities are unavailable" }); } const marker = markers.find((entry) => entry.id === "marker-1"); return send(response, 200, { result: { opportunities: args.workspace_id === workspace.id && marker ? [{ marker, resource: marker.subject, guidance: { instructions: "Collect the release evidence before advancing.", capabilities: ["release-review"] }, task: tasks[0], transitions: marker.state === "draft" ? [{ from: "draft", to: "review", label: "Send to review", readiness: "needs_input", reasons: ["Attach the release checklist."], prerequisites: [{ kind: "reference", resource_kind: "file" }] }] : [{ from: "review", to: "shipped", label: "Mark shipped", readiness: "ready", reasons: [], prerequisites: [{ kind: "subject_task_closed" }] }] }] : [] } }); }
     if (payload.operation === "state_get") { const marker = markers.find((entry) => entry.id === args.id); return marker ? send(response, 200, { result: { marker, definition: stateDefinition, history: [{ from: "draft", to: "draft", actor: "alice" }], available_transitions: marker.state === "draft" ? [{ from: "draft", to: "review", label: "Send to review" }] : [{ from: "review", to: "shipped", label: "Mark shipped" }], attached: plugins.find((item) => item.id === "state")?.attached } }) : send(response, 404, { error: "Marker not found" }); }
@@ -224,6 +367,31 @@ const server = createServer(async (request, response) => {
     return send(response, 200, { ok: true });
   }
   if (url.pathname === "/fixture/reset" && request.method === "POST") { resetFixture(); return send(response, 200, { ok: true }); }
+  if (url.pathname === "/fixture/role-declaration" && request.method === "POST") {
+    try {
+      const payload = await bodyOf(request);
+      const value = payload.declaration && typeof payload.declaration === "object" && !Array.isArray(payload.declaration) ? { ...payload, ...payload.declaration } : payload;
+      const workspaceId = value.workspace_id === undefined ? workspace.id : requiredFixtureString(value.workspace_id, "workspace_id");
+      const participant_id = boundedFixtureString(value.participant_id === undefined ? "alice" : value.participant_id, 128, "participant_id");
+      if (participant_id === "orchard") throw new Error("the system participant cannot mutate plugin state");
+      const roles = declaredRoles(value.roles === undefined ? [] : value.roles);
+      const skills = declaredSkills(value.skills === undefined ? [] : value.skills);
+      const model = optionalDeclaredText(value.model, 120, "model");
+      const tier = optionalDeclaredText(value.tier, 64, "tier");
+      let participant = participants.find((entry) => entry.id === participant_id);
+      if (!participant) { participant = { id: participant_id, name: typeof value.name === "string" && value.name ? value.name : participant_id, registered: true }; participants.push(participant); }
+      else participant.registered = true;
+      const declarations = recordsFor(declarationsByWorkspace, workspaceId);
+      const previous = declarations.find((entry) => entry.participant_id === participant_id);
+      const declaration = { participant_id, roles, skills, revision: (previous?.revision || 0) + 1, declared_at: Math.floor(Date.now() / 1000) };
+      if (model !== undefined) declaration.model = model;
+      if (tier !== undefined) declaration.tier = tier;
+      const index = declarations.findIndex((entry) => entry.participant_id === participant_id);
+      if (index < 0) declarations.push(declaration); else declarations[index] = declaration;
+      emitChange(["roles"], workspaceId);
+      return send(response, 200, { ok: true, declaration });
+    } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+  }
   if (url.pathname === "/fixture/build" && request.method === "POST") { buildIdentity = await bodyOf(request); return send(response, 200, { buildIdentity }); }
   if (url.pathname === "/fixture/drop-events" && request.method === "POST") { for (const client of subscribers) client.socket.end(); subscribers.clear(); return send(response, 200, { ok: true }); }
   if (url.pathname === "/fixture/delay" && request.method === "POST") { const value = await bodyOf(request); delaySendMs = Number(value.send || 0); delayAttachMs = Number(value.attach || 0); delayTasksMs = Number(value.tasks || 0); delayActionMs = Number(value.action || 0); delaySnapshotMs = Number(value.snapshot || 0); delayStateListMs = Number(value.state_list || 0); return send(response, 200, { ok: true }); }

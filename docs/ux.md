@@ -81,6 +81,12 @@ resource tabs remain readable, while actions that would write through a
 detached plugin are disabled with plain text explaining why. Orchard does not
 offer downloads, a workflow editor, or custom plugin JavaScript here.
 
+When the optional Roles plugin is attached, Settings includes an advisory Roles
+section where the owner can define, edit, or remove role coverage targets.
+It shows each role's identifier, capabilities, instructions, declared people,
+and open or filled coverage; participant roles and skills are explicitly
+labelled self-declared rather than assignments or verified qualifications.
+
 State appears in the resource tree only while its plugin is attached. Its list
 opens canonical marker tabs at `/w/{workspace}/states/{id}`. A marker viewer
 shows its title, current state, subject, immutable definition version, actor,

@@ -11,6 +11,7 @@ type ConversationKind = "channel" | "direct" | "broadcast";
 type DraftAttachment = { name: string; requestId: string; status: "uploading" | "ready" | "failed"; file?: File; href?: string; ref?: ResourceRef; error?: string };
 type Draft = { body: string; attachment?: DraftAttachment };
 type PendingMail = { args: Json; draftBody: string; attachmentRequestId?: string; replyRevision: number; state: "sending" | "uncertain" };
+type RoleEditor = { mode: "create" | "edit"; id: string; idAuto: boolean; label: string; instructions: string; capabilities: string; needed: string; tierHint: string; error?: string; saving?: boolean };
 type DetailView = "form";
 type Screen = "workspace" | "workspaces" | "settings" | "new-workspace" | "home";
 type CollectionTab = { kind: "collection"; collection: "tasks" | "agents" | "directs" | "states"; workspaceId: string; href: string; title: string };
@@ -76,6 +77,10 @@ const state: {
   stateOpportunitiesWorkspace?: string;
   stateOpportunitiesLoading?: string;
   stateCollectionMode: "markers" | "opportunities";
+  roleEditor?: RoleEditor;
+  roleDeleteId?: string;
+  roleDeleteError?: string;
+  roleDeleteSaving?: boolean;
   formReturn?: AppTab;
   newWorkspaceReturn?: Screen;
   buildBaseline?: { uiHash: string; appVersion: string };
@@ -400,6 +405,7 @@ window.addEventListener("keydown", (event) => {
   if (!editing && (event.metaKey || event.ctrlKey) && event.key === "ArrowRight") { event.preventDefault(); cycleTab(1); return; }
   if (!editing && (event.metaKey || event.ctrlKey) && event.key === "ArrowLeft") { event.preventDefault(); cycleTab(-1); return; }
   if (event.key !== "Escape") return;
+  if (state.screen === "settings" && closeRolesEditorOrConfirmation()) { event.preventDefault(); return; }
   if (state.screen === "settings") { openWorkspaceFromSettings(); return; }
   if (state.screen === "workspaces") { leaveWorkspaceChooser(); return; }
   if (state.screen === "new-workspace") { leaveNewWorkspace(); return; }
@@ -814,6 +820,34 @@ function snapshotList(...keys: string[]) {
 function mailSnapshot(): Json { return object(state.snapshot?.mail); }
 function mailList(name: string): unknown[] {
   return array(mailSnapshot()[name]);
+}
+function rolesSnapshot(): Json { return object(object(state.snapshot?.plugin_sections).roles); }
+function rolesList(): Json[] { return array(rolesSnapshot().roles).map(object); }
+function roleDeclarations(): Json[] { return array(rolesSnapshot().declarations).map(object); }
+function wholeNumber(value: unknown, fallback = 0) {
+  const parsed = typeof value === "number" ? value : Number(string(value));
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
+}
+function declarationFor(participantId: string): Json | undefined {
+  let latest: Json | undefined;
+  for (const declaration of roleDeclarations()) {
+    if (string(declaration.participant_id) !== participantId) continue;
+    if (!latest || wholeNumber(declaration.revision, -1) >= wholeNumber(latest.revision, -1)) latest = declaration;
+  }
+  return latest;
+}
+function roleDisplayLabel(id: string) {
+  const role = rolesList().find((item) => string(item.id) === id);
+  return string(role?.label) || id;
+}
+function selfDeclaredSummary(participantId: string): HTMLElement | undefined {
+  if (!pluginAttached("roles")) return undefined;
+  const declaration = declarationFor(participantId);
+  if (!declaration) return undefined;
+  const roles = array(declaration.roles).map(string).filter(Boolean).map(roleDisplayLabel);
+  const skills = array(declaration.skills).map(string).filter(Boolean);
+  const parts = [`self-declared roles: ${roles.length ? roles.join(", ") : "none"}`, `skills: ${skills.length ? skills.join(", ") : "none"}`];
+  return el("p", "muted self-declared", parts.join(" · "));
 }
 function decisionDeliveredToOwner(item: Json) {
   const destination = object(item.destination);
@@ -1253,7 +1287,10 @@ function renderResourceDetail(resource: Json, links: Json) {
     }
     panel.append(messageBody(string(record.body) || string(record.content) || string(data.body) || content)); for (const ref of array(record.refs ?? data.refs)) panel.append(referenceNode(ref));
   } else if (state.activeResource?.ref.kind === "agent") {
-    const participant = object(data.participant); panel.append(el("p", "muted", string(participant.name) || string(participant.id) || "Agent")); if (string(participant.last_contact_at)) panel.append(el("p", "muted", `Last contact ${string(participant.last_contact_at)}`)); else panel.append(el("p", "muted", "Registered; no recorded contact yet."));
+    const participant = object(data.participant); const participantId = identifier(participant);
+    panel.append(el("p", "muted", string(participant.name) || participantId || "Agent"));
+    if (string(participant.last_contact_at)) panel.append(el("p", "muted", `Last contact ${string(participant.last_contact_at)}`)); else panel.append(el("p", "muted", "Registered; no recorded contact yet."));
+    const declared = selfDeclaredSummary(participantId); if (declared) panel.append(declared);
   } else if (state.activeResource?.ref.kind === "state") {
     const marker = object(data.marker ?? data); const definition = object(data.definition);
     const subject = object(marker.subject); const attached = data.attached !== false && pluginAttached("state");
@@ -1582,9 +1619,10 @@ async function loadAgentContext(id: string, epoch: number) {
 }
 
 function patchAgentContext() {
-  document.querySelector<HTMLElement>(".agent-context")?.remove();
-  if (state.conversationKind !== "direct" || !state.selectedConversation || state.selectedConversation === "__all_direct__") return;
   const panel = document.querySelector<HTMLElement>("#conversation"); if (!panel) return;
+  const thread = panel.querySelector<HTMLElement>("#thread"); const threadScroll = thread?.scrollTop;
+  panel.querySelector<HTMLElement>(".agent-context")?.remove();
+  if (state.conversationKind !== "direct" || !state.selectedConversation || state.selectedConversation === "__all_direct__") return;
   const identity = object(object(state.agentData).data).participant;
   const participant = object(identity);
   const fallback = mailList("participants").map(object).find((person) => identifier(person) === state.selectedConversation) || {};
@@ -1594,6 +1632,7 @@ function patchAgentContext() {
   const registered = string(person.registered_at) || string(person.created_at);
   const contacted = string(person.last_contact_at);
   context.append(el("span", "muted", `${person.registered === false ? "Not registered" : registered ? `Registered ${registered}` : "Registered"} · ${contacted ? `Last contact ${contacted}` : "No recorded contact"}`));
+  const declared = selfDeclaredSummary(state.selectedConversation); if (declared) context.append(declared);
   const related = [...array(state.agentLinks?.outgoing).map((value) => ({ value, key: "target" })), ...array(state.agentLinks?.incoming).map((value) => ({ value, key: "source" }))];
   if (related.length) {
     const links = el("div", "agent-related");
@@ -1606,6 +1645,15 @@ function patchAgentContext() {
     if (links.childElementCount) context.append(links);
   }
   panel.querySelector(".conversation-title")?.after(context);
+  if (thread && threadScroll !== undefined) thread.scrollTop = threadScroll;
+}
+
+function patchAgentRoleSummary() {
+  if (state.activeResource?.ref.kind !== "agent") return;
+  const panel = document.querySelector<HTMLElement>("#conversation"); if (!panel) return;
+  panel.querySelectorAll(".self-declared").forEach((node) => node.remove());
+  const participant = object(object(state.resourceData).data).participant;
+  const declared = selfDeclaredSummary(identifier(participant)); if (declared) panel.append(declared);
 }
 
 async function loadConversationResource(active: Descriptor, epoch: number) {
@@ -1897,6 +1945,7 @@ function renderAgentCollection() {
     const id = identifier(participant); const name = string(participant.name) || id;
     const row = el("article", "agent-card"); row.append(button(name, () => void openResource(descriptor({ kind: "agent", workspace_id: state.workspace!.id, id }, name)), "subtle"));
     if (string(participant.last_contact_at)) row.append(el("p", "muted", `Last contact ${string(participant.last_contact_at)}`)); else row.append(el("p", "muted", participant.registered === false ? "Not registered; no recorded contact yet." : "Registered; no recorded contact yet."));
+    const declared = selfDeclaredSummary(id); if (declared) row.append(declared);
     panel.append(row);
   }
   const actions = el("div", "resource-actions"); actions.append(button("Connection settings", showAgentForm, "subtle")); panel.append(actions);
@@ -2075,6 +2124,154 @@ function openWorkspaceFromSettings() {
   if (active) void activateTab(active, true); else renderEmptyViewer();
 }
 
+function suggestedRoleId(label: string) {
+  return label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+}
+
+function roleDeclaredBy(role: Json) {
+  const id = string(role.id);
+  const supplied = array(role.declared_by).map(string).filter(Boolean);
+  if (supplied.length) return [...new Set(supplied)];
+  return [...new Set(roleDeclarations().filter((declaration) => array(declaration.roles).map(string).includes(id)).map((declaration) => string(declaration.participant_id)).filter(Boolean))];
+}
+
+function roleListElement() {
+  const list = el("div", "roles-list");
+  const roles = rolesList();
+  if (!roles.length) { list.append(el("p", "muted", "No roles have been defined.")); return list; }
+  for (const role of roles) {
+    const id = string(role.id); const label = string(role.label) || id || "Untitled role";
+    const needed = wholeNumber(role.needed); const filled = wholeNumber(role.filled);
+    const isOpen = needed > 0 && (typeof role.open === "boolean" ? role.open : filled < needed);
+    const row = el("article", "role-row"); row.dataset.roleId = id;
+    const heading = el("div", "role-heading"); heading.append(el("h3", "", label), el("p", "role-id", `id: ${id}`)); row.append(heading);
+    row.append(el("p", "task-metadata", needed === 0 ? `descriptive · ${filled} of ${needed}` : `${isOpen ? "Open" : "Filled"} ${filled} of ${needed}`));
+    const declaredBy = roleDeclaredBy(role);
+    row.append(el("p", "muted", declaredBy.length ? `Declared by ${declaredBy.map((participantId) => participantLabel(participantName(participantId))).join(", ")}` : "No participants have declared this role."));
+    const capabilities = array(role.capabilities).map(string).filter(Boolean);
+    row.append(el("p", "muted", `Capabilities: ${capabilities.length ? capabilities.join(", ") : "none"}`));
+    const instructions = string(role.instructions);
+    const details = document.createElement("details"); details.className = "role-instructions"; details.append(el("summary", "", "Instructions"), el("p", "", instructions || "No instructions supplied.")); row.append(details);
+    const actions = el("div", "role-actions");
+    actions.append(button("Edit", () => beginRoleEditor(role), "subtle"), button("Delete", () => { state.roleDeleteId = id; state.roleDeleteError = undefined; state.roleDeleteSaving = false; patchRolesSettings(); }, "subtle"));
+    row.append(actions);
+    if (state.roleDeleteId === id) {
+      const confirmation = el("div", "role-delete-confirmation"); const error = el("p", "error roles-delete-error", state.roleDeleteError || "");
+      const confirm = button("Confirm delete", async () => {
+        if (!state.workspace || confirm.disabled) return;
+        state.roleDeleteSaving = true; confirm.disabled = true;
+        try {
+          await call("role_delete", { workspace_id: state.workspace.id, request_id: crypto.randomUUID(), role_id: id });
+          state.roleDeleteId = undefined; state.roleDeleteError = undefined; state.roleDeleteSaving = false;
+          await refreshSnapshot(["roles"]);
+          patchRolesSettings();
+        } catch (reason) {
+          state.roleDeleteSaving = false; state.roleDeleteError = message(reason); error.textContent = state.roleDeleteError;
+          if (document.contains(confirm)) confirm.disabled = false;
+          patchRolesSettings();
+        }
+      }, "primary");
+      confirm.disabled = !!state.roleDeleteSaving;
+      confirmation.append(el("p", "", "Delete this role? Existing self-declarations are retained."), error, actionRow(confirm, button("Cancel", () => { state.roleDeleteId = undefined; state.roleDeleteError = undefined; state.roleDeleteSaving = false; patchRolesSettings(); }, "subtle")));
+      row.append(confirmation);
+    }
+    list.append(row);
+  }
+  return list;
+}
+
+function beginRoleEditor(role?: Json) {
+  const item = object(role);
+  state.roleDeleteId = undefined; state.roleDeleteError = undefined; state.roleDeleteSaving = false;
+  state.roleEditor = role ? {
+    mode: "edit", id: string(item.id), idAuto: false, label: string(item.label), instructions: string(item.instructions), capabilities: array(item.capabilities).map(string).filter(Boolean).join(", "), needed: String(wholeNumber(item.needed)), tierHint: string(item.tier_hint),
+  } : { mode: "create", id: "", idAuto: true, label: "", instructions: "", capabilities: "", needed: "1", tierHint: "" };
+  patchRolesSettings(true);
+  window.setTimeout(() => document.querySelector<HTMLInputElement>("#role-label")?.focus(), 0);
+}
+
+function roleEditorElement() {
+  const editor = state.roleEditor; if (!editor) return undefined;
+  const section = el("section", "role-editor"); section.append(el("h3", "", editor.mode === "create" ? "Create role" : `Edit ${editor.id}`));
+  const form = el("form", "stack roles-form");
+  const addInput = (id: string, label: string, value: string, type = "text") => {
+    const input = document.createElement("input"); input.id = id; input.type = type; input.value = value; input.required = true; input.setAttribute("aria-label", label);
+    const visibleLabel = el("label", "", label); visibleLabel.htmlFor = id; form.append(visibleLabel, input);
+    return input;
+  };
+  const labelInput = addInput("role-label", "Role label", editor.label);
+  const idInput = addInput("role-id", "Role id", editor.id); idInput.readOnly = editor.mode === "edit";
+  const neededInput = addInput("role-needed", "Needed", editor.needed, "number"); neededInput.min = "0"; neededInput.max = "20"; neededInput.step = "1";
+  const capabilitiesInput = addInput("role-capabilities", "Capabilities (comma-separated)", editor.capabilities); capabilitiesInput.required = false;
+  const instructionsLabel = el("label", "", "Instructions"); instructionsLabel.htmlFor = "role-instructions";
+  const instructionsInput = document.createElement("textarea"); instructionsInput.id = "role-instructions"; instructionsInput.maxLength = 4000; instructionsInput.value = editor.instructions; instructionsInput.setAttribute("aria-label", "Instructions"); form.append(instructionsLabel, instructionsInput);
+  const tierHintInput = addInput("role-tier-hint", "Tier hint (optional)", editor.tierHint); tierHintInput.required = false;
+  const error = el("p", "error roles-form-error", editor.error || "");
+  const clearError = () => { const current = state.roleEditor; if (current) current.error = undefined; error.textContent = ""; };
+  labelInput.addEventListener("input", () => {
+    const current = state.roleEditor; if (!current) return;
+    current.label = labelInput.value;
+    if (current.mode === "create" && current.idAuto) { current.id = suggestedRoleId(current.label); idInput.value = current.id; }
+    clearError();
+  });
+  idInput.addEventListener("input", () => { const current = state.roleEditor; if (!current) return; current.id = idInput.value; current.idAuto = false; clearError(); });
+  neededInput.addEventListener("input", () => { const current = state.roleEditor; if (current) { current.needed = neededInput.value; clearError(); } });
+  capabilitiesInput.addEventListener("input", () => { const current = state.roleEditor; if (current) { current.capabilities = capabilitiesInput.value; clearError(); } });
+  instructionsInput.addEventListener("input", () => { const current = state.roleEditor; if (current) { current.instructions = instructionsInput.value; clearError(); } });
+  tierHintInput.addEventListener("input", () => { const current = state.roleEditor; if (current) { current.tierHint = tierHintInput.value; clearError(); } });
+  const save = async () => {
+    const current = state.roleEditor;
+    if (!current || !state.workspace || current.saving || !form.reportValidity()) return;
+    current.saving = true; saveButton.disabled = true;
+    try {
+      const role: Json = {
+        id: current.id.trim(), label: current.label.trim(), instructions: current.instructions.trim(),
+        capabilities: current.capabilities.split(/[\n,]/).map((capability) => capability.trim()).filter(Boolean), needed: Number(current.needed),
+      };
+      if (current.tierHint.trim()) role.tier_hint = current.tierHint.trim();
+      await call("role_put", { workspace_id: state.workspace.id, request_id: crypto.randomUUID(), role });
+      state.roleEditor = undefined;
+      await refreshSnapshot(["roles"]);
+      patchRolesSettings(true);
+    } catch (reason) {
+      current.saving = false; current.error = message(reason); error.textContent = current.error;
+      if (document.contains(saveButton)) saveButton.disabled = false;
+    }
+  };
+  const saveButton = button(editor.mode === "create" ? "Save role" : "Save changes", save, "primary");
+  form.addEventListener("submit", (event) => { event.preventDefault(); void save(); });
+  form.append(error, actionRow(saveButton, button("Cancel", () => { state.roleEditor = undefined; patchRolesSettings(true); }, "subtle")));
+  section.append(form);
+  return section;
+}
+
+function rolesSettingsSection() {
+  const section = el("section", "settings-section roles-settings"); section.id = "roles-settings-section";
+  section.append(el("h2", "", "Roles"), el("p", "muted", "Roles and declarations are self-declared and advisory; Orchard does not assign work or verify capabilities."));
+  const create = button("Create role", () => beginRoleEditor(), "subtle"); create.disabled = !!state.roleEditor; section.append(create, roleListElement());
+  const editor = roleEditorElement(); if (editor) section.append(editor);
+  return section;
+}
+
+function patchRolesSettings(rebuild = false) {
+  if (state.screen !== "settings") return;
+  const existing = document.querySelector<HTMLElement>("#roles-settings-section");
+  if (!pluginAttached("roles")) { state.roleEditor = undefined; state.roleDeleteId = undefined; state.roleDeleteError = undefined; state.roleDeleteSaving = false; existing?.remove(); return; }
+  if (!existing) { document.querySelector(".plugin-catalog")?.after(rolesSettingsSection()); return; }
+  if (state.roleEditor && !rebuild) {
+    const list = existing.querySelector<HTMLElement>(".roles-list"); const replacement = roleListElement();
+    if (list) list.replaceWith(replacement); else existing.append(replacement);
+    return;
+  }
+  existing.replaceWith(rolesSettingsSection());
+}
+
+function closeRolesEditorOrConfirmation() {
+  if (!state.roleEditor && !state.roleDeleteId) return false;
+  state.roleEditor = undefined; state.roleDeleteId = undefined; state.roleDeleteError = undefined; state.roleDeleteSaving = false; patchRolesSettings(true);
+  return true;
+}
+
 function pluginCatalog() {
   const section = el("section", "settings-section plugin-catalog"); section.append(el("h2", "", "Bundled plugins"), el("p", "muted", "Core and Chat are required. Optional plugins can be attached to this workspace; detaching preserves their data for read-only views."));
   const catalog = plugins();
@@ -2089,7 +2286,7 @@ function pluginCatalog() {
     if (item.required !== true) {
       const control = button(item.attached === false ? "Attach" : "Detach", async () => {
         control.disabled = true; const operation = item.attached === false ? "plugin_attach" : "plugin_detach";
-        try { await call(operation, { workspace_id: state.workspace!.id, plugin_id: id, request_id: crypto.randomUUID() }); await refreshSnapshot(["plugins", "tasks", "state"]); notice(`${title} ${operation === "plugin_attach" ? "attached" : "detached"}.`); }
+        try { await call(operation, { workspace_id: state.workspace!.id, plugin_id: id, request_id: crypto.randomUUID() }); await refreshSnapshot(["plugins", "tasks", "state", "roles"]); notice(`${title} ${operation === "plugin_attach" ? "attached" : "detached"}.`); }
         catch (error) { notice(message(error), "error"); }
         finally { if (document.contains(control)) control.disabled = false; }
       }, "subtle"); control.disabled = item.available === false; row.append(control);
@@ -2139,7 +2336,11 @@ function renderSettings(fromHistory = false, focus = false) {
   }, "primary");
   const connection = document.createElement("details"); connection.className = "settings-section connection-details";
   connection.append(el("summary", "", "Connection details"), el("h2", "", "Endpoint"), endpoint, el("h2", "", "Credential"), token, el("p", "muted", "Each workspace gets its own MCP alias. Orchard does not launch or wake agents."), el("h3", "", "Claude Code"), claudeConfig, el("h3", "", "Codex"), codexConfig, el("h3", "", "Codex TOML"), codexToml, el("p", "muted", "For Codex, ORCHARD_TOKEN must exist in the process that launches the harness; exporting it in a terminal does not change an already-running app. After adding config, reconnect or reload MCP as the harness supports."), actionRow(rotate));
-  panel?.append(back(), overview, pluginCatalog(), connection, actionRow(archive, back()));
+  if (panel) {
+    panel.append(back(), overview, pluginCatalog());
+    if (pluginAttached("roles")) panel.append(rolesSettingsSection());
+    panel.append(connection, actionRow(archive, back()));
+  }
   void loadWorkspaceIntroduction(introduction, readme, joining, workspacePath);
   void loadConnection(endpoint, token, claudeConfig, codexConfig, codexToml);
   void loadBuildIdentity(buildIdentity);
@@ -2194,7 +2395,7 @@ async function loadConnection(endpoint: HTMLElement, token: HTMLElement, claudeC
   } catch (error) { notice(message(error), "error"); }
 }
 
-function refreshSnapshot(topics: string[] = ["workspace", "mail", "tasks", "artifacts", "repositories"]): Promise<void> {
+function refreshSnapshot(topics: string[] = ["workspace", "mail", "tasks", "artifacts", "repositories", "roles"]): Promise<void> {
   for (const topic of topics) pendingRefreshTopics.add(topic);
   if (!refreshFlight) {
     refreshFlight = (async () => {
@@ -2235,6 +2436,12 @@ async function refreshSnapshotNow(topics: string[]) {
     const focused = document.activeElement as HTMLElement | null; const row = focused?.closest<HTMLElement>(".plugin-row"); const pluginName = row?.querySelector("h3")?.textContent; const action = focused?.textContent;
     const catalog = document.querySelector(".plugin-catalog"); catalog?.replaceWith(pluginCatalog());
     if (pluginName && action) [...document.querySelectorAll<HTMLElement>(".plugin-row")].find((item) => item.querySelector("h3")?.textContent === pluginName)?.querySelectorAll<HTMLButtonElement>("button").forEach((button) => { if (button.textContent === action) button.focus(); });
+  }
+  if ((topics.includes("roles") || topics.includes("plugins")) && state.screen === "settings") patchRolesSettings();
+  if (topics.includes("roles") || topics.includes("plugins") || topics.includes("mail")) {
+    if (state.conversationKind === "direct" && state.selectedConversation && state.selectedConversation !== "__all_direct__") patchAgentContext();
+    if (state.activeHref === collectionTab("agents", workspaceId).href && state.screen === "workspace" && state.detailView !== "form") renderAgentCollection();
+    patchAgentRoleSummary();
   }
   if (topics.includes("plugins")) {
     if (state.activeHref === collectionTab("tasks", workspaceId).href) renderTaskCollection();
@@ -2391,7 +2598,7 @@ function startLiveUpdates() {
         try { payload = object(JSON.parse(String(event.data))); } catch { return; }
         if (string(payload.workspace_id) !== workspaceId) return;
         const type = string(payload.type);
-        const topics = type === "changed" ? array(payload.topics).map(string) : type === "resync" ? ["workspace", "mail", "tasks", "artifacts", "repositories", "plugins", "state"] : [];
+        const topics = type === "changed" ? array(payload.topics).map(string) : type === "resync" ? ["workspace", "mail", "tasks", "artifacts", "repositories", "plugins", "state", "roles"] : [];
         if (type !== "changed" && type !== "hello" && type !== "resync") return;
         for (const topic of topics) pendingRefreshTopics.add(topic);
         if (!state.refreshTimer) state.refreshTimer = window.setTimeout(() => {
