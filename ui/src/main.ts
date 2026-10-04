@@ -2599,7 +2599,11 @@ function startLiveUpdates() {
         try { payload = object(JSON.parse(String(event.data))); } catch { return; }
         if (string(payload.workspace_id) !== workspaceId) return;
         const type = string(payload.type);
-        const topics = type === "changed" ? array(payload.topics).map(string) : type === "resync" ? ["workspace", "mail", "tasks", "artifacts", "repositories", "plugins", "state", "roles"] : [];
+        // resync refreshes everything. hello (every connect) refreshes the snapshot topics too,
+        // so changes between loading the page and the socket opening are not missed; the State
+        // list is fetched by its own view and keeps its single load.
+        const snapshotTopics = ["workspace", "mail", "tasks", "artifacts", "repositories", "plugins", "roles"];
+        const topics = type === "changed" ? array(payload.topics).map(string) : type === "resync" ? [...snapshotTopics, "state"] : type === "hello" ? snapshotTopics : [];
         if (type !== "changed" && type !== "hello" && type !== "resync") return;
         for (const topic of topics) pendingRefreshTopics.add(topic);
         if (!state.refreshTimer) state.refreshTimer = window.setTimeout(() => {
