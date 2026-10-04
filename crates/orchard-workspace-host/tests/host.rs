@@ -3373,3 +3373,55 @@ fn task_mutations_by_alias_return_the_canonical_task_ref_and_replay() {
         .unwrap();
     assert_eq!(closed["task_ref"], expected_task_ref);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_mcp_session_gets_404_and_reinitializing_recovers() {
+    // An evicted session (about 300 s idle) and an unknown one take the same path: the
+    // documented HTTP 404, after which the client re-initializes.
+    let temp = TempDir::new().unwrap();
+    let host = Arc::new(WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap());
+    let (workspace_id, _, _) = create_workspace(&host, "Sessions");
+    let server = host.clone().start_server().await.unwrap();
+    let token = host
+        .call("connection_info", json!({"workspace_id":workspace_id}))
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let uri = format!("http://{}/workspaces/{workspace_id}/mcp", server.endpoint());
+    let client = reqwest::Client::new();
+    let post = |body: Value, session: Option<&str>| {
+        let mut request = client
+            .post(&uri)
+            .bearer_auth(&token)
+            .header("accept", "application/json, text/event-stream")
+            .json(&body);
+        if let Some(session) = session {
+            request = request.header("mcp-session-id", session);
+        }
+        request.send()
+    };
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2025-06-18","capabilities":{},
+        "clientInfo":{"name":"session-test","version":"0"}}});
+    let tools = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
+
+    let stale = post(tools.clone(), Some("no-such-session")).await.unwrap();
+    assert_eq!(stale.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let fresh = post(initialize, None).await.unwrap();
+    assert!(fresh.status().is_success(), "{}", fresh.status());
+    let session = fresh.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+    assert!(post(initialized, Some(&session))
+        .await
+        .unwrap()
+        .status()
+        .is_success());
+    let listed = post(tools, Some(&session)).await.unwrap();
+    assert!(listed.status().is_success(), "{}", listed.status());
+    assert!(listed.text().await.unwrap().contains("workspace_alerts"));
+}
