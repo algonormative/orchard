@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
-use crate::config::TaskStoreConfig;
+use crate::{canonical_task_ref, config::TaskStoreConfig};
 
 pub(crate) const SUPPORTED_BR_VERSION: &str = "0.1.14";
 pub(crate) const SUPPORTED_SCHEMA_VERSION: u32 = 1;
@@ -190,8 +190,9 @@ impl BeadsAdapter {
             ],
             false,
         )?;
+        let task = self.read_task_direct(store, task_id)?;
         Ok(json!({
-            "task_ref": {"store_id": store.id, "task_id": task_id},
+            "task_ref": canonical_task_ref(Some(&task), &store.id, Some(task_id)),
             "dependencies": value
         }))
     }
@@ -1076,12 +1077,9 @@ fn qualify_list(store_id: &str, value: Value) -> Value {
 }
 
 fn qualify_task(store_id: &str, mut task: Value) -> Value {
+    let task_ref = canonical_task_ref(Some(&task), store_id, None);
     if let Value::Object(ref mut object) = task {
-        let task_id = object.get("id").cloned().unwrap_or(Value::Null);
-        object.insert(
-            "task_ref".to_owned(),
-            json!({"store_id": store_id, "task_id": task_id}),
-        );
+        object.insert("task_ref".to_owned(), task_ref);
     }
     task
 }

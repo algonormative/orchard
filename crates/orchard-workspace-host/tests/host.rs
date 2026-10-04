@@ -3309,3 +3309,67 @@ fn task_show_by_alias_returns_the_canonical_task_ref() {
     // The earlier bare fields remain for existing clients.
     assert_eq!(shown["id"], created["task"]["id"]);
 }
+
+#[test]
+fn task_mutations_by_alias_return_the_canonical_task_ref_and_replay() {
+    let temp = TempDir::new().unwrap();
+    let host = WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap();
+    let (workspace_id, store_id, _) = create_workspace(&host, "Task aliases");
+    let created = host
+        .call("task_create", json!({"workspace_id":workspace_id,"store_id":store_id,"request_id":"create-alias","title":"Same task"}))
+        .unwrap();
+    let task_id = created["task"]["id"].as_str().unwrap().to_owned();
+    let alias = task_id.split_once('-').unwrap().1;
+    let expected_task_ref = json!({"store_id":store_id,"task_id":task_id});
+
+    let dependencies = host
+        .call(
+            "task_dependencies",
+            json!({"workspace_id":workspace_id,"store_id":store_id,"task_id":alias}),
+        )
+        .unwrap();
+    assert_eq!(dependencies["task_ref"], expected_task_ref);
+
+    let update_args = json!({
+        "workspace_id":workspace_id,"store_id":store_id,"task_id":alias,
+        "request_id":"update-alias","title":"Updated by alias"
+    });
+    let updated = host.call("task_update", update_args.clone()).unwrap();
+    assert_eq!(updated["task_ref"], expected_task_ref);
+    let replay = host.call("task_update", update_args).unwrap();
+    assert_eq!(replay["idempotent_replay"], true);
+    assert_eq!(replay["task_ref"], expected_task_ref);
+
+    let claimed = host
+        .call(
+            "task_claim",
+            json!({
+                "workspace_id":workspace_id,"store_id":store_id,"task_id":alias,
+                "participant_id":"owner","request_id":"claim-alias"
+            }),
+        )
+        .unwrap();
+    assert_eq!(claimed["task_ref"], expected_task_ref);
+
+    let released = host
+        .call(
+            "task_release",
+            json!({
+                "workspace_id":workspace_id,"store_id":store_id,"task_id":alias,
+                "participant_id":"owner","request_id":"release-alias"
+            }),
+        )
+        .unwrap();
+    assert_eq!(released["task_ref"], expected_task_ref);
+
+    let closed = host
+        .call(
+            "task_close",
+            json!({
+                "workspace_id":workspace_id,"store_id":store_id,"task_id":alias,
+                "request_id":"close-alias","reason":"done"
+            }),
+        )
+        .unwrap();
+    assert_eq!(closed["task_ref"], expected_task_ref);
+}

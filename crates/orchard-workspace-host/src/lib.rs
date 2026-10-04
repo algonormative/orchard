@@ -848,17 +848,11 @@ impl WorkspaceHost {
         // Same `{task, task_ref}` shape as the other task tools. The task's own fields stay
         // at the top level too, for clients written against the earlier bare shape; they
         // are deprecated.
-        // The canonical ID comes from the task itself; `task_id` may be an accepted alias.
-        let canonical_id = task["id"].as_str().unwrap_or(&task_id).to_owned();
         let mut result = task.clone();
         if let Some(fields) = result.as_object_mut() {
             fields.insert("task".to_owned(), task);
-            fields.insert(
-                "task_ref".to_owned(),
-                json!({"store_id":store_id,"task_id":canonical_id}),
-            );
         }
-        Ok(result)
+        Ok(with_task_ref(result, &store_id, Some(&task_id)))
     }
 
     fn task_dependencies(&self, args: Value) -> Result<Value, String> {
@@ -1143,7 +1137,7 @@ impl WorkspaceHost {
                             Value::String("previous_result_current_observation".to_owned()),
                         );
                     }
-                    Ok(value)
+                    Ok(with_task_ref(value, store_id, task_id))
                 }
                 Ok(None) => Err(format!(
                     "request {request_id:?} has a result receipt but its task is no longer observable"
@@ -1173,7 +1167,7 @@ impl WorkspaceHost {
                         "observed_after_pending",
                         None,
                     )?;
-                    Ok(value)
+                    Ok(with_task_ref(value, store_id, task_id))
                 }
                 Ok(None) => Err(format!(
                     "request {request_id:?} has a pending intent; current store state does not prove it applied, so Orchard will not rerun it automatically"
@@ -1224,7 +1218,7 @@ impl WorkspaceHost {
                 if let (Some(error), Value::Object(object)) = (receipt_error, &mut value) {
                     object.insert("receipt_error".to_owned(), Value::String(error));
                 }
-                Ok(value)
+                Ok(with_task_ref(value, store_id, task_id))
             }
             Err(error) => {
                 let kind = if error.unknown_outcome {
@@ -1631,7 +1625,7 @@ impl WorkspaceHost {
             "operation": operation,
             "fingerprint": fingerprint,
             "outcome": outcome,
-            "task_ref": {"store_id": store_id, "task_id": task_id},
+            "task_ref": canonical_task_ref(None, store_id, task_id),
             "error": error
         });
         let search_key = receipt_search_key(&runtime.id, request_id);
@@ -2532,6 +2526,26 @@ fn object(value: Value) -> Result<Map<String, Value>, String> {
         .as_object()
         .cloned()
         .ok_or_else(|| "operation arguments must be a JSON object".to_owned())
+}
+
+pub(crate) fn canonical_task_ref(
+    task: Option<&Value>,
+    store_id: &str,
+    fallback_task_id: Option<&str>,
+) -> Value {
+    let task_id = task
+        .and_then(|task| task.get("id"))
+        .and_then(Value::as_str)
+        .or(fallback_task_id);
+    json!({"store_id":store_id,"task_id":task_id})
+}
+
+fn with_task_ref(mut result: Value, store_id: &str, fallback_task_id: Option<&str>) -> Value {
+    let task_ref = canonical_task_ref(result.get("task"), store_id, fallback_task_id);
+    if let Some(fields) = result.as_object_mut() {
+        fields.insert("task_ref".to_owned(), task_ref);
+    }
+    result
 }
 
 fn workspace_id(value: &Value) -> Result<String, String> {
