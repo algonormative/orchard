@@ -287,10 +287,10 @@ fn roles_intro_section(host: &WorkspaceHost, workspace_id: &str) -> Result<Optio
         let needed = role["needed"]
             .as_i64()
             .ok_or_else(|| "invalid stored role needed count".to_owned())?;
+        // A role is listed once: open while it still needs people, otherwise filled.
         if role["open"] == true {
             open.push(format!("{label} (`{id}`, {count} of {needed})"));
-        }
-        if count > 0 {
+        } else if count > 0 {
             filled.push(format!("{label} (`{id}`)"));
         }
     }

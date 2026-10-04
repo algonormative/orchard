@@ -1300,7 +1300,7 @@ fn roles_intro_and_snapshot_sections_follow_the_listing_and_detach_with_the_plug
         &host,
         "role_declare",
         &workspace_id,
-        json!({"participant_id":"alice","request_id":"sections-reviewer-declaration","roles":["reviewer"],"skills":["reviews"]}),
+        json!({"participant_id":"alice","request_id":"sections-reviewer-declaration","roles":["reviewer","architect"],"skills":["reviews"]}),
     );
     let listing = call(&host, "roles_list", &workspace_id, json!({}));
     let defined_introduction = call(&host, "workspace_intro", &workspace_id, json!({}))
@@ -1310,7 +1310,7 @@ fn roles_intro_and_snapshot_sections_follow_the_listing_and_detach_with_the_plug
         .to_owned();
     assert_eq!(
         plugin_intro_section(&defined_introduction, "Roles"),
-        "Roles are advisory and self-declared.\nOpen: Architecture (`architect`, 0 of 2)\nFilled: Review (`reviewer`)\nDeclare what you can do with `plugin_call` → roles/role_declare; read role instructions with roles/roles_list."
+        "Roles are advisory and self-declared.\nOpen: Architecture (`architect`, 1 of 2)\nFilled: Review (`reviewer`)\nDeclare what you can do with `plugin_call` → roles/role_declare; read role instructions with roles/roles_list."
     );
     let snapshot = call(&host, "workspace_snapshot", &workspace_id, json!({}));
     assert_eq!(
