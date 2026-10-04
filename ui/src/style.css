@@ -378,6 +378,24 @@ button.reply-button:hover { color: var(--citron); background: transparent; }
 .plugin-row h3 { margin: 0; color: var(--cream); }
 .plugin-row p { margin: .35rem 0; }
 .plugin-row button { width: auto; margin-top: .25rem; }
+.roles-settings > .subtle { margin-top: .15rem; }
+.roles-list { display: grid; gap: .65rem; margin-top: .75rem; }
+.role-row { padding: .75rem .85rem; border: 1px solid var(--rule-strong); border-left: 3px solid var(--citron-deep); background: var(--slab-raised); }
+.role-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem .7rem; }
+.role-heading h3 { margin: 0; color: var(--cream); }
+.role-id { margin: 0; color: var(--faint); font: .72rem/1.4 var(--mono); overflow-wrap: anywhere; }
+.role-row > p { margin: .38rem 0; }
+.role-instructions { margin-top: .55rem; }
+.role-instructions summary { cursor: pointer; color: var(--muted); font: 700 .68rem/1.2 var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+.role-instructions p { margin: .45rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.role-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .65rem; }
+.role-actions button { width: auto; }
+.role-editor, .role-delete-confirmation { margin-top: .85rem; padding: .75rem .85rem; border: 1px solid var(--rule-strong); background: var(--slab); }
+.role-editor h3 { margin: 0; }
+.roles-form { max-width: 640px; margin-top: .8rem; }
+.roles-form label { color: var(--muted); font: 700 .68rem/1.2 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+.roles-form textarea { min-height: 7rem; }
+.role-delete-confirmation { border-left: 3px solid var(--vermilion); }
 .onboarding-callout { max-width: 900px; margin: 1rem var(--content-x); padding: calc(1rem + 5px) 1.15rem 1rem; border: 1px solid var(--rule-strong); background: var(--stripe) top / 100% 5px no-repeat, var(--slab); }
 .onboarding-callout h2, .onboarding-callout h3 { margin: 0 0 .5rem; color: var(--cream); }
 .onboarding-callout p { margin: .4rem 0; color: var(--muted); }
@@ -450,4 +468,3 @@ button.reply-button:hover { color: var(--citron); background: transparent; }
 .about-copy-status { margin: 0 .7rem .6rem; font-size: .8rem; color: var(--leaf); }
 .about-copy-status:empty { display: none; }
 .about-copyright { margin: .3rem 0 0; font-size: .75rem; color: var(--faint); }
-

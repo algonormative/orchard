@@ -539,6 +539,83 @@ test("plugin settings detach Tasks and live State remains a readable canonical r
   await expect(page.locator("#conversation")).toContainText("State: review · revision 2");
 });
 
+test("Roles settings create, fill, edit, delete, and detach roles", async ({ page, request }) => {
+  await unlock(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const roles = page.locator("#roles-settings-section");
+  await expect(roles).toContainText(/self-declared and advisory/i);
+
+  await roles.getByRole("button", { name: "Create role", exact: true }).click();
+  const editor = roles.locator(".role-editor");
+  const label = editor.getByLabel("Role label", { exact: true });
+  await label.fill("Release coordinator");
+  await expect(editor.getByLabel("Role id", { exact: true })).toHaveValue("release-coordinator");
+  const refreshed = page.waitForResponse((response) => response.url().endsWith("/api/call") && response.request().postDataJSON().operation === "workspace_snapshot");
+  await request.post("/fixture/role-declaration", { data: { participant_id: "alice", roles: ["reviewer"], skills: ["playwright"] } });
+  await refreshed;
+  await expect(label).toBeFocused();
+  await expect(label).toHaveValue("Release coordinator");
+  await editor.getByLabel("Needed", { exact: true }).fill("1");
+  await editor.getByLabel("Capabilities (comma-separated)", { exact: true }).fill("handoff, review");
+  await editor.getByLabel("Instructions", { exact: true }).fill("Coordinate the release handoff.");
+  await editor.getByRole("button", { name: "Save role", exact: true }).click();
+
+  const role = roles.locator('.role-row[data-role-id="release-coordinator"]');
+  await expect(role).toContainText("Open 0 of 1");
+  await expect(role).toContainText("Coordinate the release handoff.");
+  await request.post("/fixture/role-declaration", { data: { participant_id: "alice", roles: ["release-coordinator"], skills: ["release-testing"] } });
+  await expect(role).toContainText("Filled 1 of 1");
+  await expect(role).toContainText("@Alice");
+
+  await role.getByRole("button", { name: "Edit", exact: true }).click();
+  await editor.getByLabel("Role label", { exact: true }).fill("Release lead");
+  await editor.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(role).toContainText("Release lead");
+
+  await role.getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(role).toContainText("Delete this role?");
+  await role.getByRole("button", { name: "Confirm delete", exact: true }).click();
+  await expect(role).toHaveCount(0);
+  await roles.getByRole("button", { name: "Create role", exact: true }).click();
+  await editor.getByLabel("Role label", { exact: true }).fill("Advisory observer");
+  await editor.getByLabel("Needed", { exact: true }).fill("0");
+  await editor.getByLabel("Instructions", { exact: true }).fill("Observe without a staffing requirement.");
+  await editor.getByRole("button", { name: "Save role", exact: true }).click();
+  await expect(roles.locator('.role-row[data-role-id="advisory-observer"]')).toContainText("descriptive");
+  await page.locator(".plugin-row", { hasText: "Roles" }).getByRole("button", { name: "Detach", exact: true }).click();
+  await expect(roles).toHaveCount(0);
+});
+
+test("Roles editor escapes, reports host validation, and cancels visibly", async ({ page }) => {
+  await unlock(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const roles = page.locator("#roles-settings-section");
+
+  await roles.getByRole("button", { name: "Create role", exact: true }).click();
+  const editor = roles.locator(".role-editor");
+  await editor.getByLabel("Role label", { exact: true }).fill("Draft that closes");
+  await page.keyboard.press("Escape");
+  await expect(editor).toHaveCount(0);
+
+  await roles.getByRole("button", { name: "Create role", exact: true }).click();
+  await editor.getByLabel("Role label", { exact: true }).fill("Invalid role");
+  await editor.getByLabel("Role id", { exact: true }).fill("-bad");
+  await editor.getByLabel("Instructions", { exact: true }).fill("This reaches fixture validation.");
+  await editor.getByRole("button", { name: "Save role", exact: true }).click();
+  await expect(editor.locator(".roles-form-error")).toContainText("role.id must be a 1..64 character lowercase role id");
+  await editor.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+});
+
+test("direct identity shows self-declared Roles and skills", async ({ page, request }) => {
+  await request.post("/fixture/role-declaration", { data: { participant_id: "alice", roles: ["reviewer"], skills: ["playwright", "triage"] } });
+  await unlock(page);
+  await page.goto("/w/workspace-1/direct/alice");
+  const identity = page.locator(".agent-context");
+  await expect(identity).toContainText("self-declared roles: reviewer");
+  await expect(identity).toContainText("skills: playwright, triage");
+});
+
 test("State collection loads an empty list once and scopes cached markers to its workspace", async ({ page, request }) => {
   await unlock(page);
   await openTree(page, "Tasks");
