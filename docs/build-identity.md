@@ -37,4 +37,6 @@ and a collapsed **Build info** section with this same identity and a Copy
 action. The window gets no Tauri commands. It shows only that page: notices
 open the bundled folder, https links open in the default browser, and any
 other navigation is refused. Escape or the title-bar close button closes it, and
-Orchard keeps running.
+Orchard keeps running. While it is focused, Orchard's own app menu
+offers About, Quit Orchard (⌘Q, the same graceful shutdown as the tray's Quit),
+copy and select all, and close window.

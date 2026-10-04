@@ -90,6 +90,7 @@ fn main() {
     };
 
     tauri::Builder::default()
+        .menu(app_menu)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
@@ -569,6 +570,39 @@ fn resolve_editor_app() -> Option<OsString> {
                 .is_dir()
         })
         .map(OsString::from)
+}
+
+/// The app menu, used while an Orchard window (About) is focused. It replaces Tauri's
+/// default, whose Quit calls `terminate:` and so skips the server's graceful shutdown: here
+/// ⌘Q is an ordinary item routed to `graceful_quit`, like the tray's Quit. Edit keeps copy
+/// and select-all working in the About window.
+fn app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let orchard = Submenu::with_items(
+        app,
+        "Orchard",
+        true,
+        &[
+            &MenuItem::with_id(app, "about", "About Orchard", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "quit", "Quit Orchard", true, Some("CmdOrCtrl+Q"))?,
+        ],
+    )?;
+    let edit = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    let window = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[&PredefinedMenuItem::close_window(app, None)?],
+    )?;
+    Menu::with_items(app, &[&orchard, &edit, &window])
 }
 
 fn graceful_quit<R: Runtime>(app: AppHandle<R>, state: &DesktopState) {
