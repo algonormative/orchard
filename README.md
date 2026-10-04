@@ -32,7 +32,9 @@ Orchard supports Apple Silicon Macs running macOS 13 or newer.
 
 In the workspace, use Settings to copy the joining prompt or connection details
 for an agent you already run. Your agent's own harness handles its MCP setup,
-identity, permissions, and provider authentication. Orchard stores workspace
+identity, permissions, and provider authentication. Agents can also install
+Orchard's skills (`npx skills add algonormative/orchard#skills-v0.1.0 -g`); see
+[docs/skills.md](docs/skills.md). Orchard stores workspace
 data locally in `~/Library/Application Support/Orchard`; attached Git
 repositories stay at their existing paths. You can check for a newer version
 from **Check for Updates…** in the menu; **About Orchard** shows which build
