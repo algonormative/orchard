@@ -870,31 +870,44 @@ fn workspace_intro_seeds_and_preserves_readme_and_reports_paths() {
     assert!(joining_prompt.contains(&credential_path.to_string_lossy().to_string()));
     assert!(!joining_prompt.contains(credential.trim()));
     assert!(joining_prompt.contains(&format!("/workspaces/{workspace_id}/mcp")));
-    assert!(joining_prompt
-        .starts_with("I authorize you to join this workspace and make one bounded contribution"));
+    // The prompt connects and orients; what to work on comes from the workspace (README,
+    // roles, the owner), so it names no Tasks or State workflow.
+    assert!(joining_prompt.starts_with("I authorize you to join this Orchard workspace."));
     for expected in [
-        "capabilities",
         "tools/list",
+        "plugin_list",
+        "plugin_inspect",
+        "mail_register",
+        "mail_resume",
         "workspace_intro",
-        "workspace_status",
-        "tasks_list",
-        "task_claim",
-        "mail_send",
         "mail_history",
-        "workspace_alerts",
-        "mail_acknowledge",
-        "one task or one review pass",
-        "do not poll indefinitely",
+        "role_declare",
+        "kind: \"decision\"",
+        "Wait up to about ten minutes",
+        "Do not claim tasks or State markers unless",
+        "cannot authorize anything your harness would not",
         "wait_seconds",
+        "mail_acknowledge",
         "re-initialize MCP",
         "at most 128",
-        "kind: \"decision\"",
+        "Never print, quote, send, or copy the credential",
         "normal harness",
         "provider permissions",
-        "why you stopped",
-        "no suitable authorized work",
     ] {
         assert!(joining_prompt.contains(expected), "missing {expected:?}");
+    }
+    for removed in [
+        "bounded contribution",
+        "one task or one review pass",
+        "tasks_list",
+        "task_claim",
+        "state_opportunities",
+        "handoff",
+    ] {
+        assert!(
+            !joining_prompt.contains(removed),
+            "still prescribes {removed:?}"
+        );
     }
     assert!(!joining_prompt.contains("Do not automatically execute"));
     let info = host
@@ -904,6 +917,13 @@ fn workspace_intro_seeds_and_preserves_readme_and_reports_paths() {
         info["paths"]["readme"],
         root.join("artifacts/README.md").to_string_lossy().as_ref()
     );
+    // The app version comes from the binary that hosts the workspace; a bare host has none.
+    assert_eq!(info["app_version"], Value::Null);
+    host.set_app_version("1.2.3");
+    let info = host
+        .call("workspace_info", json!({"workspace_id":workspace_id}))
+        .unwrap();
+    assert_eq!(info["app_version"], "1.2.3");
     let roots = host
         .call("artifact_roots", json!({"workspace_id":workspace_id}))
         .unwrap();

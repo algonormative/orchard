@@ -86,6 +86,8 @@ pub(crate) struct HostInner {
     request_locks: Mutex<HashMap<RequestKey, RequestLock>>,
     artifact_lock: Mutex<()>,
     endpoint: Mutex<Option<SocketAddr>>,
+    /// The hosting app's version, set by the binary that embeds the host.
+    app_version: Mutex<Option<String>>,
     owner_token: String,
     owner_token_path: PathBuf,
     browser_sessions: Mutex<HashMap<String, CancellationToken>>,
@@ -239,6 +241,7 @@ impl WorkspaceHost {
                 request_locks: Mutex::new(HashMap::new()),
                 artifact_lock: Mutex::new(()),
                 endpoint: Mutex::new(None),
+                app_version: Mutex::new(None),
                 owner_token,
                 owner_token_path,
                 browser_sessions: Mutex::new(HashMap::new()),
@@ -1409,6 +1412,12 @@ impl WorkspaceHost {
         }))
     }
 
+    /// Records the version of the app hosting these workspaces (the desktop or server
+    /// binary), which `workspace_info` reports so agents and skills can check compatibility.
+    pub fn set_app_version(&self, version: &str) {
+        *self.inner.app_version.lock().unwrap() = Some(version.to_owned());
+    }
+
     fn workspace_info(&self, args: Value) -> Result<Value, String> {
         let workspace_id = workspace_id(&args)?;
         self.active_runtime(&workspace_id)?;
@@ -1423,6 +1432,7 @@ impl WorkspaceHost {
         };
         Ok(json!({
             "workspace": workspace_view(&workspace),
+            "app_version": self.inner.app_version.lock().unwrap().clone(),
             "owner_participant_id": "owner",
             "system_participant_id": "orchard",
             "capabilities": {

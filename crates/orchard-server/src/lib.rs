@@ -18,6 +18,12 @@ pub fn ui_router() -> Router {
         .route("/{*path}", get(asset_or_index))
 }
 
+/// The app version from the build identity embedded in this binary.
+pub fn app_version() -> Option<String> {
+    let identity = serde_json::from_str::<serde_json::Value>(BUILD_INFO_JSON).ok()?;
+    identity["app_version"].as_str().map(str::to_owned)
+}
+
 async fn index() -> Response {
     asset_response("index.html").expect("index.html is checked by build.rs")
 }
@@ -108,6 +114,13 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    #[test]
+    fn app_version_comes_from_the_embedded_build_identity() {
+        let identity: serde_json::Value = serde_json::from_str(BUILD_INFO_JSON).unwrap();
+        assert_eq!(app_version().as_deref(), identity["app_version"].as_str());
+        assert!(app_version().is_some_and(|version| !version.is_empty()));
+    }
 
     #[tokio::test]
     async fn embeds_index_assets_and_spa_fallback() {

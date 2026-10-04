@@ -48,6 +48,9 @@ async fn run(arguments: Vec<OsString>) -> Result<(), String> {
         WorkspaceHost::open_with_port(options.data_dir, br_path, options.port)
             .map_err(|error| format!("cannot open workspace host: {error}"))?,
     );
+    if let Some(version) = orchard_server::app_version() {
+        host.set_app_version(&version);
+    }
     let server = host
         .clone()
         .start_server_with_ui(ui_router())

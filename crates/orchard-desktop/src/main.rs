@@ -118,7 +118,12 @@ fn main() {
                 .unwrap_or_else(|| bundled_br_path(app.handle()));
 
             let host = match WorkspaceHost::open_with_port(data_dir, br_path, port) {
-                Ok(host) => Arc::new(host),
+                Ok(host) => {
+                    if let Some(version) = orchard_server::app_version() {
+                        host.set_app_version(&version);
+                    }
+                    Arc::new(host)
+                }
                 Err(HostError::AlreadyRunning) => {
                     app.dialog()
                         .message("Another Orchard service already owns this data directory. The existing service was left running and no data was changed.")

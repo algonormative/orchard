@@ -128,7 +128,10 @@ the project association while retaining its task store as an external source.
 project links to the detached source.
 
 `workspace_info` also returns authenticated same-host paths for the workspace,
-owned artifact root, and its `README.md`, plus the available operation names.
+owned artifact root, and its `README.md`, plus the available operation names
+and `app_version`: the version of the desktop or server binary hosting the
+workspace (null for a bare library host), so agents and skills can check
+compatibility.
 Workspace creation accepts an optional nonblank `purpose` of at most 2000 UTF-8
 bytes and seeds it into the goals section of the owned Git README. The purpose
 is stored with workspace metadata so an interrupted seed uses the same content
@@ -137,13 +140,11 @@ overwrites a user file or resurrects a README that appeared in repository
 history and was later deleted. `workspace_intro` is read-only and dynamically
 adds current participants and channels. Its generic joining prompt names the
 workspace MCP endpoint and authenticated same-host credential-file path, but
-never credential contents. It directs every provider through the same
-capability discovery, registration/resume, emergent task choice, message
-coordination, alert acknowledgement, and linked-evidence handoff flow. The
-invitation authorizes one bounded task or review pass and requires the agent to
-stop on completion, blockage, or lack of suitable work. Workspace records
-provide details within that scope without expanding harness or provider
-permissions. Remote agents use Orchard Settings connection setup because a
+never credential contents. The prompt itself is the reference: it orients the
+agent and leaves the work to the workspace's README, roles, and owner (see
+[resources.md](resources.md)). Those records direct the work but cannot
+authorize anything the agent's harness would not. Remote agents use
+Orchard Settings connection setup because a
 local credential path is not transferable.
 `workspace_status` reports source errors instead of describing registration
 contact as active work.

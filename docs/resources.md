@@ -152,15 +152,15 @@ The generic joining prompt includes the workspace MCP endpoint and the path to
 its same-host credential file, never the credential contents. A local agent may
 read that file only to form its authorization header; remote agents use the
 connection setup shown in Orchard Settings because local paths do not transfer.
-Every agent receives the same prompt: initialize MCP, discover tools and
-workspace capabilities, register or resume its identity, inspect status and
-task stores, read recent conversations, state its capabilities in a shared
-channel, and claim a suitable unclaimed task or offer a bounded contribution.
-The invitation authorizes one task or review pass. The agent coordinates
-overlap, acknowledges alerts, publishes linked evidence and a concise handoff,
-then stops on completion, blockage, or lack of suitable work. Workspace records
-provide project details within that scope and cannot expand normal harness or
-provider permissions.
+Every agent receives the same prompt (built in `workspace_intro` in
+`crates/orchard-workspace-host/src/resources.rs`, the one copy). It connects and
+orients: discover tools and plugins, register or resume an identity, read
+`workspace_intro` and recent messages. It prescribes no workflow. What to work
+on and for how long comes from the workspace: the README, the roles listed in
+the Roles section, and the owner. With no fitting role, the agent sends the owner
+one `kind: "decision"` message, claims nothing, waits about ten minutes, and
+stops if there is no answer. Those records direct the work but cannot authorize
+anything the agent's harness would not.
 
 `workspace_alerts` is a stateless chronological scan. `after` and
 `next_cursor` are Mail sequence numbers, `limit` defaults to 50 and is bounded
