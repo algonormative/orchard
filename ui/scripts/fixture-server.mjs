@@ -41,7 +41,7 @@ let plugins = [
   { id: "core", version: "0.2.0", name: "Core", description: "Workspace records and resources.", required: true, attached: true },
   { id: "chat", version: "0.2.0", name: "Chat", description: "Conversations for participants.", required: true, attached: true },
   { id: "tasks", version: "0.2.0", name: "Tasks", description: "Workspace task store.", required: false, attached: true },
-  { id: "state", version: "0.2.0", name: "State", description: "Agent-managed state markers.", required: false, attached: true },
+  { id: "state", version: "0.2.0", name: "State", description: "Agent-managed state markers.", required: false, attached: true, integrations: ["tasks"] },
 ];
 let markers = [{ id: "marker-1", title: "Fixture release", definition_id: "release", definition_version: "1", state: "draft", revision: 1, subject: { kind: "task", workspace_id: "workspace-1", store_id: "default", task_id: "fixture-1" }, created_by: "alice" }];
 let stateDefinition = { id: "release", version: "1", label: "Release", states: ["draft", "review", "shipped"], initial: "draft", transitions: [{ from: "draft", to: "review" }, { from: "review", to: "shipped" }] };

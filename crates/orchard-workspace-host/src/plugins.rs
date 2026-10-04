@@ -28,7 +28,11 @@ struct Manifest {
     name: &'static str,
     description: &'static str,
     required: bool,
+    /// Hard dependencies: required plugins only (Core, Chat). See docs/plugins.md.
     dependencies: &'static [&'static str],
+    /// Soft links to optional plugins this one can use when they are attached. Reached only
+    /// through public host calls; a detached integration is reported, never an error.
+    integrations: &'static [&'static str],
     resource_kinds: &'static [&'static str],
     operations: &'static [&'static str],
 }
@@ -41,6 +45,7 @@ const MANIFESTS: &[Manifest] = &[
         description: "Workspace discovery, resources, and owned artifacts.",
         required: true,
         dependencies: &[],
+        integrations: &[],
         resource_kinds: &["file", "url"],
         operations: &[
             "workspace_info",
@@ -64,6 +69,7 @@ const MANIFESTS: &[Manifest] = &[
         description: "Workspace participants and messages.",
         required: true,
         dependencies: &[CORE],
+        integrations: &[],
         resource_kinds: &["channel", "direct", "broadcast", "message", "agent"],
         operations: &[
             "mail_register",
@@ -87,6 +93,7 @@ const MANIFESTS: &[Manifest] = &[
         description: "Bounded Beads task access.",
         required: false,
         dependencies: &[CORE, CHAT],
+        integrations: &[],
         resource_kinds: &["task"],
         operations: &[
             "tasks_list",
@@ -106,6 +113,8 @@ const MANIFESTS: &[Manifest] = &[
         description: "Declarative workspace state markers.",
         required: false,
         dependencies: &[CORE, CHAT],
+        // A task subject is read through `task_show`; subject_task_closed needs Tasks.
+        integrations: &[TASKS],
         resource_kinds: &["state"],
         operations: &[
             "state_define",
@@ -213,7 +222,7 @@ impl WorkspaceHost {
             (true, "ok")
         };
         Ok(
-            json!({"id":item.id,"version":item.version,"name":item.name,"description":item.description,"required":item.required,"attached":attached,"available":available,"health":health,"dependencies":item.dependencies,"resource_kinds":item.resource_kinds,"operations":item.operations}),
+            json!({"id":item.id,"version":item.version,"name":item.name,"description":item.description,"required":item.required,"attached":attached,"available":available,"health":health,"dependencies":item.dependencies,"integrations":item.integrations,"resource_kinds":item.resource_kinds,"operations":item.operations}),
         )
     }
 
@@ -895,7 +904,7 @@ pub(crate) fn unavailable_plugin_catalog(error: &str) -> Value {
         "id":item.id,"version":item.version,"name":item.name,"description":item.description,
         "required":item.required,"attached":item.required,"available":item.required,
         "health":if item.required { "degraded: plugin state unavailable" } else { error },
-        "dependencies":item.dependencies,"resource_kinds":item.resource_kinds,"operations":item.operations
+        "dependencies":item.dependencies,"integrations":item.integrations,"resource_kinds":item.resource_kinds,"operations":item.operations
     })).collect::<Vec<_>>()})
 }
 

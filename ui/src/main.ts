@@ -2084,6 +2084,8 @@ function pluginCatalog() {
     row.append(el("h3", "", title), el("p", "muted", string(item.description) || "No description supplied."));
     const status = item.available === false ? "Unavailable" : item.required === true ? "Required" : item.attached === false ? "Detached" : "Attached";
     row.append(el("p", "task-metadata", `${status} · v${item.version === undefined ? "?" : String(item.version)}`));
+    const integrations = array(item.integrations).map(string).filter(Boolean).map((other) => { const found = catalog.find((entry) => string(entry.id) === other); return `${string(found?.name) || other}${found?.attached === false ? " (detached)" : ""}`; });
+    if (integrations.length) row.append(el("p", "muted", `Works with ${integrations.join(", ")} when attached`));
     if (item.required !== true) {
       const control = button(item.attached === false ? "Attach" : "Detach", async () => {
         control.disabled = true; const operation = item.attached === false ? "plugin_attach" : "plugin_detach";

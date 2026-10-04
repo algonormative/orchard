@@ -15,9 +15,39 @@
 5. Ship State as a declarative finite-state module with immutable definitions,
    optimistic marker transitions, durable receipts, and history.
 
+## Coupling between plugins
+
+Optional plugins stay independent so that attaching, detaching, or adding one
+never forces another. Every bundled plugin follows these rules:
+
+1. **Hard dependencies are required plugins only.** A manifest's
+   `dependencies` may name Core and Chat, never an optional plugin.
+2. **No reaching in.** An optional plugin never reads another plugin's storage
+   or calls its code. It uses the host's public operations or canonical
+   resource references. When the other plugin is detached or unavailable, it
+   reports that as data (State's `task_error` on a task subject), and its own
+   operation still succeeds.
+3. **Shared vocabulary is plain strings.** Capability names and labels such as
+   `role:<id>` are conventions. No plugin validates another's vocabulary.
+4. **Core composes, it does not depend.** A plugin may add a section to
+   `workspace_intro` and the browser snapshot through a generic manifest hook.
+   Core never names a specific optional plugin to do so.
+5. **Soft links are declared.** `integrations` lists the optional plugins this
+   one can use when they are attached. `plugin_list` and `plugin_inspect`
+   return it, and Settings shows it ("Works with Tasks when attached").
+
+State declares `integrations: ["tasks"]`: a task subject is read through
+`task_show`, and the `subject_task_closed` prerequisite needs Tasks. A host
+test checks rules 1 and 5 against the bundled catalog.
+
+Known exceptions, from before these rules, to migrate onto the hook: Core's
+`workspace_info` and `workspace_status` report task stores and counts,
+`workspace_snapshot` carries `task_stores`, the catalog checks the Beads
+backend for Tasks' health, and `plugin_inspect` adds State's handoff example.
+
 ## Contract
 
-`plugin_list` returns `{plugins:[{id,version,name,description,required,attached,operations}]}`.
+`plugin_list` returns `{plugins:[{id,version,name,description,required,attached,dependencies,integrations,operations}]}`.
 `plugin_inspect {plugin_id}` returns
 `{plugin:{id,version,name,description,required,attached,operations:[{name,description,input_schema}]}}`.
 State's inspection also carries `examples:[{name,definition}]`: ready-to-submit

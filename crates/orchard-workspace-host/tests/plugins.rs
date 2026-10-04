@@ -1015,3 +1015,51 @@ fn unsupported_plugin_database_version_is_rejected_without_initializing_schema()
         .unwrap();
     assert_eq!(tables, 0, "a future database version must remain untouched");
 }
+
+#[test]
+fn bundled_plugins_follow_the_coupling_contract() {
+    // docs/plugins.md: hard dependencies name only required plugins; soft integrations
+    // name other optional plugins. No optional plugin can become another's requirement.
+    let temp = TempDir::new().unwrap();
+    let host = new_host(&temp);
+    let (workspace_id, _, _) = workspace(&host, "Coupling");
+    let catalog = call(&host, "plugin_list", &workspace_id, json!({}));
+    let plugins = catalog["plugins"].as_array().unwrap();
+    let required = |id: &str| {
+        plugins
+            .iter()
+            .find(|plugin| plugin["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is not a bundled plugin"))["required"]
+            == true
+    };
+    for plugin in plugins {
+        let id = plugin["id"].as_str().unwrap();
+        for dependency in plugin["dependencies"].as_array().unwrap() {
+            let dependency = dependency.as_str().unwrap();
+            assert!(
+                required(dependency),
+                "{id} hard-depends on optional {dependency}"
+            );
+        }
+        for integration in plugin["integrations"].as_array().unwrap() {
+            let integration = integration.as_str().unwrap();
+            assert_ne!(integration, id, "{id} integrates with itself");
+            assert!(
+                !required(integration),
+                "{id} lists required {integration} as an integration"
+            );
+        }
+    }
+    let state = plugins
+        .iter()
+        .find(|plugin| plugin["id"] == "state")
+        .unwrap();
+    assert_eq!(state["integrations"], json!(["tasks"]));
+    let inspected = call(
+        &host,
+        "plugin_inspect",
+        &workspace_id,
+        json!({"plugin_id":"state"}),
+    );
+    assert_eq!(inspected["plugin"]["integrations"], json!(["tasks"]));
+}
