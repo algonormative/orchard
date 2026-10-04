@@ -2145,7 +2145,7 @@ function roleListElement() {
     const isOpen = needed > 0 && (typeof role.open === "boolean" ? role.open : filled < needed);
     const row = el("article", "role-row"); row.dataset.roleId = id;
     const heading = el("div", "role-heading"); heading.append(el("h3", "", label), el("p", "role-id", `id: ${id}`)); row.append(heading);
-    row.append(el("p", "task-metadata", needed === 0 ? `descriptive · ${filled} of ${needed}` : `${isOpen ? "Open" : "Filled"} ${filled} of ${needed}`));
+    row.append(el("p", "task-metadata", needed === 0 ? `Descriptive · ${filled} declared` : `${isOpen ? "Open" : "Filled"} ${filled} of ${needed}`));
     const declaredBy = roleDeclaredBy(role);
     row.append(el("p", "muted", declaredBy.length ? `Declared by ${declaredBy.map((participantId) => participantLabel(participantName(participantId))).join(", ")}` : "No participants have declared this role."));
     const capabilities = array(role.capabilities).map(string).filter(Boolean);
@@ -2437,7 +2437,8 @@ async function refreshSnapshotNow(topics: string[]) {
     const catalog = document.querySelector(".plugin-catalog"); catalog?.replaceWith(pluginCatalog());
     if (pluginName && action) [...document.querySelectorAll<HTMLElement>(".plugin-row")].find((item) => item.querySelector("h3")?.textContent === pluginName)?.querySelectorAll<HTMLButtonElement>("button").forEach((button) => { if (button.textContent === action) button.focus(); });
   }
-  if ((topics.includes("roles") || topics.includes("plugins")) && state.screen === "settings") patchRolesSettings();
+  // Registration and leaving (mail) change who counts toward a role, too.
+  if ((topics.includes("roles") || topics.includes("plugins") || topics.includes("mail")) && state.screen === "settings") patchRolesSettings();
   if (topics.includes("roles") || topics.includes("plugins") || topics.includes("mail")) {
     if (state.conversationKind === "direct" && state.selectedConversation && state.selectedConversation !== "__all_direct__") patchAgentContext();
     if (state.activeHref === collectionTab("agents", workspaceId).href && state.screen === "workspace" && state.detailView !== "form") renderAgentCollection();

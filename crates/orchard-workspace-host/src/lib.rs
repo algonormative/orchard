@@ -2303,6 +2303,7 @@ fn mutation_topics(operation: &str) -> Option<&'static [&'static str]> {
         }
         "plugin_attach" | "plugin_detach" => Some(&["plugins"]),
         "state_define" | "state_create" | "state_advance" => Some(&["state"]),
+        "role_declare" | "role_put" | "role_delete" => Some(&["roles"]),
         "repository_attach" | "repository_detach" | "task_store_attach" | "task_store_detach" => {
             Some(&["repositories", "tasks", "artifacts"])
         }
@@ -2718,4 +2719,23 @@ pub(crate) fn call_from_mcp(
         Value::String(workspace_id.to_owned()),
     );
     host.call(operation, args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mutation_topics;
+
+    #[test]
+    fn role_writes_notify_the_browser() {
+        // Owner writes and agent declarations (also when reached through plugin_call, which
+        // re-enters `call`) must refresh an open Settings page.
+        for operation in ["role_declare", "role_put", "role_delete"] {
+            assert_eq!(
+                mutation_topics(operation),
+                Some(&["roles"][..]),
+                "{operation}"
+            );
+        }
+        assert_eq!(mutation_topics("roles_list"), None);
+    }
 }

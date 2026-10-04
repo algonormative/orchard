@@ -581,7 +581,7 @@ test("Roles settings create, fill, edit, delete, and detach roles", async ({ pag
   await editor.getByLabel("Needed", { exact: true }).fill("0");
   await editor.getByLabel("Instructions", { exact: true }).fill("Observe without a staffing requirement.");
   await editor.getByRole("button", { name: "Save role", exact: true }).click();
-  await expect(roles.locator('.role-row[data-role-id="advisory-observer"]')).toContainText("descriptive");
+  await expect(roles.locator('.role-row[data-role-id="advisory-observer"]')).toContainText("Descriptive · 0 declared");
   await page.locator(".plugin-row", { hasText: "Roles" }).getByRole("button", { name: "Detach", exact: true }).click();
   await expect(roles).toHaveCount(0);
 });
