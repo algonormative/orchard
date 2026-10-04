@@ -708,6 +708,275 @@ fn detach_gates_new_task_and_state_writes_but_keeps_retained_reads() {
 }
 
 #[test]
+fn detaching_optional_plugins_keeps_other_plugin_reads_and_sections_available() {
+    let temp = TempDir::new().unwrap();
+    let host = new_host(&temp);
+    let (workspace_id, store_id, _) = workspace(&host, "Detach matrix");
+    register(&host, &workspace_id, "alice");
+    let task = call(
+        &host,
+        "task_create",
+        &workspace_id,
+        json!({"store_id":store_id,"request_id":"detach-matrix-task","title":"State subject"}),
+    );
+    let task_id = task["task"]["id"].as_str().unwrap().to_owned();
+    attach_state(&host, &workspace_id);
+    call(
+        &host,
+        "state_define",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"detach-matrix-definition","definition":definition("detach-matrix", 1)}),
+    );
+    call(
+        &host,
+        "state_create",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"detach-matrix-marker","id":"detach-matrix-marker","title":"Task state","definition_id":"detach-matrix","definition_version":1,"subject":{"kind":"task","store_id":store_id,"task_id":task_id}}),
+    );
+
+    let attached_intro = call(&host, "workspace_intro", &workspace_id, json!({}));
+    assert!(
+        attached_intro["introduction"]
+            .as_str()
+            .unwrap()
+            .contains("## State"),
+        "attached State contributes an introduction section"
+    );
+    let attached_snapshot = call(&host, "workspace_snapshot", &workspace_id, json!({}));
+    assert!(
+        attached_snapshot["plugin_sections"].is_object(),
+        "snapshots always expose a plugin_sections object"
+    );
+
+    let optional_plugins = call(&host, "plugin_list", &workspace_id, json!({}))["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|plugin| plugin["required"] == false)
+        .map(|plugin| plugin["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    for detached_id in optional_plugins {
+        call(
+            &host,
+            "plugin_detach",
+            &workspace_id,
+            json!({"plugin_id":detached_id,"request_id":format!("detach-matrix-{detached_id}")}),
+        );
+        let plugins = call(&host, "plugin_list", &workspace_id, json!({}))["plugins"]
+            .as_array()
+            .unwrap()
+            .clone();
+        for plugin in plugins.iter().filter(|plugin| plugin["attached"] == true) {
+            let plugin_id = plugin["id"].as_str().unwrap();
+            let operations: Vec<(&str, Value)> = match plugin_id {
+                "core" => vec![
+                    ("workspace_info", json!({})),
+                    ("workspace_intro", json!({})),
+                    ("workspace_status", json!({})),
+                ],
+                "chat" => vec![
+                    ("mail_history", json!({"channel_id":"general"})),
+                    ("workspace_alerts", json!({"participant_id":"alice"})),
+                ],
+                "tasks" => vec![
+                    ("tasks_list", json!({"store_id":store_id})),
+                    ("task_show", json!({"store_id":store_id,"task_id":task_id})),
+                ],
+                "state" => vec![
+                    ("state_definitions", json!({})),
+                    ("state_list", json!({})),
+                    ("state_get", json!({"id":"detach-matrix-marker"})),
+                    ("state_opportunities", json!({"capability":"writer"})),
+                ],
+                other => panic!("unexpected attached plugin {other}"),
+            };
+            for (operation, arguments) in operations {
+                host.call(
+                    "plugin_call",
+                    json!({"workspace_id":workspace_id,"plugin_id":plugin_id,"operation":operation,"arguments":arguments}),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{plugin_id}/{operation} failed while {detached_id} was detached: {error}")
+                });
+            }
+        }
+
+        let intro = call(&host, "workspace_intro", &workspace_id, json!({}));
+        let detached_name = plugins
+            .iter()
+            .find(|plugin| plugin["id"] == detached_id)
+            .unwrap()["name"]
+            .as_str()
+            .unwrap();
+        assert!(
+            !intro["introduction"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("## {detached_name}")),
+            "detached {detached_id} has no introduction section"
+        );
+        if detached_id == "tasks" {
+            assert!(
+                intro["introduction"].as_str().unwrap().contains("## State"),
+                "State remains available when Tasks is detached"
+            );
+        }
+        let snapshot = call(&host, "workspace_snapshot", &workspace_id, json!({}));
+        assert!(snapshot["plugin_sections"].is_object());
+        assert!(
+            snapshot["plugin_sections"].get(&detached_id).is_none(),
+            "detached {detached_id} has no snapshot section"
+        );
+        call(
+            &host,
+            "plugin_attach",
+            &workspace_id,
+            json!({"plugin_id":detached_id,"request_id":format!("reattach-matrix-{detached_id}")}),
+        );
+        if detached_id == "state" {
+            assert!(
+                call(&host, "workspace_intro", &workspace_id, json!({}))["introduction"]
+                    .as_str()
+                    .unwrap()
+                    .contains("## State"),
+                "State contributes its section again after reattachment"
+            );
+        }
+    }
+}
+
+#[test]
+fn state_intro_counts_only_nonterminal_markers() {
+    let temp = TempDir::new().unwrap();
+    let host = new_host(&temp);
+    let (workspace_id, store_id, _) = workspace(&host, "State intro count");
+    register(&host, &workspace_id, "alice");
+    let task = call(
+        &host,
+        "task_create",
+        &workspace_id,
+        json!({"store_id":store_id,"request_id":"state-intro-task","title":"State subject"}),
+    );
+    attach_state(&host, &workspace_id);
+    call(
+        &host,
+        "state_define",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"state-intro-definition","definition":definition("state-intro", 1)}),
+    );
+    let empty_intro = call(&host, "workspace_intro", &workspace_id, json!({}))["introduction"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        empty_intro.contains("Markers in nonterminal states: 0."),
+        "the State section reports zero before markers exist"
+    );
+    assert!(empty_intro.contains("state_opportunities"));
+    assert!(empty_intro.contains("capability"));
+    assert_eq!(
+        call(&host, "workspace_intro", &workspace_id, json!({}))["introduction"]
+            .as_str()
+            .unwrap(),
+        empty_intro,
+        "the State section is deterministic"
+    );
+    call(
+        &host,
+        "state_create",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"state-intro-open","id":"state-intro-open","title":"Open","definition_id":"state-intro","definition_version":1,"subject":{"kind":"task","store_id":store_id,"task_id":task["task"]["id"]}}),
+    );
+    call(
+        &host,
+        "state_create",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"state-intro-terminal","id":"state-intro-terminal","title":"Terminal","definition_id":"state-intro","definition_version":1,"subject":{"kind":"channel","id":"general"}}),
+    );
+    for (request_id, expected_revision, to) in [
+        ("state-intro-terminal-review", 1, "review"),
+        ("state-intro-terminal-done", 2, "done"),
+    ] {
+        call(
+            &host,
+            "state_advance",
+            &workspace_id,
+            json!({"participant_id":"alice","request_id":request_id,"id":"state-intro-terminal","expected_revision":expected_revision,"to":to}),
+        );
+    }
+    assert!(
+        call(&host, "workspace_intro", &workspace_id, json!({}))["introduction"]
+            .as_str()
+            .unwrap()
+            .contains("Markers in nonterminal states: 1."),
+        "terminal markers are excluded from the deterministic State count"
+    );
+    for (request_id, expected_revision, to) in [
+        ("state-intro-open-review", 1, "review"),
+        ("state-intro-open-done", 2, "done"),
+    ] {
+        call(
+            &host,
+            "state_advance",
+            &workspace_id,
+            json!({"participant_id":"alice","request_id":request_id,"id":"state-intro-open","expected_revision":expected_revision,"to":to}),
+        );
+    }
+    assert!(
+        call(&host, "workspace_intro", &workspace_id, json!({}))["introduction"]
+            .as_str()
+            .unwrap()
+            .contains("Markers in nonterminal states: 0."),
+        "the State section reports zero when every marker is terminal"
+    );
+}
+
+#[test]
+fn state_intro_reports_an_unavailable_section_when_its_hook_fails() {
+    let temp = TempDir::new().unwrap();
+    let host = new_host(&temp);
+    let (workspace_id, _, root) = workspace(&host, "State intro failure");
+    register(&host, &workspace_id, "alice");
+    attach_state(&host, &workspace_id);
+    call(
+        &host,
+        "state_define",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"state-intro-failure-definition","definition":definition("state-intro-failure", 1)}),
+    );
+    call(
+        &host,
+        "state_create",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"state-intro-failure-marker","id":"state-intro-failure-marker","title":"Broken","definition_id":"state-intro-failure","definition_version":1,"subject":{"kind":"channel","id":"general"}}),
+    );
+    let connection = Connection::open(root.join(".orchard/plugins.sqlite")).unwrap();
+    connection
+        .execute(
+            "UPDATE state_marker SET body = ?1 WHERE id = ?2",
+            ["not json", "state-intro-failure-marker"],
+        )
+        .unwrap();
+    drop(connection);
+
+    let introduction = call(&host, "workspace_intro", &workspace_id, json!({}))["introduction"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(introduction.contains("## State"));
+    assert!(
+        introduction.contains("unavailable"),
+        "a failing plugin hook renders an unavailable note instead of failing workspace_intro"
+    );
+    let (_, state_section) = introduction.split_once("\n\n## State\n").unwrap();
+    assert_eq!(
+        state_section.lines().count(),
+        1,
+        "an unavailable plugin section is one line"
+    );
+}
+
+#[test]
 fn state_enforces_pinned_subjects_immutable_definitions_receipts_and_cas() {
     let temp = TempDir::new().unwrap();
     let data = temp.path().join("data");

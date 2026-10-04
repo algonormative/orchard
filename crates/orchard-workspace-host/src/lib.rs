@@ -1363,12 +1363,26 @@ impl WorkspaceHost {
                 plugins::unavailable_plugin_catalog("plugin state unavailable")["plugins"].clone()
             }
         };
+        let mut plugin_sections = Map::new();
+        for section in self.snapshot_plugin_sections(&workspace_id) {
+            match section.result {
+                Ok(Some(content)) => {
+                    plugin_sections.insert(section.id.to_owned(), content);
+                }
+                Ok(None) => {}
+                Err(error) => errors.push(json!({
+                    "source": format!("plugin:{}", section.id),
+                    "error": error
+                })),
+            }
+        }
         Ok(json!({
             "workspace": workspace_view(&workspace),
             "plugins": plugins,
             "mail": mail_snapshot,
             "repositories": repositories,
             "task_stores": task_stores,
+            "plugin_sections": plugin_sections,
             "errors": errors
         }))
     }

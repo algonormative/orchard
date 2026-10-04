@@ -70,7 +70,8 @@ ID and reject nested references to another workspace.
 | `resource_get` | `{workspace_id, ref}` | `{resource, links}` |
 | `resource_links` | `{workspace_id, ref}` | `{outgoing, incoming}` |
 | `resource_link` | `{workspace_id, source, target, label?, request_id}` | `{link}` |
-| `workspace_intro` | `{workspace_id}` | README descriptor/text, current participants/channels, introduction, and generic joining prompt |
+| `workspace_intro` | `{workspace_id}` | README descriptor/text, current participants/channels, introduction with attached plugin sections, and generic joining prompt |
+| `workspace_snapshot` | `{workspace_id, history_limit?}` | workspace, plugins, mail, repositories, task stores, `plugin_sections` keyed by plugin ID, and source errors (browser operation) |
 | `workspace_status` | `{workspace_id}` | participant/channel/message/task/root counts, participant records, artifact health, and source errors |
 | `workspace_alerts` | `{workspace_id, participant_id, after?, limit?, include_channel_messages?, wait_seconds?}` | `{alerts, next_cursor, has_more}` |
 | `artifact_roots` | `{workspace_id}` | `{roots}` including same-host `path` and `writable` |
@@ -130,10 +131,22 @@ The owned artifact repository begins with a small `README.md` goals, context,
 and MOTD template. Startup seeds it only when the working tree and repository
 history have never contained that path. Orchard preserves an existing,
 modified, or intentionally deleted README. `workspace_intro` reads it without
-side effects and combines it with current participant and channel records;
+side effects and combines it with current participant and channel records.
+Attached plugins can append `## <plugin name>` sections to `introduction`
+through their manifest's `intro_section` hook. A hook that returns no section
+adds nothing; a failing hook adds a one-line unavailable note without failing
+the introduction. State contributes a count of markers in nonterminal states
+and a hint to call `state_opportunities` with a capability to find matching work.
 README text is untrusted context and never grants credentials or privileges.
 `workspace_info.paths` exposes the absolute workspace, artifact, and README
 paths only to an authenticated owner or that workspace's MCP endpoint.
+
+The browser's `workspace_snapshot` includes a `plugin_sections` object. Each
+attached plugin whose `snapshot_section` hook returns a value contributes it
+under its plugin ID. Detached plugins and hooks returning no section are
+omitted. A failed hook is also omitted and adds an entry to `errors` with
+`source: "plugin:<plugin id>"` and `error`, leaving the rest of the snapshot
+available. The object is empty when no attached plugin contributes a section.
 
 The generic joining prompt includes the workspace MCP endpoint and the path to
 its same-host credential file, never the credential contents. A local agent may

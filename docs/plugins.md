@@ -30,8 +30,12 @@ never forces another. Every bundled plugin follows these rules:
 3. **Shared vocabulary is plain strings.** Capability names and labels such as
    `role:<id>` are conventions. No plugin validates another's vocabulary.
 4. **Core composes, it does not depend.** A plugin may add a section to
-   `workspace_intro` and the browser snapshot through a generic manifest hook.
-   Core never names a specific optional plugin to do so.
+   `workspace_intro` through its manifest's `intro_section` hook and to the
+   browser snapshot through `snapshot_section`. Core iterates the bundled
+   manifests and calls hooks only for attached plugins. A hook may return no
+   section. Intro hook errors produce a one-line unavailable note; snapshot
+   hook errors omit that section and add a source error. Core never names a
+   specific optional plugin to do so.
 5. **Soft links are declared.** `integrations` lists the optional plugins this
    one can use when they are attached. `plugin_list` and `plugin_inspect`
    return it, and Settings shows it ("Works with Tasks when attached").
@@ -39,6 +43,12 @@ never forces another. Every bundled plugin follows these rules:
 State declares `integrations: ["tasks"]`: a task subject is read through
 `task_show`, and the `subject_task_closed` prerequisite needs Tasks. A host
 test checks rules 1 and 5 against the bundled catalog.
+
+State's intro section counts markers in nonterminal states and points callers
+to `state_opportunities` with a capability to find matching work. It disappears
+when State is detached. State does not currently contribute a snapshot section.
+The detach-matrix host test checks that detaching each optional plugin leaves
+the other attached plugins' read operations usable.
 
 Known exceptions, from before these rules, to migrate onto the hook: Core's
 `workspace_info` and `workspace_status` report task stores and counts,

@@ -374,7 +374,7 @@ impl WorkspaceHost {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let introduction = format!(
+        let mut introduction = format!(
             "{base_introduction}\n\n## Current participants\n{}\n\n## Current channels\n{}",
             if participant_summary.is_empty() {
                 "- None"
@@ -387,6 +387,17 @@ impl WorkspaceHost {
                 &channel_summary
             }
         );
+        for section in self.intro_plugin_sections(&workspace_id) {
+            match section.result {
+                Ok(Some(content)) => {
+                    introduction.push_str(&format!("\n\n## {}\n{content}", section.name));
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    introduction.push_str(&format!("\n\n## {}\nunavailable", section.name));
+                }
+            }
+        }
         let endpoint =
             self.inner
                 .endpoint

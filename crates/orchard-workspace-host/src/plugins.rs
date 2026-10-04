@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +21,8 @@ const MAX_CAPABILITIES: usize = 32;
 const HANDOFF_EXAMPLE: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/handoff.json"));
 
+type SectionHook<T> = fn(&WorkspaceHost, &str) -> Result<Option<T>, String>;
+
 #[derive(Clone, Copy)]
 struct Manifest {
     id: &'static str,
@@ -35,6 +37,14 @@ struct Manifest {
     integrations: &'static [&'static str],
     resource_kinds: &'static [&'static str],
     operations: &'static [&'static str],
+    intro_section: Option<SectionHook<String>>,
+    snapshot_section: Option<SectionHook<Value>>,
+}
+
+pub(crate) struct PluginSection<T> {
+    pub(crate) id: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) result: Result<Option<T>, String>,
 }
 
 const MANIFESTS: &[Manifest] = &[
@@ -61,6 +71,8 @@ const MANIFESTS: &[Manifest] = &[
             "artifact_delete",
             "artifact_commit",
         ],
+        intro_section: None,
+        snapshot_section: None,
     },
     Manifest {
         id: CHAT,
@@ -85,6 +97,8 @@ const MANIFESTS: &[Manifest] = &[
             "mail_search",
             "workspace_alerts",
         ],
+        intro_section: None,
+        snapshot_section: None,
     },
     Manifest {
         id: TASKS,
@@ -105,6 +119,8 @@ const MANIFESTS: &[Manifest] = &[
             "task_close",
             "task_dependencies",
         ],
+        intro_section: None,
+        snapshot_section: None,
     },
     Manifest {
         id: STATE,
@@ -125,6 +141,8 @@ const MANIFESTS: &[Manifest] = &[
             "state_opportunities",
             "state_advance",
         ],
+        intro_section: Some(state_intro_section),
+        snapshot_section: None,
     },
 ];
 
@@ -135,7 +153,117 @@ fn manifest(id: &str) -> Result<&'static Manifest, String> {
         .ok_or_else(|| format!("unknown bundled plugin {id:?}"))
 }
 
+fn compose_plugin_sections<T>(
+    manifests: &[Manifest],
+    mut attached: impl FnMut(&Manifest) -> Result<bool, String>,
+    mut section: impl FnMut(&Manifest) -> Option<SectionHook<T>>,
+    mut run: impl FnMut(&Manifest, SectionHook<T>) -> Result<Option<T>, String>,
+) -> Vec<PluginSection<T>> {
+    manifests
+        .iter()
+        .filter_map(|item| {
+            let hook = section(item)?;
+            Some(match attached(item) {
+                Ok(true) => PluginSection {
+                    id: item.id,
+                    name: item.name,
+                    result: run(item, hook),
+                },
+                Err(error) => PluginSection {
+                    id: item.id,
+                    name: item.name,
+                    result: Err(error),
+                },
+                Ok(false) => return None,
+            })
+        })
+        .collect()
+}
+
+fn state_intro_section(host: &WorkspaceHost, workspace_id: &str) -> Result<Option<String>, String> {
+    let mut db = host.plugin_db(workspace_id)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(|error| error.to_string())?;
+    let mut definitions = HashMap::new();
+    let mut definition_statement = tx
+        .prepare("SELECT id, version, body FROM state_definition")
+        .map_err(|error| error.to_string())?;
+    let definition_rows = definition_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    for definition in definition_rows {
+        let (id, version, body) = definition.map_err(|error| error.to_string())?;
+        definitions.insert(
+            (id, version),
+            serde_json::from_str::<Value>(&body).map_err(|error| error.to_string())?,
+        );
+    }
+    drop(definition_statement);
+
+    let mut marker_statement = tx
+        .prepare("SELECT body FROM state_marker")
+        .map_err(|error| error.to_string())?;
+    let marker_rows = marker_statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    let mut count = 0;
+    for marker in marker_rows {
+        let marker: Value = serde_json::from_str(&marker.map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        let definition_id = marker["definition_id"]
+            .as_str()
+            .ok_or_else(|| "invalid stored state marker definition_id".to_owned())?;
+        let definition_version = marker["definition_version"]
+            .as_i64()
+            .ok_or_else(|| "invalid stored state marker definition_version".to_owned())?;
+        let definition = definitions
+            .get(&(definition_id.to_owned(), definition_version))
+            .ok_or_else(|| "state marker definition is missing".to_owned())?;
+        if definition["transitions"]
+            .as_array()
+            .is_some_and(|transitions| {
+                transitions
+                    .iter()
+                    .any(|transition| transition["from"] == marker["state"])
+            })
+        {
+            count += 1;
+        }
+    }
+    drop(marker_statement);
+    tx.commit().map_err(|error| error.to_string())?;
+
+    Ok(Some(format!(
+        "Markers in nonterminal states: {count}. Call `state_opportunities` with a `capability` to find matching work."
+    )))
+}
+
 impl WorkspaceHost {
+    pub(crate) fn intro_plugin_sections(&self, workspace_id: &str) -> Vec<PluginSection<String>> {
+        compose_plugin_sections(
+            MANIFESTS,
+            |item| self.attached(workspace_id, item.id),
+            |item| item.intro_section,
+            |_, hook| hook(self, workspace_id),
+        )
+    }
+
+    pub(crate) fn snapshot_plugin_sections(&self, workspace_id: &str) -> Vec<PluginSection<Value>> {
+        compose_plugin_sections(
+            MANIFESTS,
+            |item| self.attached(workspace_id, item.id),
+            |item| item.snapshot_section,
+            |_, hook| hook(self, workspace_id),
+        )
+    }
+
     fn plugin_db(&self, workspace_id: &str) -> Result<Connection, String> {
         self.active_runtime(workspace_id)?;
         let workspace = self.workspace_config(workspace_id)?;
@@ -1251,4 +1379,75 @@ fn now_timestamp() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    fn snapshot_hook(_: &WorkspaceHost, _: &str) -> Result<Option<Value>, String> {
+        unreachable!("synthetic hooks are run through the composition test callback")
+    }
+
+    fn manifest_with_snapshot(id: &'static str) -> Manifest {
+        Manifest {
+            id,
+            version: 1,
+            name: id,
+            description: "synthetic",
+            required: false,
+            dependencies: &[],
+            integrations: &[],
+            resource_kinds: &[],
+            operations: &[],
+            intro_section: None,
+            snapshot_section: Some(snapshot_hook),
+        }
+    }
+
+    #[test]
+    fn snapshot_sections_include_some_omit_none_and_skip_detached_hooks() {
+        let manifests = [
+            manifest_with_snapshot("some"),
+            manifest_with_snapshot("none"),
+            manifest_with_snapshot("error"),
+            manifest_with_snapshot("detached"),
+            manifest_with_snapshot("attachment-error"),
+        ];
+        let invoked = RefCell::new(Vec::new());
+        let sections = compose_plugin_sections(
+            &manifests,
+            |item| match item.id {
+                "detached" => Ok(false),
+                "attachment-error" => Err("attachment unavailable".to_owned()),
+                _ => Ok(true),
+            },
+            |item| item.snapshot_section,
+            |item, _| {
+                invoked.borrow_mut().push(item.id);
+                match item.id {
+                    "some" => Ok(Some(json!({"markers": 1}))),
+                    "none" => Ok(None),
+                    "error" => Err("hook unavailable".to_owned()),
+                    other => panic!("unexpected hook invocation for {other}"),
+                }
+            },
+        );
+
+        assert_eq!(*invoked.borrow(), vec!["some", "none", "error"]);
+        assert_eq!(sections.len(), 4);
+        assert_eq!(sections[0].id, "some");
+        assert_eq!(
+            sections[0].result.as_ref().unwrap().as_ref(),
+            Some(&json!({"markers": 1}))
+        );
+        assert_eq!(sections[1].id, "none");
+        assert_eq!(sections[1].result.as_ref().unwrap(), &None);
+        assert_eq!(sections[2].result.as_ref().unwrap_err(), "hook unavailable");
+        assert_eq!(
+            sections[3].result.as_ref().unwrap_err(),
+            "attachment unavailable"
+        );
+    }
 }
