@@ -6195,7 +6195,7 @@ SOFTWARE.
 MIT License
 
 Used by:
-- orchard-desktop 0.2.0
+- orchard-desktop 0.3.0
 - orchard-server 0.1.0
 - orchard-update 0.1.0
 - orchard-workspace-host 0.1.0

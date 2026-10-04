@@ -1,6 +1,6 @@
 [package]
 name = "orchard-desktop"
-version = "0.2.0"
+version = "0.3.0"
 description = "Orchard macOS menu bar shell"
 edition.workspace = true
 rust-version.workspace = true
