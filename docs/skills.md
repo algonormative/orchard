@@ -16,7 +16,7 @@ Everything else ships with Orchard itself, so it matches the running version:
 ## Install
 
 ```bash
-npx skills add algonormative/orchard#skills-v0.2.0 -g -a claude-code codex
+npx skills add algonormative/orchard#skills-v0.2.1 -g -a claude-code codex
 ```
 
 `-g` installs for your user rather than one project; `-a` picks agents. The CLI records the tag in its
