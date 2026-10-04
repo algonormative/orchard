@@ -2076,7 +2076,7 @@ function openWorkspaceFromSettings() {
 }
 
 function pluginCatalog() {
-  const section = el("section", "settings-section plugin-catalog"); section.append(el("h2", "", "Bundled plugins"), el("p", "muted", "Core and Chat are required. Tasks and State can be attached to this workspace; detaching preserves their data for read-only views."));
+  const section = el("section", "settings-section plugin-catalog"); section.append(el("h2", "", "Bundled plugins"), el("p", "muted", "Core and Chat are required. Optional plugins can be attached to this workspace; detaching preserves their data for read-only views."));
   const catalog = plugins();
   if (!catalog.length) { section.append(el("p", "muted", "Plugin status is loading…")); return section; }
   for (const item of catalog) {
@@ -2093,7 +2093,8 @@ function pluginCatalog() {
         catch (error) { notice(message(error), "error"); }
         finally { if (document.contains(control)) control.disabled = false; }
       }, "subtle"); control.disabled = item.available === false; row.append(control);
-      if (item.attached === false && item.available !== false) row.append(button("View retained data", () => { renderWorkspace(); focusView("workspace"); if (id === "tasks") openTasks(); else void activateTab(collectionTab("states", state.workspace!.id)); }, "subtle"));
+      // Only plugins with a browser view of their data offer it.
+      if (item.attached === false && item.available !== false && (id === "tasks" || id === "state")) row.append(button("View retained data", () => { renderWorkspace(); focusView("workspace"); if (id === "tasks") openTasks(); else void activateTab(collectionTab("states", state.workspace!.id)); }, "subtle"));
     }
     section.append(row);
   }
