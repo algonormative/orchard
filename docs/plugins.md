@@ -74,10 +74,11 @@ nested or top-level foreign workspace ID. It cannot dispatch host/admin tools
 or recursively call the gateway. Inspection contains schemas, so clients do
 not need to refresh their MCP tool list after an attachment change.
 
-Core and Chat are required. Tasks is attached by default for new and migrated
-v0.2 workspaces. State starts detached. Detachment is a capability toggle, not
-task-store detachment: files, Beads metadata, State data, and retained reads
-survive it.
+Core and Chat are required. Tasks and Roles are attached by default: a
+workspace with no recorded attachment starts attached, while an explicit detach
+persists. State starts detached. Detachment is a capability toggle, not
+task-store detachment: files, Beads metadata, State and Roles data, and
+retained reads survive it.
 
 `plugin_attach` on Core or Chat is an idempotent required-capability no-op;
 `plugin_detach` rejects them. Tasks admission is intentionally simple: a task
@@ -128,6 +129,36 @@ advance receipt replays before participant, attachment, task, or evidence
 checks, including after a task later reopens. Fresh advances serialize by
 workspace/request ID, perform bounded external evidence reads outside the State
 SQLite transaction, then recheck State revision in the mutation transaction.
+
+## Roles
+
+Roles is an optional, default-attached advisory plugin. An owner defines roles
+with a `needed` count; registered agents self-declare the roles and skills they
+say they have. These declarations are informational only: Roles does not
+enforce assignments, capabilities, models, or tiers.
+
+The workspace-local `plugins.sqlite` stores owner role records in `role` and
+append-only agent declarations in `role_declaration`. A declaration may name an
+undefined role, which is retained but contributes to no role's count; only the
+participant's latest declaration is current.
+
+The manifest exposes `roles_list {}` and `role_declare {participant_id,
+request_id, roles, skills, model?, tier?}` through `plugin_call`. `roles_list`
+returns defined roles with their current coverage and the latest declaration
+for each currently registered participant; it remains readable while Roles is
+detached. `role_declare` requires a registered non-`orchard` participant and
+an attached Roles plugin. Its request receipt makes an exact retry idempotent.
+
+Host `call` (including the authenticated browser `/api/call`) also accepts
+owner-only `role_put {request_id, role}` and `role_delete {request_id, role_id}`
+to define, replace, or delete a role. They are intentionally not manifest
+operations or MCP allowlist entries: `plugin_call` and the workspace MCP
+endpoint do not expose them. Deleting a role leaves declarations untouched.
+
+For a defined role `R`, `filled(R)` is the number of Chat
+`mail_participants` with `registered == true`, excluding `orchard`, whose latest
+declaration contains `R.id`. `open(R)` is `filled(R) < R.needed`; a role with
+`needed: 0` is never open.
 
 ## Example
 

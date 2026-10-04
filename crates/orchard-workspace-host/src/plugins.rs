@@ -14,10 +14,13 @@ const CORE: &str = "core";
 const CHAT: &str = "chat";
 const TASKS: &str = "tasks";
 const STATE: &str = "state";
+const ROLES: &str = "roles";
 const MAX_STATES: usize = 64;
 const MAX_TRANSITIONS: usize = 256;
 const MAX_PREREQUISITES: usize = 32;
 const MAX_CAPABILITIES: usize = 32;
+const MAX_DECLARED_ROLES: usize = 16;
+const MAX_DECLARED_SKILLS: usize = 32;
 const HANDOFF_EXAMPLE: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/handoff.json"));
 
@@ -144,6 +147,19 @@ const MANIFESTS: &[Manifest] = &[
         intro_section: Some(state_intro_section),
         snapshot_section: None,
     },
+    Manifest {
+        id: ROLES,
+        version: 1,
+        name: "Roles",
+        description: "Owner-defined roles and agents' self-declared roles and skills (advisory).",
+        required: false,
+        dependencies: &[CORE, CHAT],
+        integrations: &[],
+        resource_kinds: &[],
+        operations: &["roles_list", "role_declare"],
+        intro_section: Some(roles_intro_section),
+        snapshot_section: Some(roles_snapshot_section),
+    },
 ];
 
 fn manifest(id: &str) -> Result<&'static Manifest, String> {
@@ -245,6 +261,63 @@ fn state_intro_section(host: &WorkspaceHost, workspace_id: &str) -> Result<Optio
     )))
 }
 
+fn roles_intro_section(host: &WorkspaceHost, workspace_id: &str) -> Result<Option<String>, String> {
+    let listing = host.roles_list(json!({"workspace_id":workspace_id}))?;
+    let roles = listing["roles"]
+        .as_array()
+        .ok_or_else(|| "invalid roles listing".to_owned())?;
+    if roles.is_empty() {
+        return Ok(Some(
+            "No roles are defined yet. Declare your skills with roles/role_declare; the owner may define roles."
+                .to_owned(),
+        ));
+    }
+    let mut open = Vec::new();
+    let mut filled = Vec::new();
+    for role in roles {
+        let id = role["id"]
+            .as_str()
+            .ok_or_else(|| "invalid stored role id".to_owned())?;
+        let label = role["label"]
+            .as_str()
+            .ok_or_else(|| "invalid stored role label".to_owned())?;
+        let count = role["filled"]
+            .as_i64()
+            .ok_or_else(|| "invalid stored role filled count".to_owned())?;
+        let needed = role["needed"]
+            .as_i64()
+            .ok_or_else(|| "invalid stored role needed count".to_owned())?;
+        if role["open"] == true {
+            open.push(format!("{label} (`{id}`, {count} of {needed})"));
+        }
+        if count > 0 {
+            filled.push(format!("{label} (`{id}`)"));
+        }
+    }
+    let mut lines = vec!["Roles are advisory and self-declared.".to_owned()];
+    lines.push(if open.is_empty() {
+        "Open: none".to_owned()
+    } else {
+        format!("Open: {}", open.join(", "))
+    });
+    if !filled.is_empty() {
+        lines.push(format!("Filled: {}", filled.join(", ")));
+    }
+    lines.push("Declare what you can do with `plugin_call` → roles/role_declare; read role instructions with roles/roles_list.".to_owned());
+    Ok(Some(lines.join("\n")))
+}
+
+fn roles_snapshot_section(
+    host: &WorkspaceHost,
+    workspace_id: &str,
+) -> Result<Option<Value>, String> {
+    let listing = host.roles_list(json!({"workspace_id":workspace_id}))?;
+    Ok(Some(json!({
+        "roles": listing["roles"],
+        "declarations": listing["declarations"]
+    })))
+}
+
 impl WorkspaceHost {
     pub(crate) fn intro_plugin_sections(&self, workspace_id: &str) -> Vec<PluginSection<String>> {
         compose_plugin_sections(
@@ -309,7 +382,9 @@ impl WorkspaceHost {
             CREATE TABLE IF NOT EXISTS plugin_receipt (plugin_id TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, outcome TEXT NOT NULL, PRIMARY KEY(plugin_id, request_id));
             CREATE TABLE IF NOT EXISTS state_definition (id TEXT NOT NULL, version INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(id, version));
             CREATE TABLE IF NOT EXISTS state_marker (id TEXT PRIMARY KEY, body TEXT NOT NULL, revision INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS state_history (marker_id TEXT NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(marker_id, revision));")
+            CREATE TABLE IF NOT EXISTS state_history (marker_id TEXT NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(marker_id, revision));
+            CREATE TABLE IF NOT EXISTS role (id TEXT PRIMARY KEY, body TEXT NOT NULL, revision INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS role_declaration (participant_id TEXT NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(participant_id, revision));")
             .map_err(|e| format!("could not initialize plugin database: {e}"))?;
         if version == 0 {
             connection
@@ -321,6 +396,12 @@ impl WorkspaceHost {
             .execute(
                 "INSERT OR IGNORE INTO plugin_attachment(plugin_id, attached) VALUES(?1, 1)",
                 [TASKS],
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO plugin_attachment(plugin_id, attached) VALUES(?1, 1)",
+                [ROLES],
             )
             .map_err(|e| e.to_string())?;
         Ok(connection)
@@ -453,7 +534,7 @@ impl WorkspaceHost {
         let participants =
             self.mail_call("mail_participants", json!({"workspace_id":workspace_id}))?;
         if participant_id == "orchard" {
-            return Err("the system participant cannot mutate State".to_owned());
+            return Err("the system participant cannot mutate plugin state".to_owned());
         }
         if participants["participants"]
             .as_array()
@@ -468,6 +549,262 @@ impl WorkspaceHost {
             Err(format!("unknown registered participant {participant_id:?}"))
         }
     }
+
+    pub(crate) fn roles_list(&self, args: Value) -> Result<Value, String> {
+        let args = object(args)?;
+        reject_unknown(&args, &["workspace_id"])?;
+        let workspace_id = required_string(&args, "workspace_id")?;
+        let participants =
+            self.mail_call("mail_participants", json!({"workspace_id":workspace_id}))?;
+        let registered = participants["participants"]
+            .as_array()
+            .ok_or_else(|| "invalid mail participants response".to_owned())?
+            .iter()
+            .filter_map(|participant| {
+                let id = participant["id"].as_str()?;
+                (id != "orchard" && participant["registered"] == true).then(|| id.to_owned())
+            })
+            .collect::<HashSet<_>>();
+
+        let db = self.plugin_db(&workspace_id)?;
+        let mut role_statement = db
+            .prepare("SELECT body FROM role ORDER BY id")
+            .map_err(|error| error.to_string())?;
+        let role_rows = role_statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        let stored_roles = role_rows
+            .map(|row| {
+                serde_json::from_str::<Value>(&row.map_err(|error| error.to_string())?)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        drop(role_statement);
+
+        let mut declaration_statement = db
+            .prepare(
+                "SELECT participant_id, body FROM role_declaration
+                 WHERE revision = (
+                     SELECT MAX(latest.revision) FROM role_declaration AS latest
+                     WHERE latest.participant_id = role_declaration.participant_id
+                 )
+                 ORDER BY participant_id",
+            )
+            .map_err(|error| error.to_string())?;
+        let declaration_rows = declaration_statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut declarations = Vec::new();
+        for row in declaration_rows {
+            let (participant_id, body) = row.map_err(|error| error.to_string())?;
+            if !registered.contains(&participant_id) {
+                continue;
+            }
+            let declaration: Value =
+                serde_json::from_str(&body).map_err(|error| error.to_string())?;
+            if declaration["participant_id"] != participant_id {
+                return Err("invalid stored role declaration participant_id".to_owned());
+            }
+            declarations.push(declaration);
+        }
+
+        let mut roles = Vec::new();
+        for mut role in stored_roles {
+            let id = role["id"]
+                .as_str()
+                .ok_or_else(|| "invalid stored role id".to_owned())?;
+            let needed = role["needed"]
+                .as_i64()
+                .filter(|needed| (0..=20).contains(needed))
+                .ok_or_else(|| "invalid stored role needed count".to_owned())?;
+            let declared_by = declarations
+                .iter()
+                .filter_map(|declaration| {
+                    declaration["roles"]
+                        .as_array()
+                        .is_some_and(|items| items.iter().any(|item| item == id))
+                        .then(|| declaration["participant_id"].as_str().map(str::to_owned))
+                        .flatten()
+                })
+                .collect::<Vec<_>>();
+            let filled = declared_by.len();
+            let fields = role
+                .as_object_mut()
+                .ok_or_else(|| "invalid stored role".to_owned())?;
+            fields.insert("filled".to_owned(), json!(filled));
+            fields.insert(
+                "open".to_owned(),
+                Value::Bool(needed > 0 && (filled as i64) < needed),
+            );
+            fields.insert("declared_by".to_owned(), json!(declared_by));
+            roles.push(role);
+        }
+        Ok(json!({"roles":roles,"declarations":declarations,"advisory":true}))
+    }
+
+    pub(crate) fn role_declare(&self, args: Value) -> Result<Value, String> {
+        let args = object(args)?;
+        reject_unknown(
+            &args,
+            &[
+                "workspace_id",
+                "participant_id",
+                "request_id",
+                "roles",
+                "skills",
+                "model",
+                "tier",
+            ],
+        )?;
+        let workspace_id = required_string(&args, "workspace_id")?;
+        let participant_id = bounded(
+            &required_string(&args, "participant_id")?,
+            128,
+            "participant_id",
+        )?;
+        let request_id = bounded(&required_string(&args, "request_id")?, 200, "request_id")?;
+        let roles = parse_declared_roles(
+            args.get("roles")
+                .ok_or_else(|| "roles is required".to_owned())?,
+        )?;
+        let skills = parse_declared_skills(
+            args.get("skills")
+                .ok_or_else(|| "skills is required".to_owned())?,
+        )?;
+        let model = optional_role_text(&args, "model", 120)?;
+        let tier = optional_role_text(&args, "tier", 64)?;
+        let fingerprint = serde_json::to_string(&json!({
+            "participant_id":participant_id,
+            "roles":roles,
+            "skills":skills,
+            "model":model,
+            "tier":tier
+        }))
+        .unwrap();
+        let participant_for_validation = participant_id.clone();
+        self.state_mutate(
+            &workspace_id,
+            ROLES,
+            &request_id,
+            &fingerprint,
+            || self.participant(&workspace_id, &participant_for_validation),
+            |transaction| {
+                let revision = transaction
+                    .query_row(
+                        "SELECT MAX(revision) FROM role_declaration WHERE participant_id=?1",
+                        [&participant_id],
+                        |row| row.get::<_, Option<i64>>(0),
+                    )
+                    .map_err(|error| error.to_string())?
+                    .unwrap_or(0)
+                    + 1;
+                let mut declaration = json!({
+                    "participant_id":participant_id,
+                    "roles":roles,
+                    "skills":skills,
+                    "revision":revision,
+                    "declared_at":now_timestamp()
+                });
+                if let Some(model) = &model {
+                    declaration
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("model".to_owned(), json!(model));
+                }
+                if let Some(tier) = &tier {
+                    declaration
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("tier".to_owned(), json!(tier));
+                }
+                transaction
+                    .execute(
+                        "INSERT INTO role_declaration(participant_id, revision, body) VALUES(?1, ?2, ?3)",
+                        params![participant_id, revision, serde_json::to_string(&declaration).unwrap()],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(json!({"declaration":declaration}))
+            },
+        )
+    }
+
+    pub(crate) fn role_put(&self, args: Value) -> Result<Value, String> {
+        let args = object(args)?;
+        reject_unknown(&args, &["workspace_id", "request_id", "role"])?;
+        let workspace_id = required_string(&args, "workspace_id")?;
+        let request_id = bounded(&required_string(&args, "request_id")?, 200, "request_id")?;
+        let role = parse_role(
+            args.get("role")
+                .ok_or_else(|| "role is required".to_owned())?,
+        )?;
+        let id = role["id"]
+            .as_str()
+            .ok_or_else(|| "invalid role id".to_owned())?
+            .to_owned();
+        let fingerprint = serde_json::to_string(&json!({"role":role})).unwrap();
+        self.state_mutate(
+            &workspace_id,
+            ROLES,
+            &request_id,
+            &fingerprint,
+            || Ok(()),
+            |transaction| {
+                let revision = transaction
+                    .query_row(
+                        "SELECT revision FROM role WHERE id=?1",
+                        [&id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(|error| error.to_string())?
+                    .unwrap_or(0)
+                    + 1;
+                let mut stored = role;
+                let fields = stored
+                    .as_object_mut()
+                    .ok_or_else(|| "invalid role".to_owned())?;
+                fields.insert("revision".to_owned(), json!(revision));
+                fields.insert("updated_at".to_owned(), json!(now_timestamp()));
+                transaction
+                    .execute(
+                        "INSERT INTO role(id, body, revision) VALUES(?1, ?2, ?3)
+                         ON CONFLICT(id) DO UPDATE SET body=excluded.body, revision=excluded.revision",
+                        params![id, serde_json::to_string(&stored).unwrap(), revision],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(json!({"role":stored}))
+            },
+        )
+    }
+
+    pub(crate) fn role_delete(&self, args: Value) -> Result<Value, String> {
+        let args = object(args)?;
+        reject_unknown(&args, &["workspace_id", "request_id", "role_id"])?;
+        let workspace_id = required_string(&args, "workspace_id")?;
+        let request_id = bounded(&required_string(&args, "request_id")?, 200, "request_id")?;
+        let role_id = parse_role_id(&required_string(&args, "role_id")?, "role_id")?;
+        let fingerprint = serde_json::to_string(&json!({"role_id":role_id})).unwrap();
+        self.state_mutate(
+            &workspace_id,
+            ROLES,
+            &request_id,
+            &fingerprint,
+            || Ok(()),
+            |transaction| {
+                if transaction
+                    .execute("DELETE FROM role WHERE id=?1", [&role_id])
+                    .map_err(|error| error.to_string())?
+                    == 0
+                {
+                    return Err(format!("unknown role {role_id:?}"));
+                }
+                Ok(json!({"deleted":role_id}))
+            },
+        )
+    }
+
     pub(crate) fn state_define(&self, args: Value) -> Result<Value, String> {
         let args = object(args)?;
         let workspace = required_string(&args, "workspace_id")?;
@@ -1036,6 +1373,148 @@ pub(crate) fn unavailable_plugin_catalog(error: &str) -> Value {
     })).collect::<Vec<_>>()})
 }
 
+fn parse_role(value: &Value) -> Result<Value, String> {
+    let fields = value
+        .as_object()
+        .ok_or_else(|| "role must be an object".to_owned())?;
+    if fields.keys().any(|field| {
+        !matches!(
+            field.as_str(),
+            "id" | "label" | "instructions" | "capabilities" | "needed" | "tier_hint"
+        )
+    }) {
+        return Err("role contains unknown fields".to_owned());
+    }
+    let id = parse_role_id(&required_string(fields, "id")?, "role.id")?;
+    let label = required_role_text(fields, "label", 120)?;
+    let instructions = required_role_text(fields, "instructions", 4000)?;
+    let capabilities = parse_role_capabilities(
+        fields
+            .get("capabilities")
+            .ok_or_else(|| "role.capabilities is required".to_owned())?,
+    )?;
+    let needed = fields
+        .get("needed")
+        .and_then(Value::as_i64)
+        .filter(|needed| (0..=20).contains(needed))
+        .ok_or_else(|| "role.needed must be an integer from 0 through 20".to_owned())?;
+    let tier_hint = optional_role_text(fields, "tier_hint", 64)?;
+    let mut role = json!({
+        "id":id,
+        "label":label,
+        "instructions":instructions,
+        "capabilities":capabilities,
+        "needed":needed
+    });
+    if let Some(tier_hint) = tier_hint {
+        role.as_object_mut()
+            .unwrap()
+            .insert("tier_hint".to_owned(), json!(tier_hint));
+    }
+    Ok(role)
+}
+
+fn parse_role_id(value: &str, field: &str) -> Result<String, String> {
+    if value.is_empty()
+        || value.len() > 64
+        || value.starts_with('-')
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(format!(
+            "{field} must be a 1..64 character lowercase role id"
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn required_role_text(
+    fields: &serde_json::Map<String, Value>,
+    field: &str,
+    maximum: usize,
+) -> Result<String, String> {
+    let value = required_string(fields, field)?;
+    role_text(&value, maximum, field, field == "instructions")?;
+    Ok(value)
+}
+
+fn optional_role_text(
+    fields: &serde_json::Map<String, Value>,
+    field: &str,
+    maximum: usize,
+) -> Result<Option<String>, String> {
+    match fields.get(field) {
+        None => Ok(None),
+        Some(Value::String(value)) => {
+            role_text(value, maximum, field, true)?;
+            Ok(Some(value.to_owned()))
+        }
+        Some(_) => Err(format!("{field} must be a string")),
+    }
+}
+
+fn role_text(value: &str, maximum: usize, field: &str, allow_empty: bool) -> Result<(), String> {
+    if (!allow_empty && value.is_empty()) || value.chars().count() > maximum || value.contains('\0')
+    {
+        let lower_bound = if allow_empty { 0 } else { 1 };
+        return Err(format!(
+            "{field} must contain {lower_bound}..{maximum} characters"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_role_capabilities(value: &Value) -> Result<Vec<String>, String> {
+    let capabilities = value
+        .as_array()
+        .filter(|values| values.len() <= MAX_CAPABILITIES)
+        .ok_or_else(|| "role.capabilities must contain at most 32 strings".to_owned())?;
+    capabilities
+        .iter()
+        .map(|capability| {
+            let capability = capability
+                .as_str()
+                .ok_or_else(|| "role.capabilities must contain strings".to_owned())?;
+            role_text(capability, 128, "role.capability", false)?;
+            Ok(capability.to_owned())
+        })
+        .collect()
+}
+
+fn parse_declared_roles(value: &Value) -> Result<Vec<String>, String> {
+    let roles = value
+        .as_array()
+        .filter(|values| values.len() <= MAX_DECLARED_ROLES)
+        .ok_or_else(|| "roles must contain at most 16 role ids".to_owned())?;
+    roles
+        .iter()
+        .map(|role| {
+            let role = role
+                .as_str()
+                .ok_or_else(|| "roles must contain role ids".to_owned())?;
+            parse_role_id(role, "role")
+        })
+        .collect()
+}
+
+fn parse_declared_skills(value: &Value) -> Result<Vec<String>, String> {
+    let skills = value
+        .as_array()
+        .filter(|values| values.len() <= MAX_DECLARED_SKILLS)
+        .ok_or_else(|| "skills must contain at most 32 strings".to_owned())?;
+    skills
+        .iter()
+        .map(|skill| {
+            let skill = skill
+                .as_str()
+                .ok_or_else(|| "skills must contain strings".to_owned())?;
+            role_text(skill, 200, "skill", false)?;
+            Ok(skill.to_owned())
+        })
+        .collect()
+}
+
 fn parse_definition(value: &Value) -> Result<Value, String> {
     let map = value
         .as_object()
@@ -1308,6 +1787,10 @@ fn operation_schema(name: &str) -> Value {
         return tool.input_schema;
     }
     match name {
+        "roles_list" => {
+            json!({"type":"object","properties":{},"additionalProperties":false})
+        }
+        "role_declare" => roles_declare_schema(),
         "state_definitions" | "state_list" => {
             json!({"type":"object","properties":{},"additionalProperties":false})
         }
@@ -1320,6 +1803,21 @@ fn operation_schema(name: &str) -> Value {
         "state_advance" => crate::mcp::state_schema("advance"),
         _ => json!({"type":"object","properties":{},"additionalProperties":false}),
     }
+}
+fn roles_declare_schema() -> Value {
+    json!({
+        "type":"object",
+        "properties":{
+            "participant_id":{"type":"string","maxLength":128},
+            "request_id":{"type":"string","maxLength":200},
+            "roles":{"type":"array","maxItems":16,"items":{"type":"string","pattern":"^[a-z0-9][a-z0-9-]{0,63}$"}},
+            "skills":{"type":"array","maxItems":32,"items":{"type":"string","minLength":1,"maxLength":200}},
+            "model":{"type":"string","maxLength":120},
+            "tier":{"type":"string","maxLength":64}
+        },
+        "required":["participant_id","request_id","roles","skills"],
+        "additionalProperties":false
+    })
 }
 fn mail_definition(name: &str) -> Option<orchard_mail_mcp::ToolDefinition> {
     orchard_mail_mcp::tool_definitions()
@@ -1353,6 +1851,8 @@ fn operation_description(name: &str) -> &'static str {
         "task_release" => "Return a task you hold to open and unassigned.",
         "task_close" => "Close one task idempotently.",
         "task_dependencies" => "Read task dependencies; dependency editing is unavailable.",
+        "roles_list" => "List owner-defined advisory roles and current self-declarations.",
+        "role_declare" => "Declare a registered participant's advisory roles and skills.",
         "state_define" => "Store an immutable declarative state-machine definition.",
         "state_definitions" => "List retained immutable state definitions.",
         "state_create" => "Create a marker for a canonical same-workspace subject.",

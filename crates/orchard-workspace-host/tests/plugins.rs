@@ -69,6 +69,36 @@ fn definition(id: &str, version: u64) -> Value {
     })
 }
 
+fn role_definition(id: &str, label: &str, needed: u64) -> Value {
+    json!({
+        "id": id,
+        "label": label,
+        "instructions": "Coordinate this bounded contribution.",
+        "capabilities": ["review"],
+        "needed": needed,
+    })
+}
+
+fn listed_role<'a>(listing: &'a Value, id: &str) -> &'a Value {
+    listing["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|role| role["id"] == id)
+        .unwrap_or_else(|| panic!("roles_list omitted role {id}"))
+}
+
+fn plugin_intro_section<'a>(introduction: &'a str, name: &str) -> &'a str {
+    let marker = format!("\n\n## {name}\n");
+    let content = introduction
+        .split_once(&marker)
+        .unwrap_or_else(|| panic!("workspace intro omitted {name}"))
+        .1;
+    content
+        .split_once("\n\n## ")
+        .map_or(content, |(section, _)| section)
+}
+
 fn attach_state(host: &WorkspaceHost, workspace_id: &str) {
     call(
         host,
@@ -95,12 +125,13 @@ fn bundled_catalog_and_inspection_make_capabilities_discoverable() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(plugins.len(), 4);
+    assert_eq!(plugins.len(), 5);
     for (id, required, attached) in [
         ("core", true, true),
         ("chat", true, true),
         ("tasks", false, true),
         ("state", false, false),
+        ("roles", false, true),
     ] {
         let plugin = plugins.iter().find(|item| item["id"] == id).unwrap();
         assert_eq!(plugin["required"], required, "{id}");
@@ -199,6 +230,24 @@ fn bundled_catalog_and_inspection_make_capabilities_discoverable() {
         .as_array()
         .unwrap()
         .is_empty());
+    let roles = call(
+        &host,
+        "plugin_inspect",
+        &workspace_id,
+        json!({"plugin_id":"roles"}),
+    )["plugin"]
+        .clone();
+    assert_eq!(roles["integrations"], json!([]));
+    assert_eq!(
+        roles["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|operation| operation["name"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("roles_list"), json!("role_declare")],
+        "owner-only role operations must not be part of the plugin manifest"
+    );
     assert!(error(
         &host,
         "plugin_inspect",
@@ -788,6 +837,7 @@ fn detaching_optional_plugins_keeps_other_plugin_reads_and_sections_available() 
                     ("state_get", json!({"id":"detach-matrix-marker"})),
                     ("state_opportunities", json!({"capability":"writer"})),
                 ],
+                "roles" => vec![("roles_list", json!({}))],
                 other => panic!("unexpected attached plugin {other}"),
             };
             for (operation, arguments) in operations {
@@ -843,6 +893,449 @@ fn detaching_optional_plugins_keeps_other_plugin_reads_and_sections_available() 
             );
         }
     }
+}
+
+#[test]
+fn roles_declarations_replay_validate_bounds_and_respect_attachment() {
+    let temp = TempDir::new().unwrap();
+    let host = new_host(&temp);
+    let (workspace_id, _, _) = workspace(&host, "Roles declarations");
+    register(&host, &workspace_id, "alice");
+
+    let declaration = json!({
+        "participant_id":"alice",
+        "request_id":"roles-declare-one",
+        "roles":["future-role"],
+        "skills":["draws diagrams"],
+        "model":"test-model",
+        "tier":"medium"
+    });
+    let first = call(
+        &host,
+        "plugin_call",
+        &workspace_id,
+        json!({"plugin_id":"roles","operation":"role_declare","arguments":declaration.clone()}),
+    );
+    assert_eq!(first["declaration"]["participant_id"], "alice");
+    assert_eq!(first["declaration"]["roles"], json!(["future-role"]));
+    assert_eq!(first["declaration"]["skills"], json!(["draws diagrams"]));
+    assert_eq!(first["declaration"]["model"], "test-model");
+    assert_eq!(first["declaration"]["tier"], "medium");
+    assert_eq!(first["declaration"]["revision"], 1);
+    assert!(first["declaration"]["declared_at"].is_number());
+    let replay = call(
+        &host,
+        "plugin_call",
+        &workspace_id,
+        json!({"plugin_id":"roles","operation":"role_declare","arguments":declaration}),
+    );
+    assert_eq!(replay["declaration"], first["declaration"]);
+    assert_eq!(replay["idempotent_replay"], true);
+    let conflict = error(
+        &host,
+        "plugin_call",
+        &workspace_id,
+        json!({"plugin_id":"roles","operation":"role_declare","arguments":{"participant_id":"alice","request_id":"roles-declare-one","roles":["future-role"],"skills":["changed"]}}),
+    );
+    assert!(
+        conflict.contains("request"),
+        "a different declaration body must not replay: {conflict}"
+    );
+    assert!(error(&host, "role_declare", &workspace_id, json!({"participant_id":"nobody","request_id":"roles-declare-unknown","roles":[],"skills":[]})).contains("registered"));
+    assert!(error(&host, "role_declare", &workspace_id, json!({"participant_id":"orchard","request_id":"roles-declare-system","roles":[],"skills":[]})).contains("system"));
+
+    let declaration_bounds = vec![
+        (
+            "roles array",
+            json!({"participant_id":"alice","request_id":"roles-declare-many-roles","roles":(0..17).map(|index| format!("role-{index}")).collect::<Vec<_>>(),"skills":[]}),
+        ),
+        (
+            "role id",
+            json!({"participant_id":"alice","request_id":"roles-declare-long-role","roles":["r".repeat(65)],"skills":[]}),
+        ),
+        (
+            "role id shape",
+            json!({"participant_id":"alice","request_id":"roles-declare-invalid-role","roles":["-invalid"],"skills":[]}),
+        ),
+        (
+            "skills array",
+            json!({"participant_id":"alice","request_id":"roles-declare-many-skills","roles":[],"skills":(0..33).map(|_| "skill").collect::<Vec<_>>() }),
+        ),
+        (
+            "skill",
+            json!({"participant_id":"alice","request_id":"roles-declare-long-skill","roles":[],"skills":["s".repeat(201)]}),
+        ),
+        (
+            "model",
+            json!({"participant_id":"alice","request_id":"roles-declare-long-model","roles":[],"skills":[],"model":"m".repeat(121)}),
+        ),
+        (
+            "tier",
+            json!({"participant_id":"alice","request_id":"roles-declare-long-tier","roles":[],"skills":[],"tier":"t".repeat(65)}),
+        ),
+    ];
+    for (field, arguments) in declaration_bounds {
+        let message = error(&host, "role_declare", &workspace_id, arguments);
+        assert!(
+            !message.is_empty(),
+            "an oversize or malformed {field} declaration must be rejected"
+        );
+    }
+
+    call(
+        &host,
+        "plugin_detach",
+        &workspace_id,
+        json!({"plugin_id":"roles","request_id":"detach-roles-declarations"}),
+    );
+    let retained = call(
+        &host,
+        "plugin_call",
+        &workspace_id,
+        json!({"plugin_id":"roles","operation":"roles_list","arguments":{}}),
+    );
+    assert_eq!(retained["declarations"][0]["participant_id"], "alice");
+    assert!(error(&host, "role_declare", &workspace_id, json!({"participant_id":"alice","request_id":"roles-declare-detached","roles":[],"skills":[]})).contains("detached"));
+}
+
+#[test]
+fn roles_list_uses_latest_declarations_from_current_participants_for_open_counts() {
+    let temp = TempDir::new().unwrap();
+    let host = new_host(&temp);
+    let (workspace_id, _, _) = workspace(&host, "Roles availability");
+    call(
+        &host,
+        "role_put",
+        &workspace_id,
+        json!({"request_id":"put-review","role":role_definition("review", "Review", 2)}),
+    );
+    call(
+        &host,
+        "role_put",
+        &workspace_id,
+        json!({"request_id":"put-zero","role":role_definition("zero", "Zero needed", 0)}),
+    );
+    register(&host, &workspace_id, "alice");
+    register(&host, &workspace_id, "bob");
+
+    call(
+        &host,
+        "role_declare",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"alice-review","roles":["review"],"skills":["reviews"]}),
+    );
+    let one_declarer = call(&host, "roles_list", &workspace_id, json!({}));
+    assert_eq!(one_declarer["advisory"], true);
+    assert_eq!(listed_role(&one_declarer, "review")["filled"], 1);
+    assert_eq!(listed_role(&one_declarer, "review")["open"], true);
+    assert_eq!(
+        listed_role(&one_declarer, "review")["declared_by"],
+        json!(["alice"])
+    );
+    assert_eq!(listed_role(&one_declarer, "zero")["filled"], 0);
+    assert_eq!(listed_role(&one_declarer, "zero")["open"], false);
+
+    call(
+        &host,
+        "role_declare",
+        &workspace_id,
+        json!({"participant_id":"bob","request_id":"bob-review","roles":["review"],"skills":["reviews"]}),
+    );
+    let two_declarers = call(&host, "roles_list", &workspace_id, json!({}));
+    assert_eq!(listed_role(&two_declarers, "review")["filled"], 2);
+    assert_eq!(listed_role(&two_declarers, "review")["open"], false);
+    assert_eq!(
+        listed_role(&two_declarers, "review")["declared_by"],
+        json!(["alice", "bob"])
+    );
+
+    call(
+        &host,
+        "role_declare",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"alice-no-review","roles":["future-role"],"skills":["draws"]}),
+    );
+    let alice_unfilled = call(&host, "roles_list", &workspace_id, json!({}));
+    assert_eq!(listed_role(&alice_unfilled, "review")["filled"], 1);
+    assert_eq!(listed_role(&alice_unfilled, "review")["open"], true);
+    assert_eq!(
+        listed_role(&alice_unfilled, "review")["declared_by"],
+        json!(["bob"])
+    );
+    assert_eq!(
+        alice_unfilled["declarations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|declaration| declaration["participant_id"] == "alice")
+            .unwrap()["roles"],
+        json!(["future-role"]),
+        "the latest declaration replaces older role claims"
+    );
+
+    call(
+        &host,
+        "mail_leave",
+        &workspace_id,
+        json!({"participant_id":"bob","request_id":"bob-leaves-roles"}),
+    );
+    let bob_left = call(&host, "roles_list", &workspace_id, json!({}));
+    assert_eq!(listed_role(&bob_left, "review")["filled"], 0);
+    assert_eq!(listed_role(&bob_left, "review")["open"], true);
+    assert_eq!(listed_role(&bob_left, "review")["declared_by"], json!([]));
+    assert_eq!(bob_left["declarations"].as_array().unwrap().len(), 1);
+    assert_eq!(bob_left["declarations"][0]["participant_id"], "alice");
+
+    call(
+        &host,
+        "role_declare",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"alice-zero","roles":["zero"],"skills":["observes"]}),
+    );
+    let zero_filled = call(&host, "roles_list", &workspace_id, json!({}));
+    assert_eq!(listed_role(&zero_filled, "zero")["filled"], 1);
+    assert_eq!(listed_role(&zero_filled, "zero")["open"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn roles_owner_operations_are_receipted_but_not_gateway_or_mcp_operations() {
+    let temp = TempDir::new().unwrap();
+    let host = Arc::new(new_host(&temp));
+    let (workspace_id, _, _) = workspace(&host, "Roles owner operations");
+
+    let first_arguments = json!({
+        "request_id":"role-put-one",
+        "role":role_definition("review", "Review", 1)
+    });
+    let first = call(&host, "role_put", &workspace_id, first_arguments.clone());
+    assert_eq!(first["role"]["id"], "review");
+    assert_eq!(first["role"]["revision"], 1);
+    assert!(first["role"]["updated_at"].is_number());
+    let replay = call(&host, "role_put", &workspace_id, first_arguments);
+    assert_eq!(replay["role"], first["role"]);
+    assert_eq!(replay["idempotent_replay"], true);
+    let put_conflict = error(
+        &host,
+        "role_put",
+        &workspace_id,
+        json!({"request_id":"role-put-one","role":role_definition("review", "Review", 2)}),
+    );
+    assert!(
+        put_conflict.contains("request"),
+        "a different owner role body must not replay: {put_conflict}"
+    );
+    let updated = call(
+        &host,
+        "role_put",
+        &workspace_id,
+        json!({"request_id":"role-put-update","role":role_definition("review", "Senior review", 2)}),
+    );
+    assert_eq!(updated["role"]["label"], "Senior review");
+    assert_eq!(updated["role"]["needed"], 2);
+    assert_eq!(updated["role"]["revision"], 2);
+
+    let mut role_id_too_long = role_definition("valid", "Valid", 1);
+    role_id_too_long["id"] = json!("r".repeat(65));
+    let mut role_id_bad_shape = role_definition("valid", "Valid", 1);
+    role_id_bad_shape["id"] = json!("-invalid");
+    let mut label_too_long = role_definition("long-label", "Valid", 1);
+    label_too_long["label"] = json!("l".repeat(121));
+    let mut instructions_too_long = role_definition("long-instructions", "Valid", 1);
+    instructions_too_long["instructions"] = json!("i".repeat(4001));
+    let mut too_many_capabilities = role_definition("many-capabilities", "Valid", 1);
+    too_many_capabilities["capabilities"] =
+        json!((0..33).map(|_| "capability").collect::<Vec<_>>());
+    let mut capability_too_long = role_definition("long-capability", "Valid", 1);
+    capability_too_long["capabilities"] = json!(["c".repeat(129)]);
+    let mut needed_too_large = role_definition("too-needed", "Valid", 1);
+    needed_too_large["needed"] = json!(21);
+    let mut tier_hint_too_long = role_definition("long-tier-hint", "Valid", 1);
+    tier_hint_too_long["tier_hint"] = json!("t".repeat(65));
+    let role_bounds = vec![
+        ("role id", role_id_too_long),
+        ("role id shape", role_id_bad_shape),
+        ("label", label_too_long),
+        ("instructions", instructions_too_long),
+        ("capabilities array", too_many_capabilities),
+        ("capability", capability_too_long),
+        ("needed", needed_too_large),
+        ("tier hint", tier_hint_too_long),
+    ];
+    for (index, (field, role)) in role_bounds.into_iter().enumerate() {
+        let message = error(
+            &host,
+            "role_put",
+            &workspace_id,
+            json!({"request_id":format!("role-put-bound-{index}"),"role":role}),
+        );
+        assert!(
+            !message.is_empty(),
+            "an oversize or malformed role {field} must be rejected"
+        );
+    }
+
+    for (operation, arguments) in [
+        (
+            "role_put",
+            json!({"request_id":"gateway-role-put","role":role_definition("gateway", "Gateway", 1)}),
+        ),
+        (
+            "role_delete",
+            json!({"request_id":"gateway-role-delete","role_id":"review"}),
+        ),
+    ] {
+        assert!(error(
+            &host,
+            "plugin_call",
+            &workspace_id,
+            json!({"plugin_id":"roles","operation":operation,"arguments":arguments})
+        )
+        .contains("not declared by plugin"));
+    }
+
+    register(&host, &workspace_id, "alice");
+    call(
+        &host,
+        "role_declare",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"delete-review-declaration","roles":["review"],"skills":["reviews"]}),
+    );
+    assert!(error(
+        &host,
+        "role_delete",
+        &workspace_id,
+        json!({"request_id":"delete-missing-role","role_id":"missing"})
+    )
+    .contains("unknown role"));
+    let deleted = call(
+        &host,
+        "role_delete",
+        &workspace_id,
+        json!({"request_id":"delete-review-role","role_id":"review"}),
+    );
+    assert_eq!(deleted["deleted"], "review");
+    let delete_replay = call(
+        &host,
+        "role_delete",
+        &workspace_id,
+        json!({"request_id":"delete-review-role","role_id":"review"}),
+    );
+    assert_eq!(delete_replay["deleted"], "review");
+    assert_eq!(delete_replay["idempotent_replay"], true);
+    assert!(call(&host, "roles_list", &workspace_id, json!({}))["roles"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        call(&host, "roles_list", &workspace_id, json!({}))["declarations"][0]["roles"],
+        json!(["review"]),
+        "deleting a role must retain self-declarations"
+    );
+
+    let server = host.clone().start_server().await.unwrap();
+    let token = call(&host, "connection_info", &workspace_id, json!({}))["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let uri = format!("http://{}/workspaces/{workspace_id}/mcp", server.endpoint());
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(uri).auth_header(&token),
+    );
+    let client = ().serve(transport).await.unwrap();
+    let tools = client.list_all_tools().await.unwrap();
+    assert!(!tools.iter().any(|tool| {
+        tool.name == "roles_list"
+            || tool.name == "role_declare"
+            || tool.name == "role_put"
+            || tool.name == "role_delete"
+    }));
+    for (operation, arguments) in [
+        (
+            "role_put",
+            json!({"request_id":"mcp-role-put","role":role_definition("mcp", "MCP", 1)}),
+        ),
+        (
+            "role_delete",
+            json!({"request_id":"mcp-role-delete","role_id":"review"}),
+        ),
+    ] {
+        match client.call_tool(mcp_call(operation, arguments)).await {
+            Ok(result) => assert_eq!(result.is_error, Some(true), "{operation}: {result:?}"),
+            Err(error) => assert!(error.to_string().contains(operation)),
+        }
+    }
+    server.shutdown().await.unwrap();
+}
+
+#[test]
+fn roles_intro_and_snapshot_sections_follow_the_listing_and_detach_with_the_plugin() {
+    let temp = TempDir::new().unwrap();
+    let host = new_host(&temp);
+    let (workspace_id, _, _) = workspace(&host, "Roles sections");
+
+    let empty_introduction = call(&host, "workspace_intro", &workspace_id, json!({}))
+        ["introduction"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        plugin_intro_section(&empty_introduction, "Roles"),
+        "No roles are defined yet. Declare your skills with roles/role_declare; the owner may define roles."
+    );
+
+    call(
+        &host,
+        "role_put",
+        &workspace_id,
+        json!({"request_id":"sections-reviewer","role":role_definition("reviewer", "Review", 1)}),
+    );
+    call(
+        &host,
+        "role_put",
+        &workspace_id,
+        json!({"request_id":"sections-architect","role":role_definition("architect", "Architecture", 2)}),
+    );
+    register(&host, &workspace_id, "alice");
+    call(
+        &host,
+        "role_declare",
+        &workspace_id,
+        json!({"participant_id":"alice","request_id":"sections-reviewer-declaration","roles":["reviewer"],"skills":["reviews"]}),
+    );
+    let listing = call(&host, "roles_list", &workspace_id, json!({}));
+    let defined_introduction = call(&host, "workspace_intro", &workspace_id, json!({}))
+        ["introduction"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        plugin_intro_section(&defined_introduction, "Roles"),
+        "Roles are advisory and self-declared.\nOpen: Architecture (`architect`, 0 of 2)\nFilled: Review (`reviewer`)\nDeclare what you can do with `plugin_call` → roles/role_declare; read role instructions with roles/roles_list."
+    );
+    let snapshot = call(&host, "workspace_snapshot", &workspace_id, json!({}));
+    assert_eq!(
+        snapshot["plugin_sections"]["roles"],
+        json!({
+            "roles": listing["roles"].clone(),
+            "declarations": listing["declarations"].clone()
+        }),
+        "the Settings snapshot contains the retained Roles listing without the advisory flag"
+    );
+
+    call(
+        &host,
+        "plugin_detach",
+        &workspace_id,
+        json!({"plugin_id":"roles","request_id":"detach-roles-sections"}),
+    );
+    let detached_introduction = call(&host, "workspace_intro", &workspace_id, json!({}))
+        ["introduction"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!detached_introduction.contains("## Roles"));
+    let detached_snapshot = call(&host, "workspace_snapshot", &workspace_id, json!({}));
+    assert!(detached_snapshot["plugin_sections"].get("roles").is_none());
 }
 
 #[test]
@@ -968,9 +1461,8 @@ fn state_intro_reports_an_unavailable_section_when_its_hook_fails() {
         introduction.contains("unavailable"),
         "a failing plugin hook renders an unavailable note instead of failing workspace_intro"
     );
-    let (_, state_section) = introduction.split_once("\n\n## State\n").unwrap();
     assert_eq!(
-        state_section.lines().count(),
+        plugin_intro_section(&introduction, "State").lines().count(),
         1,
         "an unavailable plugin section is one line"
     );
