@@ -1,52 +1,46 @@
-# Orchard agent skills
+# Orchard agent skill
 
-`skills/` holds agent skills for working in Orchard workspaces, installable with the
-[`skills` CLI](https://github.com/vercel-labs/skills) into Claude Code, Codex, and other agents.
+`skills/orchard` is one agent skill, installable with the
+[`skills` CLI](https://github.com/vercel-labs/skills) into Claude Code, Codex, and other agents. It covers
+connecting (credential rules, the native CLI, registering or resuming) and basic interaction (reading the
+workspace, messages, waiting, acknowledging, asking the owner for decisions).
 
-| Skill | Use it to |
-| --- | --- |
-| `orchard-join` | Connect with the local credential, register or resume, read the intro, declare roles and skills, and find out what the owner wants |
-| `orchard-contribute` | Claim and release work, wait for and acknowledge messages, ask for decisions, publish evidence and a handoff |
-| `orchard-review` | Review someone's work independently, advance State review markers, record findings |
+Everything else ships with Orchard itself, so it matches the running version:
 
-The skills describe mechanics. What to work on comes from the workspace (README, roles, owner); the
-joining prompt says the same.
+- each plugin's **guide**, returned by `plugin_inspect` (Core, Chat, Tasks, State, Roles; source in
+  `crates/orchard-workspace-host/assets/guides/`), with a host test that every operation a guide shows
+  exists;
+- `workspace_intro`: the README and a section from each attached plugin, such as open roles;
+- the joining prompt, which points agents at both.
 
 ## Install
 
-Pin a released skills tag:
-
 ```bash
-npx skills add algonormative/orchard#skills-v0.1.0 -g -a claude-code codex
+npx skills add algonormative/orchard#skills-v0.2.0 -g -a claude-code codex
 ```
 
-`-g` installs for your user rather than one project. `-a` picks agents. `--skill orchard-join` installs
-one skill. The CLI records the tag in its lock file. `npx skills update` re-fetches that same tag; to move
-to a newer release, run `add` again with the new tag.
-
-## Compatibility
-
-Each skill names the plugin versions it was written against (`core 1`, `chat 1`, `tasks 2`, `state 2`,
-`roles 1`). `orchard-join` checks `plugin_list` and `plugin_inspect` and asks the owner with a
-`kind: "decision"` message instead of guessing when a plugin or operation it needs differs.
-`workspace_info.app_version` reports the hosting app's version for reference. The skills work without
-Roles (it falls back to asking the owner), so they also work against Orchard 0.2.0.
+`-g` installs for your user rather than one project; `-a` picks agents. The CLI records the tag in its
+lock file. `npx skills update` re-fetches that same tag; to move to a newer release, run `add` again with
+the new tag. (`skills-v0.1.0` held three earlier skills and is superseded.)
 
 ## Releasing
 
-Skills release independently of the app, on `skills-vMAJOR.MINOR.PATCH` **tags only**:
+The skill releases independently of the app, on `skills-vMAJOR.MINOR.PATCH` **tags only**:
 
 ```bash
-git tag -a skills-v0.1.1 -m "Orchard skills 0.1.1"
-git push origin skills-v0.1.1
+git tag -a skills-v0.2.1 -m "Orchard skill 0.2.1"
+git push origin skills-v0.2.1
 ```
 
 Never publish a skills tag as a GitHub Release. The app's update check reads the repository's *latest
 release* and rejects tags containing `-`, so a skills release marked latest would break Check for Updates.
 A `skills-v*` tag does not start the macOS release workflow, which runs on `v*`.
 
+Because plugin guidance ships with the app, the skill changes rarely: only when connecting or the basic
+interaction changes.
+
 ## Dogfooding
 
 On a development machine, install the published tag globally (above) and use it for Orchard sessions —
-the same copy users get. To change a skill: edit it here, merge, tag a new `skills-v*`, push the tag, and
-reinstall from it.
+the same copy users get. To change it: edit `skills/orchard/SKILL.md`, merge, tag a new `skills-v*`, push
+the tag, and reinstall from it.

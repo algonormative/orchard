@@ -55,6 +55,13 @@ Known exceptions, from before these rules, to migrate onto the hook: Core's
 `workspace_snapshot` carries `task_stores`, the catalog checks the Beads
 backend for Tasks' health, and `plugin_inspect` adds State's handoff example.
 
+## Guides
+
+Every bundled plugin ships a short Markdown guide (`assets/guides/<id>.md`) that `plugin_inspect` returns
+as `guide`: how agents use that plugin's operations. Guides ship with the app, so they always match the
+running version; the agent skill (docs/skills.md) covers only connecting and basic interaction and points
+agents here. A host test checks that every operation a guide shows with arguments exists.
+
 ## Contract
 
 `plugin_list` returns `{plugins:[{id,version,name,description,required,attached,dependencies,integrations,operations}]}`.

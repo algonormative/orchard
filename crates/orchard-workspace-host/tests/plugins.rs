@@ -1824,3 +1824,44 @@ fn bundled_plugins_follow_the_coupling_contract() {
     );
     assert_eq!(inspected["plugin"]["integrations"], json!(["tasks"]));
 }
+
+#[test]
+fn every_plugin_ships_a_guide_naming_only_real_operations() {
+    // Guides ship with the app (plugin_inspect), so they cannot drift from the operations
+    // the running server offers.
+    let temp = TempDir::new().unwrap();
+    let host = new_host(&temp);
+    let (workspace_id, _, _) = workspace(&host, "Guides");
+    let catalog = call(&host, "plugin_list", &workspace_id, json!({}));
+    let plugins = catalog["plugins"].as_array().unwrap();
+    let operations = plugins
+        .iter()
+        .flat_map(|plugin| plugin["operations"].as_array().unwrap().iter())
+        .map(|operation| operation.as_str().unwrap().to_owned())
+        .chain(["plugin_call".to_owned(), "plugin_inspect".to_owned()])
+        .collect::<std::collections::HashSet<_>>();
+    for plugin in plugins {
+        let id = plugin["id"].as_str().unwrap();
+        let inspected = call(
+            &host,
+            "plugin_inspect",
+            &workspace_id,
+            json!({"plugin_id":id}),
+        );
+        let guide = inspected["plugin"]["guide"].as_str().unwrap();
+        assert!(guide.starts_with("# "), "{id} guide has no title");
+        // Every `operation {arguments}` the guide shows must be a real operation.
+        for (index, _) in guide.match_indices(" {") {
+            let Some(start) = guide[..index].rfind('`') else {
+                continue;
+            };
+            let name = &guide[start + 1..index];
+            if name.chars().all(|c| c.is_ascii_lowercase() || c == '_') && name.contains('_') {
+                assert!(
+                    operations.contains(name),
+                    "{id} guide names unknown {name:?}"
+                );
+            }
+        }
+    }
+}

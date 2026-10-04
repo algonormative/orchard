@@ -42,6 +42,9 @@ struct Manifest {
     operations: &'static [&'static str],
     intro_section: Option<SectionHook<String>>,
     snapshot_section: Option<SectionHook<Value>>,
+    /// How agents use this plugin, returned by `plugin_inspect`. It ships with the app, so it
+    /// always matches the running version.
+    guide: &'static str,
 }
 
 pub(crate) struct PluginSection<T> {
@@ -76,6 +79,10 @@ const MANIFESTS: &[Manifest] = &[
         ],
         intro_section: None,
         snapshot_section: None,
+        guide: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/guides/core.md"
+        )),
     },
     Manifest {
         id: CHAT,
@@ -102,6 +109,10 @@ const MANIFESTS: &[Manifest] = &[
         ],
         intro_section: None,
         snapshot_section: None,
+        guide: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/guides/chat.md"
+        )),
     },
     Manifest {
         id: TASKS,
@@ -124,6 +135,10 @@ const MANIFESTS: &[Manifest] = &[
         ],
         intro_section: None,
         snapshot_section: None,
+        guide: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/guides/tasks.md"
+        )),
     },
     Manifest {
         id: STATE,
@@ -146,6 +161,10 @@ const MANIFESTS: &[Manifest] = &[
         ],
         intro_section: Some(state_intro_section),
         snapshot_section: None,
+        guide: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/guides/state.md"
+        )),
     },
     Manifest {
         id: ROLES,
@@ -159,6 +178,10 @@ const MANIFESTS: &[Manifest] = &[
         operations: &["roles_list", "role_declare"],
         intro_section: Some(roles_intro_section),
         snapshot_section: Some(roles_snapshot_section),
+        guide: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/guides/roles.md"
+        )),
     },
 ];
 
@@ -449,6 +472,9 @@ impl WorkspaceHost {
         let item = manifest(&required_string(&args, "plugin_id")?)?;
         let mut view = self.plugin_view(&workspace_id, item)?;
         view.as_object_mut().unwrap().insert("operations".to_owned(), Value::Array(item.operations.iter().map(|name| json!({"name":name,"description":mail_definition(name).map(|tool| tool.description).unwrap_or_else(|| operation_description(name).to_owned()),"input_schema":operation_schema(name)})).collect()));
+        view.as_object_mut()
+            .unwrap()
+            .insert("guide".to_owned(), Value::String(item.guide.to_owned()));
         if item.id == STATE {
             let handoff: Value = serde_json::from_str(HANDOFF_EXAMPLE)
                 .map_err(|error| format!("bundled handoff example is invalid JSON: {error}"))?;
@@ -1903,6 +1929,7 @@ mod tests {
             operations: &[],
             intro_section: None,
             snapshot_section: Some(snapshot_hook),
+            guide: "",
         }
     }
 

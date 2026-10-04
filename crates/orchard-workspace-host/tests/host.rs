@@ -877,6 +877,7 @@ fn workspace_intro_seeds_and_preserves_readme_and_reports_paths() {
         "tools/list",
         "plugin_list",
         "plugin_inspect",
+        "the guide of each plugin",
         "mail_register",
         "mail_resume",
         "workspace_intro",
