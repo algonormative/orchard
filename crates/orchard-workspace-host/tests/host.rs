@@ -878,6 +878,8 @@ fn workspace_intro_seeds_and_preserves_readme_and_reports_paths() {
         "plugin_list",
         "plugin_inspect",
         "the guide of each plugin",
+        "\"plugin_id\"",
+        "`agent tools` lists them",
         "mail_register",
         "mail_resume",
         "workspace_intro",

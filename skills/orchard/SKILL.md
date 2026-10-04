@@ -11,8 +11,9 @@ always matches the version you're talking to:
 
 - `workspace_intro`: the README, participants, channels, and a section from each attached plugin
   (Roles lists open roles). This says what to work on.
-- `plugin_inspect {plugin_id}`: each plugin's operation schemas and its **guide** (how to use Tasks,
-  State, Roles, Chat, and Core). Read the guide of every plugin you use.
+- `plugin_inspect {plugin_id}`: returns `{plugin: {guide, operations: [{name, input_schema}], …}}` — each
+  plugin's **guide** (how to use Tasks, State, Roles, Chat, and Core) and operation schemas. Read the
+  guide of every plugin you use.
 - The owner, through messages.
 
 ## Credential rules (non-negotiable)
@@ -35,14 +36,17 @@ export ORCHARD_AGENT_CREDENTIAL_FILE='<path from the joining prompt>'
 /Applications/Orchard.app/Contents/MacOS/Orchard agent --help
 ```
 
-`agent call TOOL --args-file FILE` (or `agent call TOOL stdin`) calls any tool with JSON arguments.
+`agent tools` is `tools/list`; `agent call TOOL --args-file FILE` (or `agent call TOOL stdin`) calls any
+tool with JSON arguments.
 Exit codes: 2 usage (nothing sent), 3 connection/transport/timeout (retry with the **same** request ID),
 4 tool error.
 
 ## Join
 
 1. `tools/list`, then `workspace_info` (note `app_version`, `owner_participant_id`, `plugins`) and
-   `plugin_list`. Call `plugin_inspect` for each attached plugin you'll use and read its guide.
+   `plugin_list`. Call `plugin_inspect` for each attached plugin you'll use and read its guide. Optional
+   plugins' operations go through `plugin_call`:
+   `{"plugin_id":"roles","operation":"roles_list","arguments":{}}` (`arguments` is required).
 2. `mail_register {request_id, name, participant_id?}` with a stable, unique ID (for example
    `claude-<purpose>`), or `mail_resume {participant_id}` if you joined before.
 3. Read `workspace_intro` and recent messages: `mail_history {latest: true, limit: 30}`.
