@@ -492,6 +492,21 @@ test('pinActor: a mutation acts as this participant or is refused; a read is lef
   expect(pinActor('mail_send', { sender_id: null }, 'claude-me').ok).toBe(false)
 })
 
+test('pinActor pins the participant nested in a plugin_call role_declare: filled in, refused when another', () => {
+  const call = (nested: unknown) => ({ plugin_id: 'roles', operation: 'role_declare', arguments: nested })
+  const filled = pinActor('plugin_call', call({ request_id: 'r', roles: ['a'] }), 'claude-me')
+  expect(filled.ok ? filled.value : null).toEqual(call({ request_id: 'r', roles: ['a'], participant_id: 'claude-me' }))
+  const own = pinActor('plugin_call', call({ participant_id: 'claude-me' }), 'claude-me')
+  expect(own.ok).toBe(true)
+  const other = pinActor('plugin_call', call({ participant_id: 'owner' }), 'claude-me')
+  expect(other.ok).toBe(false)
+  expect(other.ok ? '' : other.message).toContain("participant_id must be this session's own participant")
+  expect(pinActor('plugin_call', call({ participant_id: 7 }), 'claude-me').ok).toBe(false)
+  // reads and the other operations are left as they are
+  const read = { plugin_id: 'roles', operation: 'roles_list', arguments: {} }
+  expect(pinActor('plugin_call', read, 'claude-me')).toEqual({ ok: true, value: read })
+})
+
 test('parseCall: refused tools say why, plugin_call runs reads only', () => {
   for (const name of ['artifact_upload', 'mail_register', 'mail_leave']) {
     const refused = parseCall({ name, arguments: {} })
@@ -500,9 +515,12 @@ test('parseCall: refused tools say why, plugin_call runs reads only', () => {
   }
   expect(parseCall({ name: 'plugin_call', arguments: { plugin_id: 'roles', operation: 'roles_list', arguments: {} } }).ok).toBe(true)
   expect(parseCall({ name: 'plugin_call', arguments: { plugin_id: 'tasks', operation: 'tasks_list', arguments: { store_id: 's' } } }).ok).toBe(true)
-  for (const operation of ['role_declare', 'task_claim', 'mail_send', 'mail_register', 'artifact_upload', 'state_advance', 'plugin_call', 'plugin_attach', undefined, 7]) {
+  for (const operation of ['task_claim', 'mail_send', 'mail_register', 'artifact_upload', 'state_advance', 'plugin_call', 'plugin_attach', undefined, 7]) {
     expect(parseCall({ name: 'plugin_call', arguments: { plugin_id: 'tasks', operation, arguments: {} } }).ok, String(operation)).toBe(false)
   }
+  // role_declare is the one write let through; where it acts as is pinned by pinActor
+  expect(parseCall({ name: 'plugin_call', arguments: { plugin_id: 'roles', operation: 'role_declare', arguments: { roles: [] } } }).ok).toBe(true)
+  expect(parseCall({ name: 'plugin_call', arguments: { plugin_id: 'roles', operation: 'role_declare', arguments: [] } }).ok).toBe(false)
   expect(parseCall({ name: 'plugin_call' }).ok).toBe(false)
   expect(parseCall({ name: 'tasks_list', arguments: { store_id: 's' } }).ok).toBe(true)
 })

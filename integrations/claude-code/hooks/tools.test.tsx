@@ -385,7 +385,6 @@ test('orchard_call refuses mail_register, mail_leave and every plugin_call that 
   expect(leave.deny).toContain('mail_leave is not available here')
 
   const writes: Record<string, unknown>[] = [
-    { plugin_id: 'roles', operation: 'role_declare', arguments: { participant_id: 'owner', request_id: 'r3', roles: ['reviewer'], skills: [] } },
     { plugin_id: 'tasks', operation: 'task_claim', arguments: { store_id: 's', task_id: 't', participant_id: 'owner', request_id: 'r4' } },
     { plugin_id: 'chat', operation: 'mail_send', arguments: { sender_id: 'owner', destination: { kind: 'broadcast' }, body: 'x', request_id: 'r5' } },
     { plugin_id: 'tasks', operation: 'plugin_call', arguments: {} },
@@ -404,6 +403,29 @@ test('orchard_call refuses mail_register, mail_leave and every plugin_call that 
   expect(read.deny).toBeUndefined()
   expect(out(read)).toContain('Fix the awning')
   expect(stdinOf(toolCalls(w, 'plugin_call')[0])).toEqual({ plugin_id: 'tasks', operation: 'tasks_list', arguments: { store_id: 'store1' } })
+})
+
+test('orchard_call plugin_call role_declare acts as this participant: filled in when missing, refused when another', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  const declare = (nested: Record<string, unknown>) =>
+    callTool($, 'orchard_call', { name: 'plugin_call', arguments: { plugin_id: 'roles', operation: 'role_declare', arguments: nested } })
+
+  const missing = await declare({ request_id: 'r3', roles: ['reviewer'], skills: ['reads code'] })
+  expect(missing.deny).toBeUndefined()
+  expect(stdinOf(toolCalls(w, 'plugin_call')[0])).toEqual({
+    plugin_id: 'roles',
+    operation: 'role_declare',
+    arguments: { request_id: 'r3', roles: ['reviewer'], skills: ['reads code'], participant_id: ME },
+  })
+  expect(out(missing)).toContain('declared')
+
+  const own = await declare({ participant_id: ME, request_id: 'r4', roles: [], skills: [] })
+  expect(own.deny).toBeUndefined()
+
+  const before = w.fake.calls.length
+  const other = await declare({ participant_id: 'owner', request_id: 'r5', roles: ['reviewer'], skills: [] })
+  expect(other.deny).toContain("participant_id must be this session's own participant")
+  expect(w.fake.calls).toHaveLength(before)
 })
 
 test('joining_prompt is dropped wherever it sits, and the other forms of the secrets are scrubbed from calls and history', { options: OPTIONS }, async ($, on) => {
