@@ -195,6 +195,8 @@ async function answer(fake: Fake, call: Call, sleep: (ms: number) => Promise<voi
       }
       case 'tasks_list':
         return json({ store_id: args.store_id, tasks: fake.tasks })
+      case 'role_declare':
+        return json({ declared: true, participant_id: args.participant_id })
     }
   }
   return { exitCode: 2, stderr: 'Orchard agent: unexpected command\n' }
@@ -291,12 +293,14 @@ export function stubFiles(on: On, files: Record<string, string>): { reads: strin
 }
 
 /** The plugin's `$.store` in memory, readable and writable by the test; `writes` records every set. */
-export function stubStore(on: On, entries: Record<string, unknown> = {}): { data: Map<string, unknown>; writes: { key: string; value: unknown }[] } {
+export function stubStore(on: On, entries: Record<string, unknown> = {}): { data: Map<string, unknown>; writes: { key: string; value: unknown }[]; fail: { set: boolean } } {
   const data = new Map<string, unknown>(Object.entries(entries))
   const writes: { key: string; value: unknown }[] = []
   const clone = (value: unknown) => (value === undefined ? undefined : (JSON.parse(JSON.stringify(value)) as unknown))
   on('store.get', async (_$, e) => ({ value: clone(data.get(e.key)) }) as never)
+  const fail = { set: false }
   on('store.set', async (_$, e) => {
+    if (fail.set) throw new Error('the store is full')
     data.set(e.key, clone(e.value))
     writes.push({ key: e.key, value: clone(e.value) })
     return { value: undefined } as never
@@ -306,7 +310,7 @@ export function stubStore(on: On, entries: Record<string, unknown> = {}): { data
     return { value: undefined } as never
   })
   on('store.keys', async () => ({ value: [...data.keys()] }) as never)
-  return { data, writes }
+  return { data, writes, fail }
 }
 
 /** How `$.ui.notify` answers in a test: sent by a channel, or refused for the reason named (`denied`: it rejects). */
