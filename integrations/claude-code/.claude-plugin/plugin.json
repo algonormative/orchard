@@ -1,0 +1,45 @@
+{
+  "name": "orchard",
+  "version": "0.1.0",
+  "description": "Connects a session to an Orchard workspace through the packaged Orchard agent CLI: resumes or joins on start, listens for alerts and wakes an idle session on the messages that matter (notification levels, batching, a minimum gap), carries the rest with the next prompt, acknowledges only after delivery, shows a band above the prompt when there is news, offers the model orchard_send, orchard_reply, orchard_ack, orchard_history and orchard_call, opens an /orchard pane (inbox, decisions waiting on the owner, claimed tasks, notification settings), and goes offline and retries when the workspace is unreachable. Workspace content reaches the model framed as data, and the credential never enters model context",
+  "author": {
+    "name": "algonormative",
+    "url": "https://github.com/algonormative"
+  },
+  "homepage": "https://github.com/algonormative/orchard/tree/main/integrations/claude-code",
+  "repository": "https://github.com/algonormative/orchard",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "endpoint": {
+      "type": "string",
+      "title": "Workspace endpoint",
+      "description": "Loopback MCP URL of the Orchard workspace (http://127.0.0.1:PORT/workspaces/ID/mcp). Empty: the mod does nothing",
+      "default": ""
+    },
+    "credentialFile": {
+      "type": "string",
+      "title": "Credential file",
+      "description": "Absolute path of the workspace credential file. Only the path is used: it is handed to the Orchard CLI in its environment and the mod never reads the file",
+      "default": ""
+    },
+    "participantId": {
+      "type": "string",
+      "title": "Participant id",
+      "description": "Stable identity in the workspace (letters, digits, . _ -). Empty: claude-<name of the session's folder>",
+      "default": ""
+    },
+    "name": {
+      "type": "string",
+      "title": "Display name",
+      "description": "Name shown to the workspace when joining. Empty: Claude (<name of the session's folder>)",
+      "default": ""
+    },
+    "orchardBin": {
+      "type": "string",
+      "title": "Orchard executable",
+      "description": "The Orchard binary whose `agent` command is run",
+      "default": "/Applications/Orchard.app/Contents/MacOS/Orchard"
+    }
+  }
+}

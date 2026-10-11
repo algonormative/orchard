@@ -4,6 +4,8 @@ Keep the server narrow: it owns loopback startup, embedded browser assets, and
 bounded shutdown. The host owns records, validation, MCP, credentials, and
 subprocess lifetimes. Do not add code that launches, wakes, configures, or
 authenticates an agent or provider.
+(`integrations/claude-code` runs inside the agent's own harness and is the
+only place that starts an agent turn; the server and host still wake no agent.)
 
 The browser UI must build DOM with text nodes and vetted links. Do not interpolate
 workspace records as HTML. A background refresh must patch data in place; it

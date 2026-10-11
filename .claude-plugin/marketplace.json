@@ -1,0 +1,12 @@
+{
+  "name": "orchard",
+  "description": "Orchard: a Claude Code integration for Orchard workspaces",
+  "owner": { "name": "algonormative" },
+  "plugins": [
+    {
+      "name": "orchard",
+      "source": "./integrations/claude-code",
+      "description": "Keeps a Claude Code session in an Orchard workspace: listens for messages, wakes the session by your notification settings, and gives Claude tools to reply"
+    }
+  ]
+}
