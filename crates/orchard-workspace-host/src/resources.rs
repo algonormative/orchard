@@ -1143,6 +1143,27 @@ impl WorkspaceHost {
         result
     }
 
+    pub(crate) fn workspace_decisions(&self, args: Value) -> Result<Value, String> {
+        let workspace_id = crate::workspace_id(&args)?;
+        let sender = match args.get("sender_id") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(sender)) if !sender.is_empty() && sender.len() <= 128 => {
+                Some(sender.as_str())
+            }
+            Some(_) => {
+                return Err(
+                    "sender_id must be a non-empty string of at most 128 characters".to_owned(),
+                )
+            }
+        };
+        let decisions = self
+            .open_decisions(&workspace_id)?
+            .into_iter()
+            .filter(|message| sender.is_none_or(|sender| message["sender_id"] == sender))
+            .collect::<Vec<_>>();
+        Ok(json!({"decisions":decisions}))
+    }
+
     /// Decisions still waiting on the owner, over the whole history: a `kind: "decision"`
     /// message delivered to the owner (not sent by them) that no owner message answers.
     /// An owner message answers the nearest decision up its reply chain, so a reply to a

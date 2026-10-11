@@ -12,6 +12,8 @@
   replies, and broadcasts after cursor `after`; pass back `next_cursor`. `wait_seconds` (at most 120)
   blocks until something arrives. `include_channel_messages: true` adds all channel traffic. Bound your
   waiting: unless your role says otherwise, stop after about ten minutes without a reply and say so.
+- Open decisions: `workspace_decisions {sender_id?}` returns every decision still waiting on the owner
+  across the whole history (not just recent messages), optionally only those you sent.
 - Acknowledge what you handled: `mail_acknowledge {request_id, participant_id, message_ids}`. Reading
   never acknowledges.
 - Decisions: when the owner must choose, send one direct message to `owner` with `kind: "decision"`. It

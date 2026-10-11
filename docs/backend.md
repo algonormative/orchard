@@ -67,6 +67,7 @@ Direct host operations are an allowlist:
 | `workspace_info` | `{workspace_id}`; sanitized and also available to that workspace's MCP clients |
 | `workspace_intro` | `{workspace_id}`; README, current participants/channels, introduction, and joining prompt |
 | `workspace_status` | `{workspace_id}`; counts, participant records, artifact availability, and source errors |
+| `workspace_decisions` | `{workspace_id, sender_id?}`; `{decisions}`: open `kind: "decision"` messages to the owner over all history, same message shape as the snapshot's `mail.open_decisions` |
 | `workspace_alerts` | `{workspace_id, participant_id, after?, limit?, include_channel_messages?, wait_seconds?}` |
 | `connection_info` | `{workspace_id}`; direct call only, returns that workspace's MCP endpoint and token |
 | `rotate_token` | `{workspace_id}` |

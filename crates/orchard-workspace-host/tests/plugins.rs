@@ -826,6 +826,7 @@ fn detaching_optional_plugins_keeps_other_plugin_reads_and_sections_available() 
                 "chat" => vec![
                     ("mail_history", json!({"channel_id":"general"})),
                     ("workspace_alerts", json!({"participant_id":"alice"})),
+                    ("workspace_decisions", json!({})),
                 ],
                 "tasks" => vec![
                     ("tasks_list", json!({"store_id":store_id})),
