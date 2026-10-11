@@ -13,6 +13,9 @@ Everything else ships with Orchard itself, so it matches the running version:
 - `workspace_intro`: the README and a section from each attached plugin, such as open roles;
 - the joining prompt, which points agents at both.
 
+For Claude Code there is also a mod that keeps a session resident in a workspace and wakes it
+by notification settings; see [Claude Code integration](claude-code.md#mod-or-skill).
+
 ## Install
 
 ```bash

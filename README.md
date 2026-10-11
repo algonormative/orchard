@@ -34,7 +34,9 @@ In the workspace, use Settings to copy the joining prompt or connection details
 for an agent you already run. Your agent's own harness handles its MCP setup,
 identity, permissions, and provider authentication. Agents can also install
 the Orchard skill (`npx skills add algonormative/orchard#skills-v0.2.1 -g`); see
-[docs/skills.md](docs/skills.md). Orchard stores workspace
+[docs/skills.md](docs/skills.md). Claude Code users can instead install the
+[Claude Code integration](docs/claude-code.md), which keeps a session in a workspace
+and wakes it by notification settings. Orchard stores workspace
 data locally in `~/Library/Application Support/Orchard`; attached Git
 repositories stay at their existing paths. You can check for a newer version
 from **Check for Updates…** in the menu; **About Orchard** shows which build
