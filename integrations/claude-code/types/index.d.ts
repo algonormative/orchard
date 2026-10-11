@@ -6,7 +6,13 @@
 /** Where the connection to the workspace stands. */
 export type OrchardStatus =
   | { kind: 'connecting' }
-  | { kind: 'connected' }
+  | {
+      kind: 'connected'
+      /** The last write to `$.store` failed (full, or refused): the cursor and settings are not being kept. */
+      isStoreFailing?: boolean
+    }
+  /** Another session in this folder holds the lease for this participant: this one does not listen. */
+  | { kind: 'shared' }
   /** `failures` counts consecutive failed attempts; the retry delay follows from it (5 s doubling to 5 min). */
   | { kind: 'offline'; failures: number }
   /** Stopped until the person fixes the cause (`/orchard reconnect`). `message` has request ids and paths stripped. */

@@ -26,6 +26,7 @@ import {
 } from './alerts'
 import type { AlertsPage } from './alerts'
 import { bandLine } from './band'
+import { LEASE_BEAT_MS, LEASE_RECHECK_MS, RECENT_KEY, isHeldByOther, leaseKey, parseLease, parseRecent, planEviction } from './lease'
 import { DEFAULT_SETTINGS, addParticipation, classify, isLevel, parseParticipation, parseSettings, participationKey, settingsKey } from './classify'
 import { checkConn, parseProjectFile, PROJECT_FILE, readOptions, resolveIdentity } from './config'
 import type { Options, Parsed, ProjectOverrides } from './config'
@@ -162,7 +163,7 @@ export async function reconnect($: EngineInterface, app: App) {
     const outcome = await connectOnce(runner($), rt, here)
     if (outcome.kind === 'connected') {
       await update($, workspace, () => outcome.workspace)
-      await setStatus($, { kind: 'connected' })
+      await setStatus($, connectedStatus(app.ls))
       detach(startListener($, app))
     } else if (outcome.kind === 'offline') {
       await markOffline($, app)
@@ -195,6 +196,8 @@ async function start($: EngineInterface, app: App, cwd: string) {
   rt.timer?.cancel()
   rt.timer = undefined
   rt.failures = 0
+  ls.leaseTimer?.cancel()
+  ls.leaseTimer = undefined
   stopLoop(ls, 'superseded')
   await setStatus($, { kind: 'connecting' })
 
@@ -244,11 +247,100 @@ async function storeGet($: EngineInterface, key: string): Promise<unknown> {
   }
 }
 
-async function storeSet($: EngineInterface, key: string, value: unknown) {
+const connectedStatus = (ls: ListenerState): OrchardStatus => (ls.isStoreFailing ? { kind: 'connected', isStoreFailing: true } : { kind: 'connected' })
+
+/** Writes to `$.store`. A failure does not stop delivery (the store is a backstop against replay) but the band says so. */
+async function storeSet($: EngineInterface, app: App, key: string, value: unknown) {
+  let isFailing = false
   try {
     await $.store.set(key, value)
   } catch {
-    // The store is the backstop against replay, not a requirement for delivery.
+    isFailing = true
+  }
+  const { ls } = app
+  if (isFailing === ls.isStoreFailing) return
+  ls.isStoreFailing = isFailing
+  await update($, status, current => (current?.kind === 'connected' ? connectedStatus(ls) : current))
+}
+
+/** Reads the lease of this connection. */
+async function readLease($: EngineInterface, endpoint: string, me: string) {
+  return parseLease(await storeGet($, leaseKey(endpoint, me)))
+}
+
+/** The id this session holds the lease under: its session id, so a reload of the mod is still the same holder. */
+async function leaseHolder($: EngineInterface, ls: ListenerState): Promise<string> {
+  if (ls.leaseId === undefined) {
+    try {
+      ls.leaseId = await $.session.id()
+    } catch {
+      ls.leaseId = crypto.randomUUID()
+    }
+  }
+  return ls.leaseId
+}
+
+/**
+ * Takes or renews the lease for this (endpoint, participant). False: another session beat it
+ * recently, so this one must not listen. Two sessions starting together can both write; the one
+ * whose write lands first finds the other's at its next heartbeat and stands down.
+ */
+async function holdLease($: EngineInterface, app: App, isForced: boolean): Promise<boolean> {
+  const { rt, ls } = app
+  const here = rt.current
+  if (here === undefined) return true
+  const now = await $.clock.now()
+  if (!isForced && now - ls.leaseBeatAt < LEASE_BEAT_MS) return true
+  const { endpoint } = here.conn
+  const me = here.identity.participantId
+  const holder = await leaseHolder($, ls)
+  if (isHeldByOther(await readLease($, endpoint, me), holder, now)) return false
+  ls.leaseBeatAt = now
+  await storeSet($, app, leaseKey(endpoint, me), { session: holder, at: now })
+  return true
+}
+
+/** This session does not listen: another one does. The band says so, and a timer looks whether that session went away. */
+async function standDown($: EngineInterface, app: App, loop: Loop) {
+  const { ls } = app
+  loop.isStopped = true
+  loop.stopReason = 'shared'
+  loop.timer?.cancel()
+  loop.timer = undefined
+  ls.watchdog?.cancel()
+  ls.watchdog = undefined
+  await setStatus($, { kind: 'shared' })
+  ls.leaseTimer?.cancel()
+  ls.leaseTimer = $.clock.after(LEASE_RECHECK_MS, () => {
+    detach(recheckLease($, app))
+  })
+}
+
+/** A read-only session looks again: once the other session's lease is stale, this one listens. */
+async function recheckLease($: EngineInterface, app: App) {
+  const { rt, ls } = app
+  ls.leaseTimer = undefined
+  const here = rt.current
+  if (here === undefined || (await read($, status))?.kind !== 'shared') return
+  const holder = await leaseHolder($, ls)
+  if (isHeldByOther(await readLease($, here.conn.endpoint, here.identity.participantId), holder, await $.clock.now())) {
+    ls.leaseTimer = $.clock.after(LEASE_RECHECK_MS, () => {
+      detach(recheckLease($, app))
+    })
+    return
+  }
+  await setStatus($, connectedStatus(ls))
+  detach(startListener($, app))
+}
+
+/** Marks this record used and forgets the least recently used ones past the cap. */
+async function touchRecords($: EngineInterface, app: App, endpoint: string, me: string) {
+  try {
+    const plan = planEviction(await $.store.keys(), parseRecent(await storeGet($, RECENT_KEY)), { endpoint, participantId: me }, await $.clock.now())
+    for (const key of plan.evict) await $.store.delete(key)
+    await storeSet($, app, RECENT_KEY, plan.index)
+  } catch {
+    // Housekeeping: a store that will not list or delete is the write failure the band already reports.
   }
 }
 
@@ -277,7 +369,7 @@ async function noteParticipation($: EngineInterface, app: App, ids: readonly str
   if (here === undefined || fresh.length === 0) return
   ls.participation = addParticipation(ls.participation, fresh)
   ls.participationSet = new Set(ls.participation)
-  await storeSet($, participationKey(here.conn.endpoint, here.identity.participantId), ls.participation)
+  await storeSet($, app, participationKey(here.conn.endpoint, here.identity.participantId), ls.participation)
 }
 
 type Window = { kind: 'ok'; messages: HistoryMessage[] } | { kind: 'offline' } | { kind: 'failed'; message: string }
@@ -412,6 +504,14 @@ async function prepare($: EngineInterface, app: App, loop: Loop): Promise<boolea
   const me = here.identity.participantId
   const scope = queueScope(endpoint, me)
 
+  // One session at a time listens as a participant: a second would wake on the same message,
+  // answer it twice, and overwrite the first one's cursor.
+  if (!(await holdLease($, app, true))) {
+    await standDown($, app, loop)
+    return false
+  }
+  await touchRecords($, app, endpoint, me)
+
   const stored = parseStoreRecord(await storeGet($, storeKey(endpoint, me)))
   ls.settings = parseSettings(await storeGet($, settingsKey(endpoint, me)))
   await update($, settings, () => ls.settings)
@@ -448,7 +548,7 @@ async function prepare($: EngineInterface, app: App, loop: Loop): Promise<boolea
       // No stored cursor: start from now. `--after 0` would replay the whole history.
       ls.record = { cursor: Math.max(0, ...window.messages.map(m => m.sequence)), delivered: [] }
       ls.fetchCursor = Math.max(ls.fetchCursor, ls.record.cursor)
-      await storeSet($, storeKey(endpoint, me), ls.record)
+      await storeSet($, app, storeKey(endpoint, me), ls.record)
     }
     await applyWindow($, app, window.messages)
   }
@@ -475,6 +575,10 @@ async function tick($: EngineInterface, app: App, loop: Loop) {
   loop.isPolling = true
   try {
     loop.expectedBy = (await $.clock.now()) + ALERTS_TIMEOUT_MS + GUARD_SLACK_MS
+    if (!(await holdLease($, app, false))) {
+      await standDown($, app, loop)
+      return
+    }
     await retryAcks($, app)
     // A queue full of alerts that all wake a session has nowhere to put more: leave them on the
     // server (the cursor does not move) and look again once a delivery has made room.
@@ -767,7 +871,7 @@ async function finishDelivery($: EngineInterface, app: App, batch: readonly Orch
   const cover = waiting === Number.POSITIVE_INFINITY ? cur.cursor : Math.min(cur.cursor, waiting - 1)
   ls.record = recordDelivery(ls.record, ids, cover)
   endHold($, ls)
-  if (here !== undefined) await storeSet($, storeKey(here.conn.endpoint, here.identity.participantId), ls.record)
+  if (here !== undefined) await storeSet($, app, storeKey(here.conn.endpoint, here.identity.participantId), ls.record)
   await syncCounts($, app)
   detach(sendAck($, app, { ids, requestId: `orchard-ack-${crypto.randomUUID()}` }))
   detach(refreshDecisions($, app))
@@ -804,7 +908,7 @@ async function saveSettings($: EngineInterface, app: App, next: OrchardSettings)
   const { rt, ls } = app
   const here = rt.current
   ls.settings = next
-  if (here !== undefined) await storeSet($, settingsKey(here.conn.endpoint, here.identity.participantId), next)
+  if (here !== undefined) await storeSet($, app, settingsKey(here.conn.endpoint, here.identity.participantId), next)
   await update($, settings, () => next)
   // What is already pending was classified under the old settings: what the new ones would drop
   // goes (as it would have at the door), what changes between wake and quiet is counted afresh.

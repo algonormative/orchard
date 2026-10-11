@@ -88,7 +88,7 @@ export function world(on: On, options: WorldOptions = {}) {
   const box: { text: string; hold: Promise<void> | undefined; reads: number } = { text: '', hold: undefined, reads: 0 }
   const gate: { person: Promise<void> | undefined } = { person: undefined }
   const submits: Submit[] = []
-  const submit: { mode: 'accept' | 'drop' | 'throw' } = { mode: 'accept' }
+  const submit: { mode: 'accept' | 'drop' | 'throw'; hold: Promise<void> | undefined } = { mode: 'accept', hold: undefined }
   on('prompt.read', async () => {
     box.reads += 1
     await box.hold
@@ -97,6 +97,8 @@ export function world(on: On, options: WorldOptions = {}) {
   on('prompt.submit', async (_$, e) => {
     submits.push({ text: e.text, context: e.context, origin: e.origin, acksSeen: fake.acks.length, storeWritesSeen: store.writes.length })
     if (e.origin?.kind === 'composer') await gate.person
+    // A plugin's prompt queued behind a running turn: the call stays pending until that turn is over and its own starts.
+    if (e.origin?.kind === 'plugin') await submit.hold
     if (submit.mode === 'throw') throw new Error('the prompt queue is gone')
     if (submit.mode === 'drop') return { drop: 'a hook refused the prompt' }
     return { text: e.text, context: e.context }

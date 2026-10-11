@@ -6,6 +6,7 @@ import type { Engine } from 'claude-code/testing'
 
 import { storeKey } from './alerts'
 import { participationKey, settingsKey } from './classify'
+import { LEASE_STALE_MS, RECENT_KEY, leaseKey, recordKeys } from './lease'
 import { CREDENTIAL, ENDPOINT, ME, OPTIONS } from './fake-orchard'
 import type { NotifyMode } from './fake-orchard'
 import { HELD_RECHECK_MS, bandText, begin, expectNoSecrets, resumes, typed, visible, world } from './test-world'
@@ -1208,4 +1209,113 @@ test('a loop that crashes takes the session offline instead of leaving it lookin
   await w.clock.advance(10_000)
   expect(w.submits).toHaveLength(1)
   expect(w.submits[0]?.text).toContain('body of m1')
+})
+
+// ---- one listening session per participant, and a store that stays small ----
+
+const LEASE = leaseKey(ENDPOINT, ME)
+
+test('a second session for the same participant is read-only while the first one beats its lease, and listens once the lease goes stale', { options: OPTIONS }, async ($, on) => {
+  const w = world(on, { store: { [LEASE]: { session: 'the-other-session', at: 0 } } })
+  await begin($, w)
+
+  expect(alertsCalls(w)).toHaveLength(0)
+  expect(w.state.latest.status).toEqual({ kind: 'shared' })
+  expect(await bandText($)).toBe('Orchard · another session is listening')
+  await w.clock.advance(100_000)
+  expect(alertsCalls(w)).toHaveLength(0)
+  expect(w.submits).toEqual([])
+  expect(w.store.data.get(LEASE)).toEqual({ session: 'the-other-session', at: 0 })
+
+  // nobody has beaten it for three polls: this session takes it
+  await w.clock.advance(LEASE_STALE_MS)
+  expect(alertsCalls(w).length).toBeGreaterThan(0)
+  expect(w.state.latest.status).toEqual({ kind: 'connected' })
+  expect((w.store.data.get(LEASE) as { session: string }).session).not.toBe('the-other-session')
+  deliver(w, 'm1')
+  await w.clock.settle()
+  await w.clock.advance(20_000)
+  expect(w.submits).toHaveLength(1)
+})
+
+test('a listening session beats its lease, and stands down when another session has taken it', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  const mine = w.store.data.get(LEASE) as { session: string; at: number }
+  expect(typeof mine.session).toBe('string')
+  await w.clock.advance(70_000)
+  expect((w.store.data.get(LEASE) as { at: number }).at).toBeGreaterThan(mine.at)
+  expect(w.state.latest.status).toEqual({ kind: 'connected' })
+
+  w.store.data.set(LEASE, { session: 'the-other-session', at: await w.clock.now() })
+  await w.clock.advance(130_000)
+  expect(w.state.latest.status).toEqual({ kind: 'shared' })
+  const calls = alertsCalls(w).length
+  deliver(w, 'm1')
+  await w.clock.advance(50_000)
+  expect(alertsCalls(w).length).toBe(calls)
+  expect(w.submits).toEqual([])
+})
+
+test('past 50 (endpoint, participant) records the least recently used are evicted from the store, the current one never', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = {}
+  const recent: unknown[] = []
+  for (let i = 1; i <= 60; i++) {
+    const endpoint = `http://127.0.0.1:${9000 + i}/workspaces/w${i}/mcp`
+    for (const key of recordKeys(endpoint, 'claude-old')) store[key] = { n: i }
+    recent.push({ endpoint, participantId: 'claude-old', at: i })
+  }
+  store[RECENT_KEY] = recent
+  const w = world(on, { store })
+  await begin($, w)
+
+  const owners = (key: string) => key.split(' ').slice(1).join(' ')
+  const records = new Set([...w.store.data.keys()].filter(k => k !== RECENT_KEY).map(owners))
+  expect(records.size).toBe(50)
+  expect(records.has(`${ENDPOINT} ${ME}`)).toBe(true)
+  expect(w.store.data.has(INBOX)).toBe(true)
+  // the newest old ones stay, the oldest go
+  expect(records.has('http://127.0.0.1:9060/workspaces/w60/mcp claude-old')).toBe(true)
+  expect(records.has('http://127.0.0.1:9001/workspaces/w1/mcp claude-old')).toBe(false)
+  expect(records.has('http://127.0.0.1:9011/workspaces/w11/mcp claude-old')).toBe(false)
+  expect(records.has('http://127.0.0.1:9012/workspaces/w12/mcp claude-old')).toBe(true)
+})
+
+test('a failed store write shows in the band, and the band clears once a write goes through', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  expect(await bandText($)).toBeUndefined()
+
+  w.store.fail.set = true
+  deliver(w, 'm1')
+  await w.clock.settle()
+  await w.clock.advance(10_000)
+  // delivered all the same; the cursor could not be kept
+  expect(w.submits).toHaveLength(1)
+  expect(w.state.latest.status).toEqual({ kind: 'connected', isStoreFailing: true })
+  expect(await bandText($)).toContain('could not save its place')
+
+  w.store.fail.set = false
+  deliver(w, 'm2')
+  await w.clock.advance(70_000)
+  expect(w.submits).toHaveLength(2)
+  expect(w.state.latest.status).toEqual({ kind: 'connected' })
+  expect(await bandText($)).toBeUndefined()
+})
+
+test('a wake queued behind a running turn is neither recorded nor acknowledged until its own turn starts (the submit call resolves)', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  let turnStarts!: () => void
+  w.submit.hold = new Promise<void>(resolve => (turnStarts = resolve))
+  deliver(w, 'm1')
+  await w.clock.settle()
+  await w.clock.advance(10_000)
+
+  expect(w.submits).toHaveLength(1)
+  expect(w.fake.acks).toEqual([])
+  expect(w.store.data.get(INBOX)).toEqual({ cursor: 0, delivered: [] })
+  expect(queued(w)).toEqual(['m1'])
+
+  turnStarts()
+  await w.clock.settle()
+  expect(w.fake.acks.map(a => a.ids)).toEqual([['m1']])
+  expect(w.store.data.get(INBOX)).toEqual({ cursor: 1, delivered: ['m1'] })
 })
