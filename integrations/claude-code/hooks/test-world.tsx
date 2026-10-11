@@ -163,7 +163,7 @@ export function expectNoSecrets(texts: readonly string[]) {
 
 export const resumes = (w: World) => w.fake.calls.filter(c => c.cmd === 'resume')
 /** Calls other than the listener's own polling and bookkeeping. */
-export const connectionCalls = (w: World) => w.fake.calls.filter(c => !['alerts', 'ack'].includes(c.cmd) && c.tool !== 'mail_history' && c.tool !== 'mail_participants')
+export const connectionCalls = (w: World) => w.fake.calls.filter(c => !['alerts', 'ack'].includes(c.cmd) && c.tool !== 'mail_history' && c.tool !== 'mail_participants' && c.tool !== 'workspace_decisions')
 
 /** The model calling one of the plugin's tools. */
 export function callTool($: Engine, name: string, input: Record<string, unknown> = {}) {

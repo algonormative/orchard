@@ -80,6 +80,8 @@ export type Fake = {
   push: (message: Partial<FakeMessage> & { id: string }, alert?: { reasons: string[]; channel?: FakeAlert['channel'] }) => FakeMessage
   /** How many `alerts` calls were answered, and how many are waiting on the server right now. */
   waiting: number
+  /** The host has the `workspace_decisions` tool (an older host answers a tool error). */
+  hasDecisionsTool: boolean
 }
 
 const json = (value: unknown): Reply => ({ exitCode: 0, stdout: JSON.stringify(value, null, 2) })
@@ -195,6 +197,14 @@ async function answer(fake: Fake, call: Call, sleep: (ms: number) => Promise<voi
       }
       case 'tasks_list':
         return json({ store_id: args.store_id, tasks: fake.tasks })
+      case 'workspace_decisions': {
+        if (!fake.hasDecisionsTool) return { exitCode: 4, stderr: 'Orchard agent: unknown tool workspace_decisions\n' }
+        const answered = new Set(fake.messages.filter(m => m.sender_id === fake.ownerId).map(m => m.thread_id))
+        const open = fake.messages.filter(
+          m => m.kind === 'decision' && m.sender_id !== fake.ownerId && !answered.has(m.id) && (typeof args.sender_id !== 'string' || m.sender_id === args.sender_id),
+        )
+        return json({ decisions: open })
+      }
       case 'role_declare':
         return json({ declared: true, participant_id: args.participant_id })
     }
@@ -230,6 +240,7 @@ export function fakeOrchard(on: On, now: () => number, sleep: (ms: number) => Pr
     tasks: [],
     script: undefined,
     waiting: 0,
+    hasDecisionsTool: false,
     push(partial, alert) {
       const message: FakeMessage = {
         sequence: (fake.messages.at(-1)?.sequence ?? 0) + 1,
