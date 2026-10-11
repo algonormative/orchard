@@ -29,7 +29,19 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
 - **Tools for Claude**: `orchard_send`, `orchard_reply`, `orchard_ack`, `orchard_history`
   and `orchard_call`. Writes always act as this session's participant: a different
   `sender_id` or `participant_id` is refused, and `mail_register`, `mail_leave`,
-  `artifact_upload` and non-read `plugin_call` operations are denied.
+  `artifact_upload` and non-read `plugin_call` operations are denied. The one write
+  `plugin_call` allows is `role_declare`: its nested `participant_id` is filled in when
+  missing and refused when it names someone else.
+- **One listener per participant.** Two sessions in one folder share the default id, so
+  the listener keeps a lease in the plugin store (a session id and a heartbeat). A second
+  session sees a fresh lease, does not listen (its tools still work) and its band says
+  "another session is listening"; it takes over when the lease goes three polls without a
+  heartbeat. For two live sessions, give each its own `participantId`.
+- **The store stays bounded.** The plugin store keeps the last 50 (endpoint, participant)
+  records and forgets the least recently used past that. If a store write fails, the band
+  says so. Acknowledgement retries after a connection failure live in memory only, so a
+  restart can leave a message unacknowledged on the server (accepted: acknowledgement is
+  bookkeeping, and the stored cursor already prevents a repeat delivery).
 - **`/orchard`** opens a pane with the participant's inbox, open decisions, claimed tasks
   and notification settings. `/orchard notify` reads and sets levels from the prompt.
 

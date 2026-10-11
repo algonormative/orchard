@@ -15,7 +15,7 @@ export type Cancelable = { cancel: () => void }
  * Why a loop ended. `crashed` (an exception) and `stalled` (it did not move by its `expectedBy`)
  * are loops that died on their own: the session goes offline and reconnects, which starts a new one.
  */
-export type StopReason = 'superseded' | 'offline' | 'error' | 'crashed' | 'stalled'
+export type StopReason = 'superseded' | 'offline' | 'error' | 'crashed' | 'stalled' | 'shared'
 
 /**
  * One run of the alert loop, tied to one value of the `generation` atom. A loop whose
@@ -85,6 +85,14 @@ export type ListenerState = {
   decisionsAt: number | undefined
   isReadingDecisions: boolean
   isIdToastShown: boolean
+  /** The id this session holds the lease under (undefined until the first claim). */
+  leaseId: string | undefined
+  /** When the lease was last written. */
+  leaseBeatAt: number
+  /** Looks whether another session's lease has gone stale, while this one is read-only. */
+  leaseTimer: Cancelable | undefined
+  /** The last write to `$.store` failed. */
+  isStoreFailing: boolean
 }
 
 export function createListenerState(): ListenerState {
@@ -117,6 +125,10 @@ export function createListenerState(): ListenerState {
     decisionsAt: undefined,
     isReadingDecisions: false,
     isIdToastShown: false,
+    leaseId: undefined,
+    leaseBeatAt: 0,
+    leaseTimer: undefined,
+    isStoreFailing: false,
   }
 }
 

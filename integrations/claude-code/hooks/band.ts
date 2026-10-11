@@ -23,15 +23,19 @@ export function bandLine(
       return { text: 'Orchard · offline', tone: 'warning' }
     case 'error':
       return { text: `Orchard · error: ${plain(status.message, 120)}`, tone: 'error' }
+    case 'shared':
+      return { text: 'Orchard · another session is listening', tone: 'quiet' }
     case 'connected': {
       const unread = count(counts.unread)
       const forYou = count(counts.forYou)
       const needsYou = count(counts.needsYou)
-      if (unread === 0 && forYou === 0 && needsYou === 0) return null
+      const isStoreFailing = status.isStoreFailing === true
+      if (unread === 0 && forYou === 0 && needsYou === 0 && !isStoreFailing) return null
       let text = `Orchard · ${plain(workspace?.name ?? '', 60) || 'connected'}`
       if (unread > 0) text += ` · ${unread} new${forYou > 0 ? ` (${forYou} for you)` : ''}`
       if (needsYou > 0) text += ` · needs-you ${needsYou}`
-      return { text, tone: 'quiet' }
+      if (isStoreFailing) text += ' · could not save its place (store write failed)'
+      return { text, tone: isStoreFailing ? 'warning' : 'quiet' }
     }
   }
 }
