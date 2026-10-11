@@ -382,6 +382,27 @@ async function readWindow($: EngineInterface, app: App): Promise<Window> {
   return { kind: 'ok', messages: parseHistory(result.json) }
 }
 
+/**
+ * The decisions this participant raised that the owner has not answered, as the host counts them
+ * over the whole history (`workspace_decisions`). Undefined when the host cannot say (it has no
+ * such tool, or the call failed): the caller then reconstructs from the history window. A tool
+ * error is taken to mean an older host and remembered for the connection; a lost connection is not.
+ */
+async function countOpenDecisions($: EngineInterface, app: App, me: string): Promise<number | undefined> {
+  const { ls } = app
+  if (ls.decisionsTool === 'missing') return undefined
+  const result = await tool($, app.rt, 'workspace_decisions', { sender_id: me })
+  if (result.exitCode === EXIT_OK) {
+    const decisions = (result.json as { decisions?: unknown } | undefined)?.decisions
+    if (Array.isArray(decisions)) {
+      ls.decisionsTool = 'available'
+      return decisions.length
+    }
+  }
+  if (result.exitCode !== EXIT_CONNECTION) ls.decisionsTool = 'missing'
+  return undefined
+}
+
 async function applyWindow($: EngineInterface, app: App, messages: readonly HistoryMessage[]) {
   const { rt, ls } = app
   const here = rt.current
@@ -389,7 +410,7 @@ async function applyWindow($: EngineInterface, app: App, messages: readonly Hist
   const me = here.identity.participantId
   await noteParticipation($, app, participationFrom(messages, me))
   const owner = (await read($, workspace))?.ownerId ?? 'owner'
-  await syncCounts($, app, openDecisions(messages, me, owner).length)
+  await syncCounts($, app, (await countOpenDecisions($, app, me)) ?? openDecisions(messages, me, owner).length)
   ls.decisionsAt = await $.clock.now()
 }
 
@@ -503,6 +524,8 @@ async function prepare($: EngineInterface, app: App, loop: Loop): Promise<boolea
   const { endpoint } = here.conn
   const me = here.identity.participantId
   const scope = queueScope(endpoint, me)
+  // A new connection may be a different host: ask again whether it has `workspace_decisions`.
+  ls.decisionsTool = 'unknown'
 
   // One session at a time listens as a participant: a second would wake on the same message,
   // answer it twice, and overwrite the first one's cursor.

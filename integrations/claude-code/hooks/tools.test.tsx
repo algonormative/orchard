@@ -357,7 +357,7 @@ test('orchard_call acts as this session\'s participant: naming another is refuse
   // a tool that names no participant is not given one (its schema would refuse the extra field)
   expect(stdinOf(toolCalls(w, 'task_create')[0])).not.toHaveProperty('participant_id')
   expect(stdinOf(toolCalls(w, 'task_create')[0])).not.toHaveProperty('sender_id')
-  for (const call of w.fake.calls.filter(c => c.cmd === 'call' && c.tool !== 'workspace_info' && c.tool !== 'mail_history' && c.tool !== 'mail_participants')) {
+  for (const call of w.fake.calls.filter(c => c.cmd === 'call' && c.tool !== 'workspace_info' && c.tool !== 'mail_history' && c.tool !== 'mail_participants' && c.tool !== 'workspace_decisions')) {
     expect(stdinOf(call).request_id).toMatch(REQUEST_ID)
   }
 })

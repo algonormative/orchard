@@ -1319,3 +1319,46 @@ test('a wake queued behind a running turn is neither recorded nor acknowledged u
   expect(w.fake.acks.map(a => a.ids)).toEqual([['m1']])
   expect(w.store.data.get(INBOX)).toEqual({ cursor: 1, delivered: ['m1'] })
 })
+
+// ---- needs-you from the host's own count ----
+
+const decisionCalls = (w: World) => w.fake.calls.filter(c => c.tool === 'workspace_decisions')
+
+test('needs-you comes from workspace_decisions with this participant as sender_id, asked over the whole history', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  w.fake.hasDecisionsTool = true
+  w.fake.push({ id: 'dec1', sender_id: ME, kind: 'decision', body: 'ship it?', destination: { kind: 'direct', id: 'owner' }, recipient_ids: ['owner'] })
+  w.fake.push({ id: 'dec2', sender_id: 'claude-other', kind: 'decision', body: 'not mine', destination: { kind: 'direct', id: 'owner' }, recipient_ids: ['owner'] })
+  await begin($, w)
+
+  expect(JSON.parse(decisionCalls(w)[0]?.stdin ?? '{}')).toEqual({ sender_id: ME })
+  expect(counts(w)).toEqual({ unread: 0, forYou: 0, needsYou: 1 })
+  expect(await bandText($)).toBe('Orchard · Fruit Stand · needs-you 1')
+
+  await w.clock.advance(20_000)
+  deliver(w, 'ans', ['direct'], { sender_id: 'owner', thread_id: 'dec1', body: 'yes, ship it' })
+  await w.clock.settle()
+  expect(counts(w)).toEqual({ unread: 1, forYou: 1, needsYou: 0 })
+})
+
+test('a host without workspace_decisions is asked once per connection, then needs-you is rebuilt from the history window', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  w.fake.push({ id: 'dec1', sender_id: ME, kind: 'decision', body: 'ship it?', destination: { kind: 'direct', id: 'owner' }, recipient_ids: ['owner'] })
+  await begin($, w)
+
+  expect(decisionCalls(w)).toHaveLength(1)
+  expect(counts(w)).toEqual({ unread: 0, forYou: 0, needsYou: 1 })
+
+  // later refreshes use the history alone: the tool is not asked about again
+  await w.clock.advance(20_000)
+  deliver(w, 'ans', ['direct'], { sender_id: 'owner', thread_id: 'dec1', body: 'yes' })
+  await w.clock.settle()
+  expect(counts(w)).toMatchObject({ needsYou: 0 })
+  expect(decisionCalls(w)).toHaveLength(1)
+
+  // a new connection (reconnect) asks again
+  w.fake.hasDecisionsTool = true
+  await $.command.run(RECONNECT)
+  await w.clock.settle()
+  expect(decisionCalls(w)).toHaveLength(2)
+})

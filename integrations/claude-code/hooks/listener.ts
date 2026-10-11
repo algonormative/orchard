@@ -93,6 +93,11 @@ export type ListenerState = {
   leaseTimer: Cancelable | undefined
   /** The last write to `$.store` failed. */
   isStoreFailing: boolean
+  /**
+   * Whether this connection's host has the `workspace_decisions` tool: unknown until first asked,
+   * `missing` after a tool error (a host older than the tool) so it is not asked again.
+   */
+  decisionsTool: 'unknown' | 'available' | 'missing'
 }
 
 export function createListenerState(): ListenerState {
@@ -129,6 +134,7 @@ export function createListenerState(): ListenerState {
     leaseBeatAt: 0,
     leaseTimer: undefined,
     isStoreFailing: false,
+    decisionsTool: 'unknown',
   }
 }
 
