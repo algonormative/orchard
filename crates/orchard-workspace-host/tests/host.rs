@@ -3136,6 +3136,69 @@ fn snapshot_reports_open_decisions_beyond_the_history_window() {
 }
 
 #[test]
+fn workspace_decisions_tool_lists_open_decisions_and_filters_by_sender() {
+    let temp = TempDir::new().unwrap();
+    let host = WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap();
+    let (workspace_id, _, _) = create_workspace(&host, "Decision tool");
+    for id in ["alice", "bob"] {
+        host.call("mail_register", json!({"workspace_id":workspace_id,"request_id":format!("register-{id}"),"participant_id":id,"name":id})).unwrap();
+    }
+    let decisions = |args: Value| {
+        let mut args = args;
+        args["workspace_id"] = json!(workspace_id);
+        host.call("workspace_decisions", args).unwrap()["decisions"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let send = |request_id: &str, sender: &str, destination: Value, thread: Option<&str>| {
+        let kind = if sender == "owner" {
+            "message"
+        } else {
+            "decision"
+        };
+        let mut args = json!({"workspace_id":workspace_id,"request_id":request_id,"sender_id":sender,"destination":destination,"body":request_id,"kind":kind});
+        if let Some(thread) = thread {
+            args["thread_id"] = json!(thread);
+        }
+        host.call("mail_send", args).unwrap()["message"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(decisions(json!({})).is_empty());
+
+    let to_owner = json!({"kind":"direct","id":"owner"});
+    let open = send("open-one", "alice", to_owner.clone(), None);
+    let found = decisions(json!({}));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0]["id"], json!(open));
+    assert_eq!(found[0]["sender_id"], "alice");
+
+    let answered = send("answered-one", "bob", to_owner, None);
+    assert_eq!(decisions(json!({})).len(), 2);
+    send(
+        "owner-reply",
+        "owner",
+        json!({"kind":"direct","id":"bob"}),
+        Some(&answered),
+    );
+    let remaining = decisions(json!({}));
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0]["id"], json!(open));
+
+    assert_eq!(decisions(json!({"sender_id":"alice"})).len(), 1);
+    assert!(decisions(json!({"sender_id":"bob"})).is_empty());
+    assert!(decisions(json!({"sender_id":"nobody"})).is_empty());
+    assert!(host
+        .call(
+            "workspace_decisions",
+            json!({"workspace_id":workspace_id,"sender_id":7})
+        )
+        .is_err());
+}
+
+#[test]
 fn task_show_returns_the_same_task_shape_as_other_task_tools() {
     let temp = TempDir::new().unwrap();
     let host = WorkspaceHost::open(temp.path().join("data"), packaged_br()).unwrap();

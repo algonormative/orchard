@@ -285,6 +285,7 @@ impl WorkspaceHost {
             "workspace_intro" => self.workspace_intro(args),
             "workspace_status" => self.workspace_status(args),
             "workspace_alerts" => self.workspace_alerts(args),
+            "workspace_decisions" => self.workspace_decisions(args),
             "connection_info" => self.connection_info(args),
             "rotate_token" => self.rotate_token(args),
             "repository_attach" => self.repository_attach(args),
@@ -1435,7 +1436,7 @@ impl WorkspaceHost {
                     json!(["tasks_list","task_show","task_create","task_update","task_claim","task_release","task_close","task_dependencies"])
                 } else { json!([]) },
                 "task_dependencies_mutable": false,
-                "resources": ["resource_get","resource_links","resource_link","workspace_intro","workspace_status","workspace_alerts","artifact_roots","artifact_list","artifact_history","artifact_upload","artifact_delete","artifact_commit"],
+                "resources": ["resource_get","resource_links","resource_link","workspace_intro","workspace_status","workspace_alerts","workspace_decisions","artifact_roots","artifact_list","artifact_history","artifact_upload","artifact_delete","artifact_commit"],
                 "state": ["state_list","state_get","state_opportunities"]
             },
             "paths": {"workspace":workspace.root,"artifacts":artifacts,"readme":artifacts.join("README.md")},

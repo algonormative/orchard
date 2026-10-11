@@ -31,13 +31,28 @@ impl ToolBackend for CombinedBackend {
 
     fn call(&self, name: &str, args: Value) -> Result<Value, String> {
         match name {
-            "tasks_list" | "workspace_info" | "task_show" | "task_create" | "task_update"
-            | "task_claim" | "task_release" | "task_close" | "task_dependencies"
-            | "resource_get" | "resource_links" | "resource_link" | "artifact_roots"
-            | "artifact_list" | "artifact_history" | "artifact_upload" | "artifact_delete"
-            | "artifact_commit" | "workspace_intro" | "workspace_status" | "workspace_alerts" => {
-                call_from_mcp(&self.host, &self.workspace_id, name, args)
-            }
+            "tasks_list"
+            | "workspace_info"
+            | "task_show"
+            | "task_create"
+            | "task_update"
+            | "task_claim"
+            | "task_release"
+            | "task_close"
+            | "task_dependencies"
+            | "resource_get"
+            | "resource_links"
+            | "resource_link"
+            | "artifact_roots"
+            | "artifact_list"
+            | "artifact_history"
+            | "artifact_upload"
+            | "artifact_delete"
+            | "artifact_commit"
+            | "workspace_intro"
+            | "workspace_status"
+            | "workspace_alerts"
+            | "workspace_decisions" => call_from_mcp(&self.host, &self.workspace_id, name, args),
             "plugin_list"
             | "plugin_inspect"
             | "plugin_attach"
@@ -80,6 +95,14 @@ pub(crate) fn resource_tools() -> Vec<ToolDefinition> {
                     "include_channel_messages":{"type":"boolean","default":false},
                     "wait_seconds":{"type":"integer","minimum":0,"maximum":120,"default":0}
                 },"required":["participant_id"],"additionalProperties":false
+            }),
+        ),
+        tool(
+            "workspace_decisions",
+            "Read the decisions still waiting on the owner over the whole Mail history, not a bounded window: a kind \"decision\" message delivered to the owner that no owner message has answered in its thread. Optionally only those sent by one participant. Read-only.",
+            json!({
+                "type":"object","properties":{"sender_id":{"type":"string","maxLength":128}},
+                "additionalProperties":false
             }),
         ),
         tool(

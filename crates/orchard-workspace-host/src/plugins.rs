@@ -106,6 +106,7 @@ const MANIFESTS: &[Manifest] = &[
             "mail_acknowledge",
             "mail_search",
             "workspace_alerts",
+            "workspace_decisions",
         ],
         intro_section: None,
         snapshot_section: None,
@@ -1869,6 +1870,9 @@ fn operation_description(name: &str) -> &'static str {
         "mail_history" => "Read bounded recent or chronological message history.",
         "mail_acknowledge" => "Record that a participant handled a delivered message.",
         "workspace_alerts" => "Poll coordination alerts without implicitly acknowledging them.",
+        "workspace_decisions" => {
+            "Read decisions still waiting on the owner, optionally from one sender."
+        }
         "tasks_list" => "List tasks from one attached Beads store.",
         "task_show" => "Read one qualified task.",
         "task_create" => "Create a task idempotently in an attached store.",

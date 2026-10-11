@@ -73,6 +73,7 @@ ID and reject nested references to another workspace.
 | `workspace_intro` | `{workspace_id}` | README descriptor/text, current participants/channels, introduction with attached plugin sections, and generic joining prompt |
 | `workspace_snapshot` | `{workspace_id, history_limit?}` | workspace, plugins, mail, repositories, task stores, `plugin_sections` keyed by plugin ID, and source errors (browser operation) |
 | `workspace_status` | `{workspace_id}` | participant/channel/message/task/root counts, participant records, artifact health, and source errors |
+| `workspace_decisions` | `{workspace_id, sender_id?}` | `{decisions}`: open decisions waiting on the owner over all history, same message shape as `mail.open_decisions` in the snapshot |
 | `workspace_alerts` | `{workspace_id, participant_id, after?, limit?, include_channel_messages?, wait_seconds?}` | `{alerts, next_cursor, has_more}` |
 | `artifact_roots` | `{workspace_id}` | `{roots}` including same-host `path` and `writable` |
 | `artifact_list` | `{workspace_id, root_id, path?, revision?}` | root, entries, and truncation state |
