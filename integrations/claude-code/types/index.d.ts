@@ -144,6 +144,8 @@ export type OrchardPane = {
   snoozed?: { id: string; until: number }[]
   /** A two-step action waiting for the person's yes or no (it lapses after 10 s). */
   confirm?: { verb: 'remove' | 'interrupt'; id: string } | null
+  /** The thread (by reply id) the toolbar acts on. Absent or no longer listed: the newest unread, else the newest. */
+  selected?: string | null
 }
 
 declare module 'claude-code' {

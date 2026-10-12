@@ -1,6 +1,6 @@
 // The pane's quick actions: the pure pieces (addresses, action lines, queue order, snoozes) as
 // tables, then each action end to end on the mock clock: remove, snooze, handle next, interrupt,
-// the two-step question, the link presses and the hover structure.
+// the two-step question, and the toolbar and selection model on every surface.
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -13,24 +13,27 @@ import {
   addHidden,
   addSnooze,
   clockTime,
-  detailActions,
   hiddenKey,
-  headerActions,
+  confirmQuestion,
+  neighbourOf,
+  selectedId,
+  shownThreads,
+  toolbarItems,
+  VISIBLE_THREADS,
   nextDue,
   parseActionHref,
   parseHidden,
   parseSnoozes,
   revive,
-  rowActions,
   snoozeKey,
   snoozedLine,
   splitDue,
 } from './actions'
-import type { RowState } from './actions'
+import { rowSvg } from './svg'
 import { renderPane } from './pane'
 import { MAX_ITEMS_PER_DELIVERY, addToQueue, byQueueOrder, markNext, storeKey, takeBatch } from './alerts'
 import { ENDPOINT, ME, OPTIONS } from './fake-orchard'
-import { act, begin, world } from './test-world'
+import { act, begin, select, world } from './test-world'
 import type { World } from './test-world'
 import type { OrchardAlert, OrchardQueue } from '../types'
 
@@ -80,27 +83,61 @@ test('action addresses round-trip, and only ours parse', () => {
   }
 })
 
-test('the action line of a row, by state', () => {
-  const base: RowState = { id: 'm1', isPending: true, isNext: false, isOpen: false, confirm: null }
-  const labels = (state: RowState) => rowActions(state).text.match(/\[([^\]]+)\]/g)?.map(l => l.slice(1, -1))
-  expect(labels(base)).toEqual(['remove', 'snooze 30m', 'handle next', 'interrupt', 'more ▾'])
-  expect(labels({ ...base, isOpen: true })).toEqual(['remove', 'snooze 30m', 'handle next', 'interrupt', 'less ▴'])
-  // already marked: shown as done, not as a link
-  expect(rowActions({ ...base, isNext: true }).text).toContain(' next ✓ ')
-  expect(labels({ ...base, isNext: true })).toEqual(['remove', 'snooze 30m', 'interrupt', 'more ▾'])
+test('the toolbar for a thread, by state; hotkeys are one lowercase letter each and never clash', () => {
+  const base = { isPending: true, isNext: false, hasHref: true }
+  const keys = (state: typeof base) => toolbarItems(state).map(i => `${i.hotkey}:${i.label}`)
+  expect(keys(base)).toEqual(['k:▲', 'j:▼', 'x:Remove', 's:Snooze', 'n:Handle next', 'i:Interrupt', 'o:Open ↗', 'm:More'])
+  // already marked: Handle next gives way (the pane says "next ✓")
+  expect(keys({ ...base, isNext: true })).toEqual(['k:▲', 'j:▼', 'x:Remove', 's:Snooze', 'i:Interrupt', 'o:Open ↗', 'm:More'])
   // delivered: a message Claude already has can be removed, not brought back
-  expect(labels({ ...base, isPending: false })).toEqual(['remove', 'more ▾'])
-  // asking
-  expect(rowActions({ ...base, confirm: 'remove' }).text).toBe(`remove? [✓](${actionHref('remove-yes', 'm1')}) [✗](${actionHref('cancel', 'm1')})`)
-  expect(rowActions({ ...base, confirm: 'interrupt' }).text).toBe(`interrupt Claude? [✓](${actionHref('interrupt-yes', 'm1')}) [✗](${actionHref('cancel', 'm1')})`)
-  // every link in the text is in the list, and nothing else is
-  for (const state of [base, { ...base, isPending: false }, { ...base, confirm: 'remove' as const }, { ...base, isNext: true }]) {
-    const line = rowActions(state)
-    expect([...line.text.matchAll(/\]\(([^)]+)\)/g)].map(m => m[1])).toEqual(line.links)
+  expect(keys({ ...base, isPending: false })).toEqual(['k:▲', 'j:▼', 'x:Remove', 'o:Open ↗', 'm:More'])
+  // no address in Orchard: nothing to open
+  expect(keys({ ...base, hasHref: false }).includes('o:Open ↗')).toBe(false)
+  // the question names the sender; Confirm is y and Cancel c, apart from the toolbar's letters
+  expect(confirmQuestion('remove', 'Nick')).toBe("Remove Nick's message?")
+  expect(confirmQuestion('interrupt', 'Nick')).toBe("Interrupt Claude with Nick's message?")
+  const letters = [...toolbarItems(base).map(i => i.hotkey), 'y', 'c', 'r']
+  expect(new Set(letters).size).toBe(letters.length)
+  for (const l of letters) expect(l).toMatch(/^[a-z]$/)
+})
+
+const thread = (id: string, isUnread: boolean) =>
+  ({ replyToId: id, size: 1, href: null, reason: 'DM', isUnread, last: { id, senderName: 'Other', isOwner: false, isMine: false, snippet: id, sentAt: '2026-10-10T09:00:00Z' } }) as never
+
+test('the selection: defaults to the newest unread, else the newest; a stale pick falls back; a leaver hands over to its neighbour', () => {
+  const threads = [thread('a', false), thread('b', true), thread('c', true), thread('d', false)]
+  const shown = shownThreads({ threads })
+  expect(selectedId(shown, undefined)).toBe('b')
+  expect(selectedId(shown, null)).toBe('b')
+  expect(selectedId(shown, 'd')).toBe('d')
+  // the pick is gone (removed or snoozed): the default again, never a dangling id
+  expect(selectedId(shownThreads({ threads, hidden: ['d'] }), 'd')).toBe('b')
+  expect(selectedId(shownThreads({ threads, snoozed: [{ id: 'b' }], hidden: ['c'] }), 'b')).toBe('a')
+  expect(selectedId([], 'a')).toBeNull()
+  expect(selectedId(shownThreads({ threads: [thread('a', false), thread('z', false)] }), 'nope')).toBe('a')
+  // folded away counts as gone
+  const many = Array.from({ length: VISIBLE_THREADS + 2 }, (_, i) => thread(`t${i}`, false))
+  expect(shownThreads({ threads: many })).toHaveLength(VISIBLE_THREADS)
+  expect(selectedId(shownThreads({ threads: many }), `t${VISIBLE_THREADS}`)).toBe('t0')
+  expect(shownThreads({ threads: many, isOlderShown: true })).toHaveLength(VISIBLE_THREADS + 2)
+  // neighbour: the next one down, else the one above, null when alone
+  expect(neighbourOf(shown, 'b')).toBe('c')
+  expect(neighbourOf(shown, 'd')).toBe('c')
+  expect(neighbourOf([thread('a', false)] as never, 'a')).toBeNull()
+})
+
+test('the selected card carries a citron outline; the others do not', () => {
+  const now = Date.parse('2026-10-10T10:00:00Z')
+  for (const isUnread of [true, false]) {
+    const t = thread('a', isUnread) as never
+    expect(rowSvg(440, t, now)).not.toContain('class="sel"')
+    expect(rowSvg(440, t, now, false)).not.toContain('class="sel"')
+    const picked = rowSvg(440, t, now, true)
+    expect(picked.split('class="sel"').length - 1).toBe(1)
+    // a colour token, not a hex literal, so it follows the light/dark theme
+    expect(picked.replace(/<style>[\s\S]*<\/style>/, '')).not.toMatch(/(fill|stroke)="#/)
+    expect(picked).toContain('.sel{fill:none;stroke:var(--dot)')
   }
-  expect(headerActions(true).text).toBe(`[Open in Orchard ↗](${actionHref('open-workspace')}) · [Refresh](${actionHref('refresh')})`)
-  expect(headerActions(false).links).toEqual([actionHref('refresh')])
-  expect(detailActions('m1', false).links).toEqual([actionHref('reply', 'm1')])
 })
 
 test('handle next puts an alert first and keeps it there; the latest marked leads', () => {
@@ -185,49 +222,53 @@ async function openPane($: Engine, w: World, surface: 'terminal' | 'desktop' | '
   return $.ui.mount({ plugin: 'orchard', surface, component: 'Pane', requestId: 'orchard', props: PANE_PROPS })
 }
 
-const lineOf = async (ui: Awaited<ReturnType<typeof openPane>>, id: string) => String((await ui.find({ type: 'Markdown', key: `actions-${id}` }))?.props.text)
-const hasRow = async (ui: Awaited<ReturnType<typeof openPane>>, id: string) => (await ui.find({ type: 'Markdown', key: `actions-${id}` })) !== undefined
+const toolbarKeys = async (ui: Awaited<ReturnType<typeof openPane>>) => (await ui.findAll({ type: 'Button' })).map(b => String(b.key)).filter(k => k.startsWith('tb-'))
+const hasRow = async (ui: Awaited<ReturnType<typeof openPane>>, id: string) => (await ui.find({ type: 'Box', key: `thread-${id}` })) !== undefined
+const asking = async (ui: Awaited<ReturnType<typeof openPane>>) => (await ui.findAll({ type: 'Text' })).map(t => String(t.text)).find(t => /\?$/.test(t))
 
-test('remove asks first: ✗ and the 10 s lapse change nothing, ✓ acknowledges, forgets and hides', { options: OPTIONS }, async ($, on) => {
+test('remove asks first: Cancel and the 10 s lapse change nothing, Confirm acknowledges, forgets and hides', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   await begin($, w)
   broadcast(w, 'b1')
   await w.clock.settle()
   expect(queuedIds(w)).toEqual(['b1'])
   const ui = await openPane($, w)
-  const asked = `remove? [✓](${actionHref('remove-yes', 'b1')}) [✗](${actionHref('cancel', 'b1')})`
+  const asked = "Remove Other Claude's message?"
 
-  // a ✓ that answers no question is ignored
-  await act(ui, 'remove-yes', 'b1')
+  // no question yet: no Confirm to press
+  expect(await ui.find({ type: 'Button', key: 'tb-confirm' })).toBeUndefined()
+  expect(await asking(ui)).toBeUndefined()
+
+  await act(ui, w, 'remove', 'b1')
   await w.clock.settle()
+  expect(await asking(ui)).toBe(asked)
+  // the toolbar gives way to the question: Confirm (y) and Cancel (c) only
+  expect(await toolbarKeys(ui)).toEqual(['tb-confirm', 'tb-cancel'])
+  expect((await ui.find({ type: 'Button', key: 'tb-confirm' }))?.props).toMatchObject({ label: 'Confirm', hotkey: 'y', variant: 'primary' })
+  expect((await ui.find({ type: 'Button', key: 'tb-cancel' }))?.props).toMatchObject({ label: 'Cancel', hotkey: 'c' })
   expect(w.fake.acks).toEqual([])
-  expect(queuedIds(w)).toEqual(['b1'])
 
-  await act(ui, 'remove', 'b1')
+  // Cancel puts the toolbar back as it was
+  await ui.press({ key: 'tb-cancel' })
   await w.clock.settle()
-  expect(await lineOf(ui, 'b1')).toBe(asked)
-  expect(w.fake.acks).toEqual([])
-
-  // ✗ puts the row back as it was
-  await act(ui, 'cancel', 'b1')
-  await w.clock.settle()
-  expect(await lineOf(ui, 'b1')).toContain('snooze 30m')
+  expect(await asking(ui)).toBeUndefined()
+  expect(await toolbarKeys(ui)).toContain('tb-snooze')
   expect(queuedIds(w)).toEqual(['b1'])
 
   // unanswered for 10 s: the question lapses, and a late ✓ is nothing
-  await act(ui, 'remove', 'b1')
+  await act(ui, w, 'remove', 'b1')
   await w.clock.settle()
   await w.clock.advance(CONFIRM_MS - 1)
-  expect(await lineOf(ui, 'b1')).toBe(asked)
+  expect(await asking(ui)).toBe(asked)
   await w.clock.advance(1)
-  expect(await lineOf(ui, 'b1')).toContain('snooze 30m')
-  await act(ui, 'remove-yes', 'b1')
-  await w.clock.settle()
+  expect(await asking(ui)).toBeUndefined()
+  expect(await toolbarKeys(ui)).toContain('tb-snooze')
+  expect(await ui.find({ type: 'Button', key: 'tb-confirm' })).toBeUndefined()
   expect(w.fake.acks).toEqual([])
 
-  // ✓
-  await act(ui, 'remove', 'b1')
-  await act(ui, 'remove-yes', 'b1')
+  // Confirm
+  await act(ui, w, 'remove', 'b1')
+  await act(ui, w, 'remove-yes', 'b1')
   await w.clock.settle()
   expect(w.fake.acks).toHaveLength(1)
   expect(w.fake.acks[0]?.ids).toEqual(['b1'])
@@ -247,12 +288,12 @@ test('remove asks first: ✗ and the 10 s lapse change nothing, ✓ acknowledges
   expect(queuedIds(w)).toEqual([])
 
   // and it stays hidden after the window is read again
-  await act(ui, 'refresh')
+  await act(ui, w, 'refresh')
   await w.clock.settle()
   expect(await hasRow(ui, 'b1')).toBe(false)
 })
 
-test('a message Claude already has can be removed (ack + hide); the other actions are not offered', { options: OPTIONS }, async ($, on) => {
+test('a message Claude already has can be removed (ack + hide); the other actions are not on its toolbar', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   await begin($, w)
   dm(w, 'd1')
@@ -261,18 +302,10 @@ test('a message Claude already has can be removed (ack + hide); the other action
   const acksAfterDelivery = w.fake.acks.length
   const ui = await openPane($, w)
 
-  const line = await lineOf(ui, 'd1')
-  expect(line).toContain('[remove]')
-  expect(line.includes('snooze')).toBe(false)
-  expect(line.includes('handle next')).toBe(false)
-  expect(line.includes('interrupt')).toBe(false)
-  // pressing one anyway (a stale link) does nothing
-  for (const verb of ['snooze', 'next', 'interrupt'] as const) await act(ui, verb, 'd1')
-  await w.clock.settle()
-  expect(await lineOf(ui, 'd1')).toBe(line)
+  expect(await toolbarKeys(ui)).toEqual(['tb-select-prev', 'tb-select-next', 'tb-remove', 'tb-open-thread', 'tb-more'])
 
-  await act(ui, 'remove', 'd1')
-  await act(ui, 'remove-yes', 'd1')
+  await act(ui, w, 'remove', 'd1')
+  await act(ui, w, 'remove-yes', 'd1')
   await w.clock.settle()
   expect(w.fake.acks).toHaveLength(acksAfterDelivery + 1)
   expect(w.fake.acks.at(-1)?.ids).toEqual(['d1'])
@@ -289,7 +322,7 @@ test('snooze takes it out for 30 minutes, keeps it in the store, and brings it b
   const ui = await openPane($, w)
   const start = w.clock.now()
 
-  await act(ui, 'snooze', 'd1')
+  await act(ui, w, 'snooze', 'd1')
   await w.clock.settle()
   expect(queuedIds(w)).toEqual([])
   const stored = w.store.data.get(SNOOZED) as { id: string; until: number; alert: OrchardAlert }[]
@@ -336,14 +369,15 @@ test('handle next makes a quiet broadcast wake and puts it ahead of the rest of 
   await w.clock.settle()
   expect(w.state.latest.counts).toMatchObject({ unread: 2, forYou: 1 })
   const ui = await openPane($, w)
-  expect(await lineOf(ui, 'b1')).toContain('handle next')
+  await select(ui, w, 'b1')
+  expect(await toolbarKeys(ui)).toContain('tb-next')
 
-  await act(ui, 'next', 'b1')
+  await act(ui, w, 'next', 'b1')
   await w.clock.settle()
   expect(queuedIds(w)).toEqual(['b1', 'd1'])
   expect(w.state.latest.counts).toMatchObject({ unread: 2, forYou: 2 })
-  expect(await lineOf(ui, 'b1')).toContain('next ✓')
-  expect(await lineOf(ui, 'b1')).not.toContain('[handle next]')
+  expect(await toolbarKeys(ui)).not.toContain('tb-next')
+  expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('next ✓')
 
   await w.clock.advance(10_000)
   expect(w.submits).toHaveLength(1)
@@ -365,7 +399,7 @@ test('handle next alone wakes the session for a quiet message, respecting the mi
   const ui = await openPane($, w)
   await w.clock.advance(20_000)
   expect(w.submits).toHaveLength(1)
-  await act(ui, 'next', 'b1')
+  await act(ui, w, 'next', 'b1')
   await w.clock.settle()
   expect(w.submits).toHaveLength(1)
   await w.clock.advance(39_000)
@@ -384,7 +418,7 @@ test('handle next keeps the cursor behind anything still waiting', { options: OP
   await w.clock.settle()
   const ui = await openPane($, w, 'terminal')
   // older threads fold away; the newest is the last broadcast
-  await act(ui, 'next', `b${total}`)
+  await act(ui, w, 'next', `b${total}`)
   await w.clock.settle()
   await w.clock.advance(10_000)
   expect(w.submits).toHaveLength(1)
@@ -398,7 +432,7 @@ test('handle next keeps the cursor behind anything still waiting', { options: OP
   expect(record(w).delivered).toContain(`b${total}`)
 })
 
-test('interrupt asks first; ✓ aborts the running turn and delivers that message at once, once', { options: OPTIONS }, async ($, on) => {
+test('interrupt asks first; Confirm aborts the running turn and delivers that message at once, once', { options: OPTIONS }, async ($, on) => {
   const aborted = stubTurns(on)
   const w = world(on)
   await begin($, w)
@@ -407,21 +441,21 @@ test('interrupt asks first; ✓ aborts the running turn and delivers that messag
   await w.clock.settle()
   const ui = await openPane($, w)
 
-  await act(ui, 'interrupt', 'd1')
+  await act(ui, w, 'interrupt', 'd1')
   await w.clock.settle()
-  expect(await lineOf(ui, 'd1')).toBe(`interrupt Claude? [✓](${actionHref('interrupt-yes', 'd1')}) [✗](${actionHref('cancel', 'd1')})`)
+  expect(await asking(ui)).toBe("Interrupt Claude with Other Claude's message?")
   expect(aborted).toEqual([])
   expect(w.submits).toEqual([])
 
-  // ✗ changes nothing
-  await act(ui, 'cancel', 'd1')
+  // Cancel changes nothing
+  await ui.press({ key: 'tb-cancel' })
   await w.clock.settle()
   expect(aborted).toEqual([])
-  expect(await lineOf(ui, 'd1')).toContain('interrupt]')
+  expect(await toolbarKeys(ui)).toContain('tb-interrupt')
 
-  // ✓: abort, then deliver now, past the 10 s batch window
-  await act(ui, 'interrupt', 'd1')
-  await act(ui, 'interrupt-yes', 'd1')
+  // Confirm: abort, then deliver now, past the 10 s batch window
+  await act(ui, w, 'interrupt', 'd1')
+  await act(ui, w, 'interrupt-yes', 'd1')
   await w.clock.settle()
   expect(aborted).toEqual(['turn-1'])
   expect(w.submits).toHaveLength(1)
@@ -447,8 +481,8 @@ test('interrupt on an idle session aborts nothing; it delivers past the batch wi
   dm(w, 'd2')
   await w.clock.settle()
   const ui = await openPane($, w)
-  await act(ui, 'interrupt', 'd2')
-  await act(ui, 'interrupt-yes', 'd2')
+  await act(ui, w, 'interrupt', 'd2')
+  await act(ui, w, 'interrupt-yes', 'd2')
   await w.clock.settle()
   // only 0 s into a 60 s gap, yet it went
   expect(aborted).toEqual([])
@@ -478,8 +512,8 @@ test('interrupt does not take a message a wake already has in flight', { options
   await w.clock.advance(10_000)
   expect(w.submits).toHaveLength(1)
 
-  await act(ui, 'interrupt', 'd1')
-  await act(ui, 'interrupt-yes', 'd1')
+  await act(ui, w, 'interrupt', 'd1')
+  await act(ui, w, 'interrupt-yes', 'd1')
   await w.clock.settle()
   expect(w.submits).toHaveLength(1)
   expect(aborted).toEqual([])
@@ -488,9 +522,9 @@ test('interrupt does not take a message a wake already has in flight', { options
   expect(w.submits).toHaveLength(1)
 })
 
-// ---- links and hover ----
+// ---- the toolbar and the selection ----
 
-test('every action link is ours, listed, and pressing one opens nothing; unknown links do nothing', { options: OPTIONS }, async ($, on) => {
+test('no surface has controls on a row: no overlay, no hover Box, no Markdown line, no Button but the toolbar, folds, header and details', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   await begin($, w)
   dm(w, 'd1')
@@ -499,133 +533,165 @@ test('every action link is ours, listed, and pressing one opens nothing; unknown
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await openPane($, w, surface)
-    const all = await ui.findAll({ type: 'Markdown' })
-    expect(all.length).toBeGreaterThanOrEqual(surface === 'desktop' || surface === 'vscode' ? 1 : 3)
-    for (const m of all) {
-      const written = [...String(m.props.text).matchAll(/\]\(([^)]+)\)/g)].map(x => x[1])
-      expect(written.length).toBeGreaterThan(0)
-      expect(m.props.pressableLinks).toEqual(written)
-      for (const href of written) expect(href!.startsWith(`${ACTION_ORIGIN}/`)).toBe(true)
-    }
-    // a link that is not one of ours, or names no action, is nothing
-    // (the header's line is on every surface; the rows' lines only where there is no overlay)
-    const key = surface === 'desktop' || surface === 'vscode' ? 'header-actions' : 'actions-d1'
-    await ui.press({ key, link: { href: 'https://example.com/remove/d1' } })
-    await ui.press({ key, link: { href: `${ACTION_ORIGIN}/format-disk/d1` } })
-    await w.clock.settle()
-    expect(queuedIds(w).sort(), surface).toEqual(['b1', 'd1'])
-    expect(w.fake.acks).toEqual([])
-    await ui.unmount()
-  }
-
-  // the row verbs open no browser, whatever they do
-  const ui = await openPane($, w, 'terminal')
-  for (const [verb, id] of [['remove', 'b1'], ['cancel', 'b1'], ['next', 'b1'], ['snooze', 'd1']] as const) {
-    await act(ui, verb, id)
-    await w.clock.settle()
-  }
-  expect(w.fake.opened).toEqual([])
-  expect(w.fake.calls.some(c => c.argv[0] === 'open')).toBe(false)
-})
-
-test('on a surface with a pointer the row actions are glyph buttons in a hover-revealed overlay; elsewhere the dim line is simply there', { options: OPTIONS }, async ($, on) => {
-  const w = world(on)
-  await begin($, w)
-  dm(w, 'd1')
-  await w.clock.settle()
-
-  const probe = async (surface: 'terminal' | 'desktop' | 'vscode' | 'mobile') => {
-    const ui = await openPane($, w, surface)
     const boxes = await ui.findAll({ type: 'Box' })
-    const reveal = boxes.filter(b => b.props.display === 'none')
-    const glyphs = (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('btn-')).map(b => b.props.label)
-    const dim = (await ui.find({ type: 'Markdown', key: 'actions-d1' }))?.props.dimColor
-    const result = { reveal, glyphs, dim, keyed: reveal.some(b => b.key !== undefined && b.key !== '') }
+    expect(boxes.filter(b => b.props.display === 'none' || b.props.position !== undefined), surface).toEqual([])
+    // the only Markdown left is a decision's "answer in Orchard"; none carries a row action
+    expect((await ui.findAll({ type: 'Markdown' })).filter(m => String(m.props.text).includes(ACTION_ORIGIN) && !String(m.key).startsWith('answer-')), surface).toEqual([])
+    const keys = (await ui.findAll({ type: 'Button' })).map(b => String(b.key))
+    expect(keys.filter(k => k.startsWith('btn-') || k.startsWith('actions-')), surface).toEqual([])
+    // every Button is a standard one
+    for (const b of await ui.findAll({ type: 'Button' })) expect(b.props.plain, `${surface} ${b.key}`).toBeUndefined()
+    // and it is one toolbar, once
+    expect(keys.filter(k => k === 'tb-remove'), surface).toHaveLength(1)
     await ui.unmount()
-    return result
-  }
-
-  for (const surface of ['desktop', 'vscode'] as const) {
-    const r = await probe(surface)
-    expect(r.reveal, surface).toHaveLength(1)
-    // the revealed Box is not keyed (a keyed Box is its own scope, and one that is not drawn cannot be hovered)
-    expect(r.keyed).toBe(false)
-    // remove, snooze, handle next, interrupt, more; and no Markdown line below the card
-    expect(r.glyphs).toEqual(['✕', '◷', '⇡', '⚡', '▾'])
-    expect(r.dim).toBeUndefined()
-  }
-  // the terminal and a phone have no hover and no overlay: the dim line is always there
-  for (const surface of ['terminal', 'mobile'] as const) {
-    const r = await probe(surface)
-    expect(r.reveal).toEqual([])
-    expect(r.glyphs).toEqual([])
-    expect(r.dim).toBe(true)
   }
 })
 
-test('the glyph buttons route to their own actions', { options: OPTIONS }, async ($, on) => {
+test('selection: the newest unread is selected at first and drawn so on every surface; ▲ ▼ move it and stop at the ends', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   await begin($, w)
   dm(w, 'd1')
   dm(w, 'd2')
   dm(w, 'd3')
   await w.clock.settle()
+
+  // which card is drawn selected: a "▶ " row on the terminal, an outlined, "selected" card elsewhere
+  const marked = async (ui: Awaited<ReturnType<typeof openPane>>, surface: string) => {
+    if (surface === 'terminal') return (await ui.findAll({ type: 'Text' })).filter(t => String(t.text).startsWith('▶ ')).length
+    const cards = (await ui.findAll({ type: 'Svg' })).filter(v => /^Other Claude/.test(String(v.props.alt)))
+    const outlined = cards.map(v => String(v.props.source).includes('class="sel"'))
+    expect(outlined, surface).toEqual(cards.map(v => String(v.props.alt).includes(', selected')))
+    return outlined.filter(Boolean).length
+  }
+  const selectedKey = async (ui: Awaited<ReturnType<typeof openPane>>) => /body of (\w+)/.exec(String((await ui.findAll({ type: 'Svg' })).find(v => String(v.props.alt).includes(', selected'))?.props.alt))?.[1]
+
+  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+    const ui = await openPane($, w, surface)
+    expect(await marked(ui, surface), surface).toBe(1)
+    await ui.unmount()
+  }
+
   const ui = await openPane($, w, 'desktop')
-
-  // snooze: the alert leaves the queue
-  await ui.press({ key: 'btn-snooze-d1' })
+  // newest first: d3, d2, d1; all unread, so the newest is the default
+  expect(await selectedKey(ui)).toBe('d3')
+  await ui.press({ key: 'tb-select-next' })
   await w.clock.settle()
-  expect(queuedIds(w).sort()).toEqual(['d2', 'd3'])
-
-  // handle next marks d3; the button gives way to "⇡✓"
-  await ui.press({ key: 'btn-next-d3' })
+  expect(await selectedKey(ui)).toBe('d2')
+  await ui.press({ key: 'tb-select-next' })
+  await ui.press({ key: 'tb-select-next' })
   await w.clock.settle()
-  expect(await ui.find({ type: 'Button', key: 'btn-next-d3' })).toBeUndefined()
-
-  // ▾ opens the detail below the card and the glyph turns to ▴
-  await ui.press({ key: 'btn-more-d2' })
+  expect(await selectedKey(ui)).toBe('d1')
+  await ui.press({ key: 'tb-select-prev' })
   await w.clock.settle()
-  expect((await ui.find({ type: 'Button', key: 'btn-more-d2' }))?.props.label).toBe('▴')
-  expect(await ui.find({ type: 'Markdown', key: 'detail-d2' })).toBeDefined()
-
-  // ✕ asks; ✗ cancels; ✕ then ✓ removes
-  await ui.press({ key: 'btn-remove-d2' })
+  expect(await selectedKey(ui)).toBe('d2')
+  for (let i = 0; i < 4; i++) await ui.press({ key: 'tb-select-prev' })
   await w.clock.settle()
-  expect(await ui.find({ type: 'Button', key: 'btn-remove-yes-d2' })).toBeDefined()
-  await ui.press({ key: 'btn-cancel-d2' })
+  expect(await selectedKey(ui)).toBe('d3')
+  // a redraw keeps the pick
+  await ui.press({ key: 'tb-select-next' })
+  await act(ui, w, 'refresh')
   await w.clock.settle()
-  expect(await ui.find({ type: 'Button', key: 'btn-remove-d2' })).toBeDefined()
-  expect(queuedIds(w).sort()).toEqual(['d2', 'd3'])
-  await ui.press({ key: 'btn-remove-d2' })
-  await ui.press({ key: 'btn-remove-yes-d2' })
-  await w.clock.settle()
-  expect(queuedIds(w)).toEqual(['d3'])
-
-  // ⚡ asks too; ✓ delivers d3 alone
-  await ui.press({ key: 'btn-interrupt-d3' })
-  await w.clock.settle()
-  expect(await ui.find({ type: 'Button', key: 'btn-interrupt-yes-d3' })).toBeDefined()
+  expect(await selectedKey(ui)).toBe('d2')
+  expect(w.fake.acks).toEqual([])
 })
 
-test('while a question is on a row the overlay is not hover-only, so it cannot vanish with the pointer', { options: OPTIONS }, async ($, on) => {
+test('selection with a delivered newest thread defaults to the newest unread; the pick hands over to a neighbour when it leaves', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   await begin($, w)
   dm(w, 'd1')
+  await w.clock.advance(10_000)
+  expect(w.submits).toHaveLength(1)
+  // d1 is delivered (read); d2 is waiting (unread) and the newer
+  dm(w, 'd2', { sent_at: '2026-10-10T09:30:00Z' })
   await w.clock.settle()
   const ui = await openPane($, w, 'desktop')
-  const reveals = async () => (await ui.findAll({ type: 'Box' })).filter(b => b.props.display === 'none').length
-  expect(await reveals()).toBe(1)
-  await act(ui, 'remove', 'd1')
+  const selectedKey = async () => /body of (\w+)/.exec(String((await ui.findAll({ type: 'Svg' })).find(v => String(v.props.alt).includes(', selected'))?.props.alt))?.[1]
+  expect(await selectedKey()).toBe('d2')
+  await select(ui, w, 'd1')
+  expect(await selectedKey()).toBe('d1')
+
+  // removing the selected, last thread selects the one above (it clamps, it does not vanish)
+  await ui.press({ key: 'tb-remove' })
+  await ui.press({ key: 'tb-confirm' })
   await w.clock.settle()
-  expect(await reveals()).toBe(0)
-  expect((await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('btn-')).map(b => b.props.label)).toEqual(['✓', '✗'])
-  await act(ui, 'cancel', 'd1')
+  expect(await hasRow(ui, 'd1')).toBe(false)
+  expect(await selectedKey()).toBe('d2')
+
+  // snoozing the only one left leaves nothing selected and no toolbar
+  await ui.press({ key: 'tb-snooze' })
   await w.clock.settle()
-  expect(await reveals()).toBe(1)
-  await act(ui, 'interrupt', 'd1')
+  expect(await selectedKey()).toBeUndefined()
+  expect(await toolbarKeys(ui)).toEqual([])
+})
+
+test('every toolbar button and hotkey acts on the selected thread', { options: OPTIONS }, async ($, on) => {
+  const aborted = stubTurns(on)
+  const w = world(on)
+  await begin($, w)
+  await $.turn.start({ text: 'working', turnId: 'turn-1' })
+  dm(w, 'd1')
+  broadcast(w, 'b1')
+  dm(w, 'd2')
   await w.clock.settle()
-  expect(await reveals()).toBe(0)
-  expect(await ui.find({ type: 'Button', key: 'btn-interrupt-yes-d1' })).toBeDefined()
+  const ui = await openPane($, w, 'terminal')
+
+  // the hotkeys: one lowercase letter each, as promised
+  const hotkeys: Record<string, string> = {}
+  for (const b of await ui.findAll({ type: 'Button' })) if (String(b.key).startsWith('tb-')) hotkeys[String(b.key)] = String(b.props.hotkey)
+  expect(hotkeys).toEqual({ 'tb-select-prev': 'k', 'tb-select-next': 'j', 'tb-remove': 'x', 'tb-snooze': 's', 'tb-next': 'n', 'tb-interrupt': 'i', 'tb-open-thread': 'o', 'tb-more': 'm' })
+  expect((await ui.find({ type: 'Button', key: 'tb-remove' }))?.props.label).toBe('Remove')
+  expect((await ui.find({ type: 'Button', key: 'tb-snooze' }))?.props.label).toBe('Snooze')
+  expect((await ui.find({ type: 'Button', key: 'tb-next' }))?.props.label).toBe('Handle next')
+  expect((await ui.find({ type: 'Button', key: 'tb-interrupt' }))?.props.label).toBe('Interrupt')
+  expect((await ui.find({ type: 'Button', key: 'tb-open-thread' }))?.props.label).toBe('Open ↗')
+  expect((await ui.find({ type: 'Button', key: 'tb-more' }))?.props.label).toBe('More')
+  expect((await ui.find({ type: 'Button', key: 'tb-select-prev' }))?.props.label).toBe('▲')
+  expect((await ui.find({ type: 'Button', key: 'tb-select-next' }))?.props.label).toBe('▼')
+
+  // Open ↗: the selected thread's page, on the loopback address
+  await select(ui, w, 'b1')
+  await ui.press({ key: 'tb-open-thread' })
+  await w.clock.settle()
+  expect(w.fake.opened).toHaveLength(1)
+  expect(w.fake.opened[0]).toContain('/messages/b1')
+
+  // More: the detail opens below the selected card, and only that one
+  await ui.press({ key: 'tb-more' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Button', key: 'detail-reply-b1' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'detail-reply-d1' })).toBeUndefined()
+  await ui.press({ key: 'tb-more' })
+
+  // Handle next: b1 first in the queue
+  await ui.press({ key: 'tb-next' })
+  await w.clock.settle()
+  expect(queuedIds(w)[0]).toBe('b1')
+
+  // Snooze: d2 only
+  await select(ui, w, 'd2')
+  await ui.press({ key: 'tb-snooze' })
+  await w.clock.settle()
+  expect(queuedIds(w).sort()).toEqual(['b1', 'd1'])
+  expect((w.store.data.get(SNOOZED) as { id: string }[]).map(s => s.id)).toEqual(['d2'])
+
+  // Remove: d1 only, after Confirm
+  await select(ui, w, 'd1')
+  await ui.press({ key: 'tb-remove' })
+  await ui.press({ key: 'tb-confirm' })
+  await w.clock.settle()
+  expect(w.fake.acks.map(a => a.ids)).toEqual([['d1']])
+  expect(queuedIds(w)).toEqual(['b1'])
+
+  // Interrupt: b1 only, after Confirm
+  await select(ui, w, 'b1')
+  await ui.press({ key: 'tb-interrupt' })
+  expect(aborted).toEqual([])
+  await ui.press({ key: 'tb-confirm' })
+  await w.clock.settle()
+  expect(aborted).toEqual(['turn-1'])
+  expect(w.submits).toHaveLength(1)
+  expect(w.submits[0]?.text).toContain('body of b1')
+  expect(queuedIds(w)).toEqual([])
 })
 
 test('the header says whose inbox it is', { options: OPTIONS }, async ($, on) => {
@@ -642,68 +708,3 @@ test('the header says whose inbox it is', { options: OPTIONS }, async ($, on) =>
   expect(String(header?.props.source)).toContain(`as ${ME}`)
 })
 
-test('the overlay is absolutely positioned inside a relative Box, so the row is the same tree hovered or not', () => {
-  type Node = { type: unknown; props: Record<string, unknown>; hover?: unknown; children?: unknown }
-  const plain = (name: string) => name as never
-  const table = { Box: 'Box' as never, Text: plain('Text'), Button: plain('Button'), Markdown: plain('Markdown'), Svg: plain('Svg') }
-  const view = {
-    participantId: ME,
-    workspaceName: 'Fruit Stand',
-    workspaceHref: null,
-    settings: { defaultLevel: 'participating', channels: {}, batchSeconds: 10, gapSeconds: 60 } as never,
-    status: { kind: 'connected' } as never,
-    counts: null,
-    nowMs: Date.parse('2026-10-10T10:00:00Z'),
-    pendingIds: new Set(['d1']),
-    pane: {
-      state: 'ready',
-      error: null,
-      decisions: [],
-      tasks: [],
-      channels: [],
-      threads: [{ replyToId: 'd1', size: 1, href: null, reason: 'DM', isUnread: true, last: { id: 'd1', senderName: 'Other', isOwner: false, isMine: false, snippet: 'hi', sentAt: '2026-10-10T09:00:00Z' } }],
-    } as never,
-  }
-  const handlers = { act: () => undefined, open: () => undefined, setLevel: () => undefined, setRate: () => undefined, toggleOlder: () => undefined }
-  const all = (node: unknown, out: Node[] = []): Node[] => {
-    if (Array.isArray(node)) node.forEach(n => all(n, out))
-    else if (node !== null && typeof node === 'object') {
-      out.push(node as Node)
-      all((node as Node).children, out)
-    }
-    return out
-  }
-  const draw = (surface: 'desktop' | 'terminal', confirm?: { id: string; verb: 'remove' }) =>
-    all(renderPane(table, { ...view, surface, pane: { ...view.pane, confirm } as never }, handlers))
-  const boxes = (nodes: Node[]) => nodes.filter(n => n.type === 'Box')
-
-  const idle = draw('desktop')
-  const reveal = boxes(idle).filter(n => n.props?.display === 'none')
-  expect(reveal).toHaveLength(1)
-  expect(reveal[0]?.hover).toEqual({ display: 'flex' })
-  expect(reveal[0]?.props.key).toBeUndefined()
-  expect(reveal[0]?.props.position).toBe('absolute')
-  expect(reveal[0]?.props.top).toBeDefined()
-  expect(reveal[0]?.props.right).toBeDefined()
-  expect(reveal[0]?.props.backgroundColor).toBeDefined()
-  // it sits with the card in a relative Box, and nothing but absolute Boxes holds the buttons
-  const relative = boxes(idle).filter(n => n.props?.position === 'relative')
-  expect(relative).toHaveLength(1)
-  const inside = all(relative[0]?.children)
-  expect(inside.some(n => n.type === 'Svg')).toBe(true)
-  expect(inside).toContain(reveal[0])
-  // no action line in the flow below the card
-  expect(idle.some(n => n.type === 'Markdown' && String(n.props.key).startsWith('actions-'))).toBe(false)
-
-  // the same overlay is there, unhidden, while a question is asked: hovered or not, an absolute Box, no extra row in the flow
-  const asking = draw('desktop', { id: 'd1', verb: 'remove' })
-  const shown = boxes(asking).filter(n => n.props?.position === 'absolute')
-  expect(shown).toHaveLength(1)
-  expect(shown[0]?.props.display).toBeUndefined()
-  expect(boxes(asking).filter(n => n.props?.position === 'relative')).toHaveLength(1)
-  const flowShape = (nodes: Node[]) => nodes.filter(n => n.props?.position !== 'absolute' && !all(reveal[0]).includes(n) && !all(shown[0]).includes(n)).map(n => n.type)
-  expect(flowShape(asking)).toEqual(flowShape(idle))
-
-  // the terminal has no overlay at all
-  expect(boxes(draw('terminal')).filter(n => n.props?.position !== undefined)).toEqual([])
-})

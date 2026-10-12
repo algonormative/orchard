@@ -56,22 +56,27 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   `claude-vault`), not the human owner's, and the header says so: "Claude's inbox ·
   <workspace> · as <participantId>". The owner uses it to supervise that mailbox and steer
   what Claude sees first; decisions that wait on the owner link to Orchard to be answered.
-- **Pane actions.** Every action is a synthetic `https://orchard.action/...` address that only
-  the mod answers; nothing is ever opened by them. On desktop and VS Code the row's actions
-  are a group of small glyph buttons (`✕ remove`, `◷ snooze 30m`, `⇡ handle next`,
-  `⚡ interrupt`, `▾ more`) laid over the card's top-right corner, on top of the relative time.
-  The group is an absolutely positioned Box (`display: none`, revealed by `hover` while the
-  pointer is over the row), so showing it moves nothing: the row is the same height hovered or
-  not. It is backed by the theme colour `subtle`, the closest token to the card (a theme token
-  cannot be the card's own green), so it covers the time while shown. The terminal and mobile
-  have no hover (and no overlay): there each row keeps a dimmed text line of the same actions
-  (Markdown links) below the card, always visible. The header's "Open in Orchard ↗" and
-  "Refresh" are the same kind of link. While a row asks "remove? ✓ ✗" or "interrupt? ✓ ✗" the
-  group is shown without hover, in the same spot, so the question cannot vanish with the pointer.
-  - **remove**: asks "remove? ✓ ✗" (lapses after 10 s). ✓ acknowledges the message on the
+- **Pane actions (one toolbar, one selection).** Rows carry no controls on any surface: a row
+  is just its card (an Svg on desktop, VS Code and mobile; a text row on the terminal), so
+  nothing hovers, overlays or changes a row's height. One thread is *selected* (kept in
+  `$.state`, so it survives redraws; it defaults to the newest unread thread, else the newest,
+  and falls back to that when the pick is removed, snoozed or folded away; removing or
+  snoozing the selected thread hands the selection to its neighbour). The selected card is
+  drawn with a citron outline (`▶ ` before the sender on the terminal). Above the list sits
+  one row of standard Buttons that act on the selected thread; each has a hotkey (one
+  lowercase letter, live while the pane holds focus; `/orchard` opens the pane focused):
+  `▲` k and `▼` j move the selection, **Remove** x, **Snooze** s, **Handle next** n,
+  **Interrupt** i, **Open ↗** o, **More** m. The header's "Open in Orchard ↗" and **Refresh**
+  (r) are standard Buttons too. A Button has no disabled look, so a button that does not
+  apply is left out rather than greyed. Every press goes through one handler on a synthetic
+  `https://orchard.action/...` address that only the mod answers; nothing is ever opened by
+  them. Remove and Interrupt swap the toolbar for a question that names the sender ("Remove
+  Nick's message?", "Interrupt Claude with Nick's message?") with **Confirm** (y) and
+  **Cancel** (c); it lapses after 10 s.
+  - **remove**: asks first. Confirm acknowledges the message on the
     server, drops it from the pending queue, records it as delivered so it never reaches
     Claude, and hides it in the pane (the hidden ids are kept in `$.store`).
-  - **snooze 30m**: one click. The alert leaves the queue and the pane and is kept, with
+  - **snooze** (30 minutes): one press. The alert leaves the queue and the pane and is kept, with
     its time, in `$.store`; at the time it re-enters the queue as a new alert (its batch
     window runs from then, and the notification settings classify it again, so one they
     would now drop is let go). The inbox shows "N snoozed · back 14:32". Survives a reload.
@@ -79,13 +84,13 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
     even if it was quiet (a broadcast). It still waits for the batch window and the minimum
     gap, goes first in its delivery, and the stored cursor never passes anything still
     waiting.
-  - **interrupt**: asks "interrupt Claude? ✓ ✗". ✓ aborts the running turn (as Esc does;
+  - **interrupt**: asks first. Confirm aborts the running turn (as Esc does;
     `$.turn.abort`) if there is one, then delivers that message alone, at once, past the
     batch window and the gap (the gap starts from it). The message is claimed in flight, so
     it is delivered exactly once.
-  - **more ▾** opens the row's detail (below the card, so it may move what follows): the full snippet, "reply…" (a draft in the prompt box,
-    never sent) and "open thread ↗".
-  - Messages Claude already has (read rows) offer **remove** and **more** only. Snooze,
+  - **more** toggles the selected thread's detail (below its card, so it may move what follows): the full snippet, the message count, "reply…" (a draft in the prompt box,
+    never sent) and "Open thread ↗", both standard Buttons.
+  - For messages Claude already has (read threads) the toolbar offers ▲ ▼, **Remove**, **Open** and **More** only. Snooze,
     handle next and interrupt would mean bringing a delivered message back as a new alert,
     which the mod does not do; use Orchard to resend it.
 - **Look.** The pane and band use the Orchard x LEMON palette (ink, neon citron, leaf,
