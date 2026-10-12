@@ -1,11 +1,9 @@
 // What the tests share: the mock clock, the fake CLI, files, an in-memory store and the
 // engine's own pieces beneath the plugin (the prompt box, the prompt queue). Not a test file.
-import type { On } from 'claude-code'
+import type { AgentInfo, On } from 'claude-code'
 import { expect, mock } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { actionHref } from './actions'
-import type { Verb } from './actions'
 import { CWD, SECRETS, fakeOrchard, stubFiles, stubStore, watchSinks } from './fake-orchard'
 
 /** How often a held wake looks at the prompt box again (the mod's own constant, written out: a test should not follow it). */
@@ -122,20 +120,29 @@ export function world(on: On, options: WorldOptions = {}) {
     opened.push({ id: e.id, title: e.title, focus: e.focus })
     return { value: { isPlaced: true } } as never
   })
-  const fills: { text: string; mode?: string }[] = []
-  on('prompt.fill', async (_$, e) => {
-    fills.push({ text: e.text, mode: e.mode })
-    return { isFilled: true }
+  // The engine's agents: a spawn starts one that `$.agent.list()` then shows, until a test changes its status or removes it.
+  const agents: { list: AgentInfo[]; spawns: string[]; lists: number; deny: string | undefined } = { list: [], spawns: [], lists: 0, deny: undefined }
+  on('agent.spawn', async (_$, e) => {
+    if (agents.deny !== undefined) return { deny: agents.deny }
+    const agentId = `agent-${agents.spawns.length + 1}`
+    agents.spawns.push(agentId)
+    agents.list.push({ id: agentId, description: e.description, type: e.subagentType, status: 'running' })
+    return { model: 'sonnet', agentId }
+  })
+  on('agent.list', async () => {
+    agents.lists += 1
+    return { value: agents.list.map(a => ({ ...a })) } as never
   })
   // Stand in for what the engine returns beneath the plugin.
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('session.end', async (_$, e) => ({ sessionId: e.sessionId }))
+  on('turn.start', async (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', async (_$, e) => ({ text: e.answer }) as never)
   on('ui.render', async ($$, e) => {
     const { Box } = $$.ui.resolve(e)
     return <Box />
   })
-  return { clock, timers, fake, fs, store, sinks, session, state, box, gate, submits, submit, registered, opened, fills }
+  return { clock, timers, fake, fs, store, sinks, session, state, box, gate, submits, submit, registered, opened, agents }
 }
 
 export type World = ReturnType<typeof world>
@@ -159,8 +166,8 @@ export async function visible($: Engine, w: World): Promise<string[]> {
     ...w.sinks.seen,
     ...w.submits.map(s => JSON.stringify(s)),
     JSON.stringify(w.session.appended()),
-    // The pane's state is drawn for the person (its links carry the workspace address), never shown to the model.
-    JSON.stringify({ ...w.state.latest, pane: undefined }),
+    // The feed and the plugins' items are drawn for the person (their links carry the workspace address), never shown to the model.
+    JSON.stringify({ ...w.state.latest, activity: undefined, plugins: undefined }),
   ]
 }
 
@@ -172,7 +179,10 @@ export function expectNoSecrets(texts: readonly string[]) {
 
 export const resumes = (w: World) => w.fake.calls.filter(c => c.cmd === 'resume')
 /** Calls other than the listener's own polling and bookkeeping. */
-export const connectionCalls = (w: World) => w.fake.calls.filter(c => !['alerts', 'ack'].includes(c.cmd) && c.tool !== 'mail_history' && c.tool !== 'mail_participants' && c.tool !== 'workspace_decisions')
+export const connectionCalls = (w: World) =>
+  w.fake.calls.filter(
+    c => !['alerts', 'ack'].includes(c.cmd) && !['mail_history', 'mail_participants', 'workspace_decisions', 'tasks_list', 'plugin_call', 'state_list'].includes(c.tool),
+  )
 
 /** The model calling one of the plugin's tools. */
 export function callTool($: Engine, name: string, input: Record<string, unknown> = {}) {
@@ -182,31 +192,4 @@ export function callTool($: Engine, name: string, input: Record<string, unknown>
 /** What a person's Enter raises at `prompt.submit`. */
 export function typed(text: string) {
   return { text, wait: false, origin: { kind: 'composer' as const } }
-}
-
-type Pressable = { press: (target: any) => Promise<unknown>; find: (q: any) => Promise<unknown> }
-
-/** Moves the selection to thread `id`: all the way up with ▲ (it stops at the top), then down with ▼. */
-export async function select(ui: Pressable, w: World, id: string) {
-  const picked = () => (w.state.latest.pane as { selected?: string | null } | undefined)?.selected
-  for (let i = 0; i < 20; i++) await ui.press({ key: 'tb-select-prev' })
-  for (let i = 0; i < 20 && picked() !== id; i++) await ui.press({ key: 'tb-select-next' })
-  if (picked() !== id) throw new Error(`could not select ${id}`)
-}
-
-/**
- * Presses what a person would press: the header Buttons for refresh and open-workspace; the detail's
- * own Buttons for reply; the decision's own Button for answer; and for every row verb, the toolbar,
- * after selecting that thread. The toolbar has no Button the thread does not get, so a verb it is not
- * offered rejects, as pressing a missing element does.
- */
-export async function act(ui: Pressable, w: World, verb: Verb, id = '-') {
-  if (verb === 'refresh') return ui.press({ key: 'refresh' })
-  if (verb === 'open-workspace') return ui.press({ key: 'open-workspace' })
-  if (verb === 'answer') return ui.press({ key: `answer-${id}` })
-  if (verb === 'reply') return ui.press({ key: `detail-reply-${id}` })
-  if (verb === 'remove-yes' || verb === 'interrupt-yes') return ui.press({ key: 'tb-confirm' })
-  if (verb === 'cancel') return ui.press({ key: 'tb-cancel' })
-  await select(ui, w, id)
-  return ui.press({ key: `tb-${verb}` })
 }

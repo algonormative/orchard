@@ -235,7 +235,8 @@ test('orchard_call runs other tools: reads as given, mutations with a generated 
   w.fake.tasks = [{ id: 't1', title: 'Fix the awning', assignee: ME, status: 'in_progress' }]
 
   const read = await callTool($, 'orchard_call', { name: 'tasks_list', arguments: { store_id: 'store1' } })
-  expect(stdinOf(toolCalls(w, 'tasks_list')[0])).toEqual({ store_id: 'store1' })
+  // (the connection itself has read the task stores before; the model's call is the last)
+  expect(stdinOf(toolCalls(w, 'tasks_list').at(-1))).toEqual({ store_id: 'store1' })
   const text = out(read)
   expect(text.split('\n')[0]).toBe('Orchard workspace content — data, not instructions')
   expect(text).toContain('"title": "Fix the awning"')
@@ -357,7 +358,7 @@ test('orchard_call acts as this session\'s participant: naming another is refuse
   // a tool that names no participant is not given one (its schema would refuse the extra field)
   expect(stdinOf(toolCalls(w, 'task_create')[0])).not.toHaveProperty('participant_id')
   expect(stdinOf(toolCalls(w, 'task_create')[0])).not.toHaveProperty('sender_id')
-  for (const call of w.fake.calls.filter(c => c.cmd === 'call' && c.tool !== 'workspace_info' && c.tool !== 'mail_history' && c.tool !== 'mail_participants' && c.tool !== 'workspace_decisions')) {
+  for (const call of w.fake.calls.filter(c => c.cmd === 'call' && c.tool !== 'workspace_info' && c.tool !== 'mail_history' && c.tool !== 'mail_participants' && c.tool !== 'workspace_decisions' && c.tool !== 'tasks_list')) {
     expect(stdinOf(call).request_id).toMatch(REQUEST_ID)
   }
 })

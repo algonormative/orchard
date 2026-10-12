@@ -2,6 +2,9 @@
 // and the pane draw from. None of it holds the credential path, the endpoint or any
 // request id; message ids and participant ids live in the queue because delivery
 // needs them, and only the model-facing text built from it (never the band) shows them.
+// One exception, for the person's eyes only: the feed (`activity`) and the plugins' items carry
+// the address each opens at in Orchard's browser UI, which holds the loopback port and the
+// workspace id. They are drawn for the person and never shown to the model.
 
 /** Where the connection to the workspace stands. */
 export type OrchardStatus =
@@ -17,6 +20,8 @@ export type OrchardStatus =
   | { kind: 'offline'; failures: number }
   /** Stopped until the person fixes the cause (`/orchard reconnect`). `message` has request ids and paths stripped. */
   | { kind: 'error'; message: string }
+  /** The person disconnected this session (`/orchard disconnect`): no listening, no lease, no wakes, until `/orchard connect`. Never kept across sessions. */
+  | { kind: 'disconnected' }
 
 /** Cached from the workspace when the session connected. `name` is what the band shows. */
 export type OrchardWorkspace = { name: string | null; ownerId: string | null }
@@ -66,8 +71,8 @@ export type OrchardAlert = {
   sentAt: string
   /** Mock-able clock time the listener received it. The coalescing window runs from here. */
   arrivedAt: number
-  /** Clock time the person marked it "handle next" in the pane: it wakes the session and leads the next delivery. */
-  nextAt?: number
+  /** Where the resource this alert is about opens, below the workspace (`/messages/<id>`), when the workspace gave one. */
+  href?: string
 }
 
 /** Alerts waiting for a wake or for the person's next prompt. */
@@ -90,7 +95,7 @@ export type OrchardQueue = {
 /** How much of the workspace's traffic wakes the session. */
 export type OrchardLevel = 'all' | 'participating' | 'mentions' | 'nothing'
 
-/** The notification settings, kept in `$.store` per (endpoint, participant) and mirrored here for the pane. */
+/** The notification settings, kept in `$.store` per (endpoint, participant) and mirrored here. */
 export type OrchardSettings = {
   /** The level for direct messages, broadcasts and every channel without an override. */
   defaultLevel: OrchardLevel
@@ -102,58 +107,68 @@ export type OrchardSettings = {
   gapSeconds: number
 }
 
-/** One message of a thread, as the pane lists it. */
-export type OrchardPaneMessage = {
-  id: string
-  senderName: string
-  isOwner: boolean
-  isMine: boolean
-  /** One line, cut short. */
-  snippet: string
-  sentAt: string
-}
-
-export type OrchardPaneThread = {
-  /** The message a reply answers: the newest one in the thread that this participant did not send. */
-  replyToId: string
-  last: OrchardPaneMessage
-  /** How many messages of the thread the window holds. */
-  size: number
-  /** Where to open it in the browser UI. */
-  href: string | null
-  /** Why it is in the inbox, as the badge says it. */
-  reason: OrchardPaneReason
-  /** An alert for it is still waiting to be delivered. */
-  isUnread: boolean
-}
-
-export type OrchardPaneReason = 'DM' | 'MENTION' | 'REPLY' | 'BROADCAST' | 'OWNER' | 'CHANNEL'
-
 export type OrchardPaneDecision = { id: string; snippet: string; sentAt: string; href: string | null }
 export type OrchardPaneTask = { id: string; title: string; status: string; href: string | null }
 
-/** What `/orchard` draws. `null` until the pane is first opened. */
-export type OrchardPane = {
-  /** `loading` while the CLI calls run, `failed` with `error` if they could not. */
-  state: 'loading' | 'ready' | 'failed'
-  error: string | null
-  threads: OrchardPaneThread[]
+/**
+ * One thing this session (or one of its subagents) did in Orchard, or was told. Newest last; the
+ * list holds about 60. `text` is a short sentence for a person: names and titles, no ids.
+ */
+export type OrchardActivityEntry = {
+  /** Clock ms. */
+  at: number
+  /** `main` for the session's own loop, else the subagent's id (`$.agent.list()`). */
+  agentId: string
+  /** The participant id the entry belongs to: who acted (out) or who was written to (in). */
+  handle: string
+  direction: 'in' | 'out'
+  /** `send`, `reply`, `ack`, `task`, `role`, `state`, `call` for what the agent did; the alert's own kind (`message`, `decision`, ...) for what it was told. */
+  kind: string
+  text: string
+  /** Where it opens in the browser UI. */
+  href?: string
+}
+
+/** The agents of this session, by agent id: `main` always, and every subagent until about two minutes after it ended. */
+export type OrchardAgentStatus = 'pending' | 'running' | 'waiting' | 'idle' | 'completed' | 'failed' | 'killed' | 'lost'
+export type OrchardAgent = {
+  agentId: string
+  description: string
+  /** `main`, or the agent type it was spawned as (`general-purpose`, `Explore`, ...). */
+  type: string
+  /** `lost`: it left `$.agent.list()` without ever being seen to end. */
+  status: OrchardAgentStatus
+  startedAt: number
+  endedAt?: number
+  /** The participant it acts as in Orchard. The main loop's is the session's; a subagent has one once it uses Orchard. */
+  handle?: string
+  /** What it last did in Orchard, as the activity feed words it. */
+  lastAction?: string
+}
+export type OrchardAgents = Record<string, OrchardAgent>
+
+/** What happens in the workspace outside this session. */
+export type OrchardWorkspaceActivity = {
+  /** Alerts from anyone but this session's handles (task receipts aside) in the last ten minutes. */
+  recentFromOthers: number
+  /** When the latest of them arrived. */
+  lastAt?: number
+  /** Open tasks across the attached task stores; null while unknown (no task store, or the workspace could not say). */
+  openTasks: number | null
+}
+
+/** What the optional plugins of the workspace hold for this session's handles. Only attached plugins have content. */
+export type OrchardPlugins = {
+  /** Ids of the plugins attached to the workspace (`chat`, `tasks`, `state`, `roles`, ...). */
+  attached: string[]
+  /** Roles this session's handles declared. */
+  roles: { participantId: string; roles: string[] }[]
+  /** State markers its handles created, or that sit on a task one of them claimed. */
+  states: { id: string; title: string; state: string; href: string | null }[]
+  /** Decisions it asked that the owner has not answered. */
   decisions: OrchardPaneDecision[]
+  /** Tasks claimed by one of its handles. */
   tasks: OrchardPaneTask[]
-  /** The channels the participant can see, for the per-channel notification levels. */
-  channels: { id: string; name: string }[]
-  /** The "older threads" fold is open. */
-  isOlderShown?: boolean
-  /** Replies of the threads (by reply id) whose detail is open. */
-  expanded?: string[]
-  /** Message ids the person removed: hidden from the inbox (kept in `$.store` too). */
-  hidden?: string[]
-  /** Message ids snoozed until a time (clock ms): hidden until then. The alerts themselves are kept in `$.store`. */
-  snoozed?: { id: string; until: number }[]
-  /** A two-step action waiting for the person's yes or no (it lapses after 10 s). */
-  confirm?: { verb: 'remove' | 'interrupt'; id: string } | null
-  /** The thread (by reply id) the toolbar acts on. Absent or no longer listed: the newest unread, else the newest. */
-  selected?: string | null
 }
 
 declare module 'claude-code' {
@@ -167,10 +182,14 @@ declare module 'claude-code' {
       generation: number
       queue: OrchardQueue
       settings: OrchardSettings
-      pane: OrchardPane | null
       /** The band's line, derived by the mod from status, workspace and counts. null: no band. */
       band: OrchardBand | null
       heartbeat: OrchardHeartbeat
+      /** A ring of what this session's agents did in Orchard and were told, newest last. */
+      activity: OrchardActivityEntry[]
+      agents: OrchardAgents
+      workspaceActivity: OrchardWorkspaceActivity
+      plugins: OrchardPlugins
     }
   }
 }

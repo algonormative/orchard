@@ -42,7 +42,12 @@ export function createRuntime(): Runtime {
 }
 
 export type Outcome =
-  | { kind: 'connected'; workspace: OrchardWorkspace }
+  | {
+      kind: 'connected'
+      workspace: OrchardWorkspace
+      /** What `workspace_info` answered, whole: the task stores and the attached plugins are read from it. */
+      info: unknown
+    }
   | { kind: 'offline' }
   | { kind: 'error'; message: string }
 
@@ -71,7 +76,7 @@ export async function connectOnce(run: Run, rt: Runtime, here: Current): Promise
 
   const info = track(rt, await workspaceInfo(run, conn, scrub))
   if (info.exitCode !== EXIT_OK) return failed(info)
-  return { kind: 'connected', workspace: parseWorkspace(info.json) }
+  return { kind: 'connected', workspace: parseWorkspace(info.json), info: info.json }
 }
 
 /** `workspace_info` → { workspace: { name }, owner_participant_id }. Missing fields stay null. */

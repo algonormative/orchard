@@ -5,9 +5,7 @@
 // desktop draws an Svg in the app's page, so the media query follows Claude's own light/dark
 // theme. Svg cannot hold controls: everything clickable is built from Box/Text/Button/Select
 // in pane.tsx, and these strings are only the decoration around it.
-import type { OrchardPaneThread } from '../types'
 import type { OrchardCounts, OrchardStatus } from '../types'
-import { relativeTime } from './threads'
 
 export const MIN_WIDTH = 300
 export const MAX_WIDTH = 560
@@ -49,10 +47,10 @@ function svg(width: number, height: number, body: string): string {
 
 // ---- the status chip ----
 
-export type ChipKind = 'listening' | 'waiting' | 'offline' | 'shared' | 'connecting' | 'error'
+export type ChipKind = 'listening' | 'waiting' | 'offline' | 'shared' | 'connecting' | 'error' | 'disconnected'
 export type Chip = { kind: ChipKind; label: string }
 
-/** green listening / amber waiting for you / red offline (or error) / grey another session is listening (or connecting). */
+/** green listening / amber waiting for you / red offline (or error) / grey another session is listening, disconnected, or connecting. */
 export function chipOf(status: OrchardStatus | null, counts: OrchardCounts | null): Chip {
   switch (status?.kind) {
     case 'connected':
@@ -63,6 +61,8 @@ export function chipOf(status: OrchardStatus | null, counts: OrchardCounts | nul
       return { kind: 'error', label: 'error' }
     case 'shared':
       return { kind: 'shared', label: 'another session is listening' }
+    case 'disconnected':
+      return { kind: 'disconnected', label: 'disconnected' }
     default:
       return { kind: 'connecting', label: 'connecting' }
   }
@@ -75,6 +75,7 @@ const CHIP_CLASS: Record<ChipKind, { bg: string; fg: string }> = {
   error: { bg: 'errbg', fg: 'err' },
   shared: { bg: 'chip', fg: 'dim' },
   connecting: { bg: 'chip', fg: 'dim' },
+  disconnected: { bg: 'chip', fg: 'dim' },
 }
 
 // ---- header ----
@@ -125,62 +126,6 @@ export function sectionSvg(w: number, label: string, pill?: string): string {
       : `<g transform="translate(${pillX.toFixed(0)},11)"><rect width="${pillW}" height="15" rx="7.5" class="badge"/>` +
         `<text x="${pillW / 2}" y="11" class="mono onbadge" font-size="9" font-weight="700" text-anchor="middle">${esc(pill)}</text></g>`)
   return svg(w, SECTION_HEIGHT, body)
-}
-
-// ---- thread rows ----
-
-export const UNREAD_ROW_HEIGHT = 58
-export const READ_ROW_HEIGHT = 46
-
-export function initialsOf(name: string): string {
-  const words = name.split(/[^\p{L}\p{N}]+/u).filter(word => word !== '')
-  if (words.length === 0) return '?'
-  const first = [...(words[0] as string)][0] as string
-  const second = words.length > 1 ? [...(words[1] as string)][0] : [...(words[0] as string)][1]
-  return `${first}${second ?? ''}`.toUpperCase()
-}
-
-/** Badge classes: citron filled for DM and MENTION, leaf for OWNER, an outline for the rest. */
-function badge(reason: string, x: number, y: number): string {
-  const width = Math.ceil(reason.length * 5.8 + 14)
-  const kind = reason === 'DM' || reason === 'MENTION' ? 'fill' : reason === 'OWNER' ? 'leaf' : 'outline'
-  const rect = `<rect width="${width}" height="15" rx="4" class="${kind === 'fill' ? 'badge' : kind === 'leaf' ? 'leafbg' : 'outline'}"/>`
-  const text = `<text x="${width / 2}" y="11" class="mono ${kind === 'fill' ? 'onbadge' : kind === 'leaf' ? 'leaf' : 'dim'}" font-size="9"${kind === 'fill' ? ' font-weight="700"' : ''} text-anchor="middle">${esc(reason)}</text>`
-  return `<g transform="translate(${x.toFixed(0)},${y})">${rect}${text}</g>`
-}
-
-export function rowHeight(thread: OrchardPaneThread): number {
-  return thread.isUnread ? UNREAD_ROW_HEIGHT : READ_ROW_HEIGHT
-}
-
-/** How wide the drawn mark of a row is: an edge bar and the avatar. The words beside it are a pressable Button. */
-export const MARK_WIDTH = 52
-
-/**
- * The small drawing at the left of a thread row: an avatar, a citron edge bar when the thread is
- * unread, and a thicker outlined bar plus ring when it is selected. Svg cannot take a press, so the
- * words of the row (sender, badge, age, preview) are a plain Button beside it (pane.tsx).
- */
-export function rowMarkSvg(thread: OrchardPaneThread, selected = false): string {
-  const h = rowHeight(thread)
-  const mid = (h - 4) / 2
-  const avatar = thread.last.isOwner ? 'badge' : 'peach'
-  const r = thread.isUnread ? 15 : 13
-  const body =
-    `<g${thread.isUnread ? '' : ' opacity=".8"'}>` +
-    (thread.isUnread ? `<rect x="2" y="8" width="3" height="${h - 20}" rx="1.5" class="dot"/>` : '') +
-    (selected ? `<rect x="0" y="4" width="5" height="${h - 12}" rx="2.5" class="bar"/><circle cx="30" cy="${mid}" r="${r + 3}" class="sel"/>` : '') +
-    `<circle cx="30" cy="${mid}" r="${r}" class="${avatar}"/>` +
-    `<text x="30" y="${mid + 4.5}" class="mono onbadge" font-size="${thread.isUnread ? 12 : 11}" font-weight="700" text-anchor="middle">${esc(initialsOf(thread.last.senderName))}</text>` +
-    '</g>'
-  return svg(MARK_WIDTH, h, body)
-}
-
-/** The words of a row, as the parts of a pressable Button's Text children: the sender, the rest of the first line, and the preview line. */
-export function rowWords(thread: OrchardPaneThread, nowMs: number): { sender: string; meta: string; preview: string } {
-  const { last } = thread
-  const age = relativeTime(last.sentAt, nowMs) + (thread.size > 1 ? ` · ${thread.size}` : '')
-  return { sender: cut(last.senderName, 22), meta: ` · ${thread.reason} · ${age}`, preview: cut(last.snippet, 80) }
 }
 
 // ---- footer ----

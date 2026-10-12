@@ -55,6 +55,8 @@ export function bandLine(
       return line([...head, { text: ` · error: ${plain(status.message, 120)}`, tone: 'err' }], 'error')
     case 'shared':
       return line([...head, dim(' · another session is listening')], 'quiet')
+    case 'disconnected':
+      return line([...head, dim(' · disconnected')], 'quiet')
     case 'connected': {
       const unread = count(counts.unread)
       const forYou = count(counts.forYou)

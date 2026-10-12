@@ -299,6 +299,15 @@ test('queue: a bounded batch reserves its place for the oldest waking alert, and
   expect(heavyBatch.length).toBeLessThan(30)
 })
 
+test('queue: an alert an earlier version marked "handle next" is an ordinary alert now: sequence order, no lead, no wake of its own', () => {
+  const marked = { ...alert('old', 5, ['broadcast']), nextAt: 3 }
+  const q = addToQueue(EMPTY_QUEUE, [alert('a', 1, ['broadcast']), marked, alert('b', 9, ['direct'])], 9, [], wakes)
+  expect(q.items.map(a => a.id)).toEqual(['a', 'old', 'b'])
+  expect(takeBatch(q, new Set(), wakes).map(a => a.id)).toEqual(['a', 'old', 'b'])
+  expect(takeBatch(q, new Set(['b']), wakes).map(a => a.id)).toEqual(['a', 'old'])
+  expect(wakeDueAt(addToQueue(EMPTY_QUEUE, [marked], 5, [], wakes), { batchSeconds: 10, gapSeconds: 60 }, wakes)).toBeNull()
+})
+
 test('store record: cursor and delivered move together, the last 200 ids are kept', () => {
   expect(parseStoreRecord(undefined)).toBeUndefined()
   expect(parseStoreRecord({ cursor: 'x', delivered: [] })).toBeUndefined()

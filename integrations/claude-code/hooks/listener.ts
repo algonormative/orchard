@@ -6,7 +6,6 @@ import { DEFAULT_SETTINGS } from './classify'
 import type { Settings } from './classify'
 import { EMPTY_QUEUE, droppedNotice } from './alerts'
 import type { StoreRecord } from './alerts'
-import type { Snooze } from './actions'
 import type { FrameMessage } from './frame'
 
 /** A pending timer from `$.clock.after`; anything with a `cancel()`. */
@@ -16,7 +15,7 @@ export type Cancelable = { cancel: () => void }
  * Why a loop ended. `crashed` (an exception) and `stalled` (it did not move by its `expectedBy`)
  * are loops that died on their own: the session goes offline and reconnects, which starts a new one.
  */
-export type StopReason = 'superseded' | 'offline' | 'error' | 'crashed' | 'stalled' | 'shared'
+export type StopReason = 'superseded' | 'offline' | 'error' | 'crashed' | 'stalled' | 'shared' | 'disconnected'
 
 /**
  * One run of the alert loop, tied to one value of the `generation` atom. A loop whose
@@ -82,7 +81,7 @@ export type ListenerState = {
   unacked: PendingAck[]
   /** Request ids of mutations whose connection failed, by what the call was: a retry reuses the id, for a while. */
   retryIds: Map<string, { requestId: string; at: number }>
-  /** The channels the participant can see, as the pane and `/orchard notify` last read them. */
+  /** The channels the participant can see, as `/orchard notify` last read them. */
   channels: { id: string; name: string }[]
   /** When the open decisions were last read, and whether a read is running. */
   decisionsAt: number | undefined
@@ -101,28 +100,31 @@ export type ListenerState = {
    * `missing` after a tool error (a host older than the tool) so it is not asked again.
    */
   decisionsTool: 'unknown' | 'available' | 'missing'
-  /** The running main-loop turn (`turn.start` to `turn.complete`); "interrupt" aborts it. */
-  turnId: string | undefined
-  /** Alerts the person snoozed (kept in `$.store`), and the timer for the earliest. */
-  snoozes: Snooze[]
-  snoozeTimer: Cancelable | undefined
-  /** Message ids the person removed from the pane (kept in `$.store`). */
-  hidden: string[]
-  /** Lapses the pane's "remove? ✓ ✗" question. */
-  confirmTimer: Cancelable | undefined
-  /** The /orchard pane is open: only then are the pane's tasks and decisions kept fresh. */
+  /** The person disconnected this session: nothing listens, no lease is held, nothing wakes. Memory only, never kept across sessions. */
+  isDisconnected: boolean
+  /** The /orchard pane is open: only then is the slow safety refresh armed and the poll clock mirrored. */
   isPaneOpen: boolean
-  /** The one debounced refresh of claimed tasks and open decisions a receipt asked for. */
+  /** The one debounced read of the workspace's tasks and plugins a receipt (or this session's own write) asked for, and when it will run. */
   workTimer: Cancelable | undefined
+  workDueAt: number | undefined
+  /** When the workspace was last read for tasks and plugins (the 30 s floor between receipt-driven reads runs from here). */
+  workReadAt: number | undefined
   /** The slow safety refresh, armed only while the pane is open. */
   safetyTimer: Cancelable | undefined
   isRefreshingWork: boolean
   /** Another refresh was asked for while one ran. */
   isWorkDirty: boolean
-  /** The task stores the pane last listed claims from (so a refresh does not ask the workspace for them again). */
-  storeIds: string[] | undefined
   /** Clock time the alert loop last heard back; the heartbeat atom mirrors it while the pane is open. */
   lastPollAt: number | null
+  /** Ids of alerts already counted and logged, newest last, so an alert fetched twice is one entry and one count. */
+  seenAlerts: string[]
+  /** Arrival times of alerts from others within the last ten minutes, oldest first; the count in `workspaceActivity` follows it. */
+  othersAt: number[]
+  lastOtherAt: number | undefined
+  /** Fires when the oldest of those leaves the window, so the count falls without any new alert. */
+  decayTimer: Cancelable | undefined
+  /** The one timer that looks at the session's agents again: every 2 s while one is live, else when a finished one is due to go. */
+  agentTimer: Cancelable | undefined
 }
 
 export function createListenerState(): ListenerState {
@@ -161,18 +163,20 @@ export function createListenerState(): ListenerState {
     leaseTimer: undefined,
     isStoreFailing: false,
     decisionsTool: 'unknown',
-    turnId: undefined,
-    snoozes: [],
-    snoozeTimer: undefined,
-    hidden: [],
-    confirmTimer: undefined,
+    isDisconnected: false,
     isPaneOpen: false,
     workTimer: undefined,
+    workDueAt: undefined,
+    workReadAt: undefined,
     safetyTimer: undefined,
     isRefreshingWork: false,
     isWorkDirty: false,
-    storeIds: undefined,
     lastPollAt: null,
+    seenAlerts: [],
+    othersAt: [],
+    lastOtherAt: undefined,
+    decayTimer: undefined,
+    agentTimer: undefined,
   }
 }
 
