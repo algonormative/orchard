@@ -1,17 +1,16 @@
-// The pane's quick actions as plain data: the synthetic addresses a Markdown link carries, the
-// action line of a row, and the snooze and hidden records kept in `$.store`. No `$` here;
-// register.tsx performs the actions.
+// The pane's actions as plain data: the synthetic addresses every press is routed through, the
+// toolbar and selection model (which thread is selected, which buttons it gets), and the snooze and
+// hidden records kept in `$.store`. No `$` here; register.tsx performs the actions.
 //
-// The links are `https://orchard.action/<verb>/<id>`. They exist only so a Markdown draws them as
-// links (it draws a link only for http, https or file): they are listed in `pressableLinks`,
-// answered by `onLinkPress`, and never opened by anything.
-import type { OrchardAlert } from '../types'
+// The addresses are `https://orchard.action/<verb>/<id>`. Buttons press them through `act`; the one
+// Markdown link left (a decision's "answer in Orchard") is listed in `pressableLinks`. Nothing opens them.
+import type { OrchardAlert, OrchardPaneThread } from '../types'
 
 export const ACTION_ORIGIN = 'https://orchard.action'
 
 /** How long a snooze lasts. */
 export const SNOOZE_MS = 30 * 60_000
-/** How long a "remove? ✓ ✗" waits for an answer before it lapses. */
+/** How long a question waits for an answer before it lapses. */
 export const CONFIRM_MS = 10_000
 /** The most snoozed alerts and hidden ids kept. */
 export const MAX_SNOOZED = 50
@@ -31,6 +30,8 @@ export const VERBS = [
   'answer',
   'open-workspace',
   'refresh',
+  'select-prev',
+  'select-next',
 ] as const
 export type Verb = (typeof VERBS)[number]
 
@@ -79,54 +80,79 @@ function line(parts: readonly (string | { label: string; href: string })[], sepa
   return { text, links }
 }
 
-export type RowState = {
-  /** The message the actions apply to: the thread's reply id. */
-  id: string
-  /** An alert for it is waiting in the queue (not delivered yet). */
-  isPending: boolean
-  /** It was marked "handle next". */
-  isNext: boolean
-  /** The row's detail is open. */
-  isOpen: boolean
-  /** The two-step question this row is asking, if any. */
-  confirm: 'remove' | 'interrupt' | null
+/** How many of the newest threads show before the rest fold away. */
+export const VISIBLE_THREADS = 5
+
+// ---- the toolbar and the selection ----
+
+/** The pane facts the selection works from: the threads, what is out of the inbox, and the stored pick. */
+type PaneLike = {
+  threads: readonly OrchardPaneThread[]
+  hidden?: readonly string[]
+  snoozed?: readonly { id: string }[]
+  isOlderShown?: boolean
+  selected?: string | null
+}
+
+/** The threads the inbox lists: removed and snoozed ones left out, the older ones folded away. */
+export function shownThreads(pane: PaneLike | null | undefined): OrchardPaneThread[] {
+  if (pane === null || pane === undefined) return []
+  const away = new Set([...(pane.hidden ?? []), ...(pane.snoozed ?? []).map(s => s.id)])
+  const threads = pane.threads.filter(t => !away.has(t.replyToId))
+  return pane.isOlderShown === true ? threads : threads.slice(0, VISIBLE_THREADS)
 }
 
 /**
- * The action line of a thread row.
- * - asking: `remove? ✓ ✗` or `interrupt Claude? ✓ ✗`, nothing else.
- * - a message not delivered yet: remove · snooze · handle next · interrupt · more.
- * - a message already delivered: remove · more. Snooze, handle next and interrupt would have to
- *   bring a delivered message back as a new alert, which this mod does not do.
+ * The selected thread's id: the stored pick while it is still listed; otherwise (nothing picked, or the
+ * pick was removed, snoozed or folded away) the newest unread thread, else the newest. Null with no threads.
  */
-export function rowActions(state: RowState): ActionLine {
-  const { id } = state
-  if (state.confirm !== null) {
-    const question = state.confirm === 'remove' ? 'remove?' : 'interrupt Claude?'
-    const yes = actionHref(state.confirm === 'remove' ? 'remove-yes' : 'interrupt-yes', id)
-    return line([question, { label: '✓', href: yes }, { label: '✗', href: actionHref('cancel', id) }], ' ')
-  }
-  const more = { label: state.isOpen ? 'less ▴' : 'more ▾', href: actionHref('more', id) }
-  const remove = { label: 'remove', href: actionHref('remove', id) }
-  if (!state.isPending) return line([remove, more])
-  return line([
-    remove,
-    { label: 'snooze 30m', href: actionHref('snooze', id) },
-    state.isNext ? 'next ✓' : { label: 'handle next', href: actionHref('next', id) },
-    { label: 'interrupt', href: actionHref('interrupt', id) },
-    more,
-  ])
+export function selectedId(shown: readonly OrchardPaneThread[], stored: string | null | undefined): string | null {
+  if (stored !== null && stored !== undefined && shown.some(t => t.replyToId === stored)) return stored
+  return (shown.find(t => t.isUnread) ?? shown[0])?.replyToId ?? null
 }
 
-/** The second line of an open row: reply and open the thread. */
-export function detailActions(id: string, hasHref: boolean): ActionLine {
-  const reply = { label: 'reply…', href: actionHref('reply', id) }
-  return hasHref ? line([reply, { label: 'open thread ↗', href: actionHref('open-thread', id) }]) : line([reply])
+/** The thread to select once `id` leaves the list: the one after it, else the one before it; null when it was the last. */
+export function neighbourOf(shown: readonly OrchardPaneThread[], id: string): string | null {
+  const at = shown.findIndex(t => t.replyToId === id)
+  if (at < 0) return null
+  return (shown[at + 1] ?? shown[at - 1])?.replyToId ?? null
 }
 
-export function headerActions(hasWorkspace: boolean): ActionLine {
-  const refresh = { label: 'Refresh', href: actionHref('refresh') }
-  return hasWorkspace ? line([{ label: 'Open in Orchard ↗', href: actionHref('open-workspace') }, refresh]) : line([refresh])
+export type ToolbarItem = { verb: Verb; label: string; hotkey: string }
+
+export type ToolbarState = {
+  /** An alert for the selected message is waiting in the queue (not delivered yet). */
+  isPending: boolean
+  /** It was marked "handle next". */
+  isNext: boolean
+  /** The thread has an address in Orchard's browser UI. */
+  hasHref: boolean
+}
+
+/**
+ * The toolbar's buttons for the selected thread, in order, each with its hotkey.
+ * - a message not delivered yet: all of them.
+ * - a message already delivered: ▲ ▼ Remove Open More. Snooze, Handle next and Interrupt would have to bring a
+ *   delivered message back as a new alert, which this mod does not do (a Button has no disabled look, so they are left out).
+ * - already marked "handle next": that button is left out (the pane says "next ✓" in its place).
+ */
+export function toolbarItems(state: ToolbarState): ToolbarItem[] {
+  const all: (ToolbarItem | null)[] = [
+    { verb: 'select-prev', label: '▲', hotkey: 'k' },
+    { verb: 'select-next', label: '▼', hotkey: 'j' },
+    { verb: 'remove', label: 'Remove', hotkey: 'x' },
+    state.isPending ? { verb: 'snooze', label: 'Snooze', hotkey: 's' } : null,
+    state.isPending && !state.isNext ? { verb: 'next', label: 'Handle next', hotkey: 'n' } : null,
+    state.isPending ? { verb: 'interrupt', label: 'Interrupt', hotkey: 'i' } : null,
+    state.hasHref ? { verb: 'open-thread', label: 'Open ↗', hotkey: 'o' } : null,
+    { verb: 'more', label: 'More', hotkey: 'm' },
+  ]
+  return all.filter((item): item is ToolbarItem => item !== null)
+}
+
+/** The question the toolbar asks in place of its buttons; it names the message so it cannot be mistaken. */
+export function confirmQuestion(verb: 'remove' | 'interrupt', sender: string): string {
+  return verb === 'remove' ? `Remove ${sender}'s message?` : `Interrupt Claude with ${sender}'s message?`
 }
 
 /** "answer in Orchard ↗" for a decision waiting on the owner. */

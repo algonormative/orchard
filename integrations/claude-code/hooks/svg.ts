@@ -20,7 +20,7 @@ export function widthOf(columns: number | undefined): number {
   return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Math.floor(columns) * PX_PER_COLUMN - 8))
 }
 
-const STYLE = `:root{--bg:#f8faef;--card:#e5ecca;--text:#070b08;--dim:#465349;--accent:#3f4a00;--leaf:#1d5c27;--leafbg:#cfe6cb;--rule:#b4c194;--chip:#ebf1d4;--chipline:#a9b88a;--grain:#dde5c3;--badge:#e6ff68;--onbadge:#0d140f;--peach:#ffcfad;--dot:#8aa000;--err:#8f1d1d;--errbg:#f6d3cf;--warn:#7a4a00;--warnbg:#f7e2b0}@media (prefers-color-scheme: dark){:root{--bg:#070c0a;--card:#18251d;--text:#f6fae8;--dim:#a5b5a7;--accent:#ecff7a;--leaf:#93f09b;--leafbg:#2c4a32;--rule:#3f5548;--chip:#1b281f;--chipline:#46604f;--grain:#1f2e25;--badge:#e6ff68;--onbadge:#090f0d;--peach:#ffcfad;--dot:#e6ff68;--err:#ff9d94;--errbg:#4a2220;--warn:#ffd37a;--warnbg:#4a3a14}}.mono{font-family:ui-monospace,'SF Mono',Menlo,monospace}.bg{fill:var(--bg)}.card{fill:var(--card)}.text{fill:var(--text)}.dim{fill:var(--dim)}.accent{fill:var(--accent)}.leaf{fill:var(--leaf)}.leafbg{fill:var(--leafbg)}.rule{fill:var(--rule)}.grain{fill:var(--grain)}.badge{fill:var(--badge)}.onbadge{fill:var(--onbadge)}.peach{fill:var(--peach)}.dot{fill:var(--dot)}.err{fill:var(--err)}.errbg{fill:var(--errbg)}.warn{fill:var(--warn)}.warnbg{fill:var(--warnbg)}.chip{fill:var(--chip);stroke:var(--chipline)}.outline{fill:none;stroke:var(--dim)}`
+const STYLE = `:root{--bg:#f8faef;--card:#e5ecca;--text:#070b08;--dim:#465349;--accent:#3f4a00;--leaf:#1d5c27;--leafbg:#cfe6cb;--rule:#b4c194;--chip:#ebf1d4;--chipline:#a9b88a;--grain:#dde5c3;--badge:#e6ff68;--onbadge:#0d140f;--peach:#ffcfad;--dot:#8aa000;--err:#8f1d1d;--errbg:#f6d3cf;--warn:#7a4a00;--warnbg:#f7e2b0}@media (prefers-color-scheme: dark){:root{--bg:#070c0a;--card:#18251d;--text:#f6fae8;--dim:#a5b5a7;--accent:#ecff7a;--leaf:#93f09b;--leafbg:#2c4a32;--rule:#3f5548;--chip:#1b281f;--chipline:#46604f;--grain:#1f2e25;--badge:#e6ff68;--onbadge:#090f0d;--peach:#ffcfad;--dot:#e6ff68;--err:#ff9d94;--errbg:#4a2220;--warn:#ffd37a;--warnbg:#4a3a14}}.mono{font-family:ui-monospace,'SF Mono',Menlo,monospace}.bg{fill:var(--bg)}.card{fill:var(--card)}.text{fill:var(--text)}.dim{fill:var(--dim)}.accent{fill:var(--accent)}.leaf{fill:var(--leaf)}.leafbg{fill:var(--leafbg)}.rule{fill:var(--rule)}.grain{fill:var(--grain)}.badge{fill:var(--badge)}.onbadge{fill:var(--onbadge)}.peach{fill:var(--peach)}.dot{fill:var(--dot)}.err{fill:var(--err)}.errbg{fill:var(--errbg)}.warn{fill:var(--warn)}.warnbg{fill:var(--warnbg)}.chip{fill:var(--chip);stroke:var(--chipline)}.outline{fill:none;stroke:var(--dim)}.sel{fill:none;stroke:var(--dot);stroke-width:2}`
 
 /** Escapes text for XML after dropping control characters. */
 export function esc(value: string): string {
@@ -149,8 +149,8 @@ export function rowHeight(thread: OrchardPaneThread): number {
   return thread.isUnread ? UNREAD_ROW_HEIGHT : READ_ROW_HEIGHT
 }
 
-/** One compact thread: avatar, sender, reason badge, one-line preview, age and size. Unread: card, edge bar, dot. Read: 80%. */
-export function rowSvg(w: number, thread: OrchardPaneThread, nowMs: number): string {
+/** One compact thread (a citron outline when `selected`): avatar, sender, reason badge, one-line preview, age and size. Unread: card, edge bar, dot. Read: 80%. */
+export function rowSvg(w: number, thread: OrchardPaneThread, nowMs: number, selected = false): string {
   const { last } = thread
   const cardW = w - 20
   const age = relativeTime(last.sentAt, nowMs) + (thread.size > 1 ? ` · ${thread.size}` : '')
@@ -167,7 +167,9 @@ export function rowSvg(w: number, thread: OrchardPaneThread, nowMs: number): str
       badge(thread.reason, 54 + name.length * 7.6 + 8, 12) +
       `<text x="${cardW - 16}" y="23" class="mono dim" font-size="10" text-anchor="end">${esc(age)}</text>` +
       `<circle cx="${cardW - 10}" cy="40" r="3.5" class="dot"/>` +
-      `<text x="54" y="43" class="text" font-size="12">${esc(cut(last.snippet, previewMax))}</text></g>`
+      `<text x="54" y="43" class="text" font-size="12">${esc(cut(last.snippet, previewMax))}</text>` +
+      (selected ? `<rect x="1" y="1" width="${cardW - 2}" height="${UNREAD_ROW_HEIGHT - 6}" rx="9" class="sel"/>` : '') +
+      '</g>'
     return svg(w, UNREAD_ROW_HEIGHT, body)
   }
 
@@ -178,7 +180,9 @@ export function rowSvg(w: number, thread: OrchardPaneThread, nowMs: number): str
     `<text x="52" y="19" class="text" font-size="12.5" font-weight="600">${esc(name)}</text>` +
     badge(thread.reason, 52 + name.length * 7.2 + 8, 8) +
     `<text x="${cardW - 16}" y="19" class="mono dim" font-size="10" text-anchor="end">${esc(age)}</text>` +
-    `<text x="52" y="37" class="text" font-size="11.5">${esc(cut(last.snippet, previewMax))}</text></g>`
+    `<text x="52" y="37" class="text" font-size="11.5">${esc(cut(last.snippet, previewMax))}</text>` +
+    (selected ? `<rect x="1" y="1" width="${cardW - 2}" height="${READ_ROW_HEIGHT - 6}" rx="9" class="sel"/>` : '') +
+    '</g>'
   return svg(w, READ_ROW_HEIGHT, body)
 }
 

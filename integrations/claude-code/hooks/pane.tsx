@@ -7,7 +7,7 @@
 import type { Elements } from 'claude-code'
 
 import type { OrchardCounts, OrchardPane, OrchardPaneThread, OrchardSettings, OrchardStatus } from '../types'
-import { actionHref, answerLink, detailActions, headerActions, rowActions, snoozedLine } from './actions'
+import { VISIBLE_THREADS, actionHref, answerLink, confirmQuestion, selectedId, shownThreads, snoozedLine, toolbarItems } from './actions'
 import type { ActionLine, Verb } from './actions'
 import { LEVELS } from './classify'
 import { describeSettings } from './notify'
@@ -35,7 +35,7 @@ export type PaneView = {
   nowMs: number
   /** Cells across the pane body, for sizing the drawings. */
   columns?: number
-  /** The surface drawing the pane: the row actions show on hover only where there is a pointer to hover. */
+  /** The surface drawing the pane. */
   surface?: 'terminal' | 'desktop' | 'vscode' | 'mobile'
   /** Message ids with an alert waiting in the queue, and those marked "handle next". */
   pendingIds?: ReadonlySet<string>
@@ -54,8 +54,7 @@ export type PaneHandlers = {
   toggleOlder: () => void
 }
 
-/** How many of the newest threads show before the rest fold away. */
-export const VISIBLE_THREADS = 5
+export { VISIBLE_THREADS }
 
 const LEVEL_LABELS: Record<(typeof LEVELS)[number], string> = {
   all: 'all: every message',
@@ -68,13 +67,10 @@ const LEVEL_OPTIONS = LEVELS.map(value => ({ value, label: LEVEL_LABELS[value] }
 const CHANNEL_OPTIONS = [{ value: 'inherit', label: 'default' }, ...LEVEL_OPTIONS]
 
 /** A control opening one page of Orchard: a Button, because the surfaces draw a Link only for https and localhost, which Orchard refuses. */
-function openButton(ui: Table, id: string, href: string, on: PaneHandlers, label = 'Open in Orchard') {
+function openButton(ui: Table, id: string, href: string, on: PaneHandlers, label = 'Open in Orchard ↗') {
   const { Button } = ui
   return <Button key={`open-${id}`} label={label} onPress={() => on.open(href)} />
 }
-
-/** The overlay covers the time the card draws; no theme token is the card's green, 'subtle' is the closest neutral. */
-const OVERLAY_BG = 'subtle'
 
 const CHIP_TOKEN = { listening: 'success', waiting: 'warning', offline: 'error', error: 'error', shared: undefined, connecting: undefined } as const
 
@@ -89,13 +85,10 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   const snoozed = snoozedLine(pane?.snoozed ?? [])
   const pendingIds = view.pendingIds ?? new Set<string>()
   const nextIds = view.nextIds ?? new Set<string>()
-  // Only a surface with a pointer can hover; the terminal and the phone show the dim line below the card, always.
-  const isHoverSurface = view.surface === 'desktop' || view.surface === 'vscode'
-  // The overlay needs both a pointer and a drawn card to sit on.
-  const isOverlay = isHoverSurface && Svg !== undefined
   const isOlderShown = pane?.isOlderShown === true
   const expanded = new Set(pane?.expanded ?? [])
-  const shown = isOlderShown ? threads : threads.slice(0, VISIBLE_THREADS)
+  const shown = shownThreads({ threads, isOlderShown })
+  const selectedKey = selectedId(shown, pane?.selected)
   const older = threads.length - shown.length
   const unreadCount = threads.filter(t => t.isUnread).length
   const pill = unreadCount > 0 ? `${unreadCount} NEW` : undefined
@@ -138,97 +131,75 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
     <Markdown key={key} text={action.text} dimColor={isDim} pressableLinks={action.links} onLinkPress={link => on.act(link.href)} />
   )
 
-  /**
-   * The row's quick actions as the dim Markdown line below the card: the terminal and the phone, which
-   * have no pointer to hover (the phone has no absolute overlay worth trusting either), so it is simply there.
-   */
-  const actionLine = (thread: OrchardPaneThread, isOpen: boolean) => {
-    const key = thread.replyToId
-    const confirm = pane?.confirm?.id === key ? pane.confirm.verb : null
-    return (
-      <Box>
-        {links(`actions-${key}`, rowActions({ id: key, isPending: pendingIds.has(key), isNext: nextIds.has(key), isOpen, confirm }), confirm === null)}
-      </Box>
-    )
-  }
-
-  /** One single-glyph control of the overlay: a plain Button, answered by the same `act` the links use. */
-  const glyph = (verb: Verb, id: string, label: string) => (
-    <Button key={`btn-${verb}-${id}`} plain label={label} onPress={() => on.act(actionHref(verb, id))} />
+  /** One standard Button; a press goes through the same `act` as every other action. */
+  const press = (key: string, label: string, verb: Verb, id: string, hotkey?: string, variant?: 'primary') => (
+    <Button key={key} label={label} hotkey={hotkey} variant={variant} onPress={() => on.act(actionHref(verb, id))} />
   )
 
+  const selectedThread = shown.find(t => t.replyToId === selectedKey)
+
   /**
-   * The row's quick actions on a surface with a pointer: a compact group of glyph Buttons laid over the
-   * card's top-right corner, where the relative time is drawn, so nothing in the flow moves. Drawn
-   * `display: none` and revealed while the pointer is over the row (the row's keyed Box is the hover scope).
-   * While the row asks "remove?" / "interrupt?" it is not hover-gated, or the question would vanish with the pointer.
+   * The one toolbar above the list. Its buttons act on the selected thread. While a question is asked
+   * of that thread it gives way to the question, named for the sender, with Confirm and Cancel.
    */
-  const overlayOf = (thread: OrchardPaneThread, isOpen: boolean) => {
-    const id = thread.replyToId
-    const confirm = pane?.confirm?.id === id ? pane.confirm.verb : null
-    const isPending = pendingIds.has(id)
-    const common = { position: 'absolute', top: 0, right: 1, backgroundColor: OVERLAY_BG, flexDirection: 'row' } as const
-    if (confirm !== null) {
+  const toolbar = () => {
+    if (selectedThread === undefined) return null
+    const id = selectedThread.replyToId
+    const confirm = pane?.confirm
+    if (confirm !== null && confirm !== undefined && shown.some(t => t.replyToId === confirm.id)) {
+      const asked = shown.find(t => t.replyToId === confirm.id) as OrchardPaneThread
       return (
-        <Box {...common}>
-          <Text>{confirm === 'remove' ? 'remove? ' : 'interrupt? '}</Text>
-          {glyph(confirm === 'remove' ? 'remove-yes' : 'interrupt-yes', id, '✓')}
-          <Text> </Text>
-          {glyph('cancel', id, '✗')}
+        <Box key="toolbar" flexDirection="row" flexWrap="wrap" columnGap={1}>
+          <Text bold>{confirmQuestion(confirm.verb, asked.last.senderName)}</Text>
+          {press('tb-confirm', 'Confirm', confirm.verb === 'remove' ? 'remove-yes' : 'interrupt-yes', confirm.id, 'y', 'primary')}
+          {press('tb-cancel', 'Cancel', 'cancel', confirm.id, 'c')}
         </Box>
       )
     }
-    // No key on this Box: a keyed Box is its own hover scope, and a Box that is not drawn cannot be hovered.
+    const items = toolbarItems({ isPending: pendingIds.has(id), isNext: nextIds.has(id), hasHref: selectedThread.href !== null })
     return (
-      <Box {...common} display="none" hover={{ display: 'flex' }}>
-        {glyph('remove', id, '✕')}
-        {isPending ? <Text> </Text> : null}
-        {isPending ? glyph('snooze', id, '◷') : null}
-        {isPending ? <Text> </Text> : null}
-        {isPending ? (nextIds.has(id) ? <Text>⇡✓</Text> : glyph('next', id, '⇡')) : null}
-        {isPending ? <Text> </Text> : null}
-        {isPending ? glyph('interrupt', id, '⚡') : null}
-        <Text> </Text>
-        {glyph('more', id, isOpen ? '▴' : '▾')}
+      <Box key="toolbar" flexDirection="row" flexWrap="wrap" columnGap={1}>
+        {items.map(item => press(`tb-${item.verb}`, item.label, item.verb, item.verb === 'select-prev' || item.verb === 'select-next' ? '-' : id, item.hotkey))}
+        {nextIds.has(id) && pendingIds.has(id) ? <Text dimColor>next ✓</Text> : null}
       </Box>
     )
   }
 
   const row = (thread: OrchardPaneThread) => {
     const key = thread.replyToId
-    const isOpen = expanded.has(key)
+    const isSelected = key === selectedKey
     const { last } = thread
     const age = relativeTime(last.sentAt, nowMs) + (thread.size > 1 ? ` · ${thread.size}` : '')
     const card =
       Svg === undefined ? (
         <Box flexDirection="column">
           <Text dimColor={!thread.isUnread} bold={thread.isUnread}>
-            {thread.isUnread ? '● ' : '  '}
+            {isSelected ? '▶ ' : thread.isUnread ? '● ' : '  '}
             {last.senderName} [{thread.reason}] · {age}
           </Text>
           <Text dimColor>{'  '}{cut(last.snippet, 80)}</Text>
         </Box>
       ) : (
-        picture(`thread-svg-${key}`, rowSvg(w, thread, nowMs), `${last.senderName}, ${thread.reason}${thread.isUnread ? ', new' : ''}: ${last.snippet}`, rowHeight(thread))
+        picture(
+          `thread-svg-${key}`,
+          rowSvg(w, thread, nowMs, isSelected),
+          `${last.senderName}, ${thread.reason}${thread.isUnread ? ', new' : ''}${isSelected ? ', selected' : ''}: ${last.snippet}`,
+          rowHeight(thread),
+        )
       )
     return (
       <Box key={`thread-${key}`} flexDirection="column">
-        {isOverlay ? (
-          <Box position="relative">
-            {card}
-            {overlayOf(thread, isOpen)}
-          </Box>
-        ) : (
-          card
-        )}
-        {isOverlay ? null : actionLine(thread, isOpen)}
-        {isOpen ? (
+        {card}
+        {expanded.has(key) ? (
           <Box flexDirection="column">
             <Text>{last.snippet}</Text>
             <Text dimColor>
               {thread.size > 1 ? `${thread.size} messages` : '1 message'} · {relativeTime(last.sentAt, nowMs)} ago
             </Text>
-            {links(`detail-${key}`, detailActions(key, thread.href !== null))}
+            <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+              {press(`detail-reply-${key}`, 'reply…', 'reply', key)}
+              {thread.href === null ? null : press(`detail-open-${key}`, 'Open thread ↗', 'open-thread', key)}
+            </Box>
           </Box>
         ) : null}
       </Box>
@@ -238,13 +209,17 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   return (
     <Box flexDirection="column">
       {header}
-      {links('header-actions', headerActions(view.workspaceHref !== null))}
+      <Box key="header-actions" flexDirection="row" flexWrap="wrap" columnGap={1}>
+        {view.workspaceHref === null ? null : openButton(ui, 'workspace', view.workspaceHref, on)}
+        <Button key="refresh" label="Refresh" hotkey="r" onPress={() => on.act(actionHref('refresh'))} />
+      </Box>
 
       {section('section-inbox', 'INBOX', pill)}
       {pane === null || pane.state === 'loading' ? <Text dimColor>Loading…</Text> : null}
       {pane?.state === 'failed' ? <Text color="error">{pane.error ?? 'could not read the workspace'}</Text> : null}
       {snoozed === null ? null : <Text dimColor>{snoozed}</Text>}
       {pane?.state === 'ready' && threads.length === 0 ? <Text dimColor>Nothing in Claude's inbox.</Text> : null}
+      {toolbar()}
       {shown.map(row)}
       {older > 0 ? <Button key="older-threads" label={`▸ ${older} older thread${older === 1 ? '' : 's'}`} onPress={on.toggleOlder} /> : null}
       {isOlderShown && threads.length > VISIBLE_THREADS ? <Button key="older-threads" label="▾ hide older threads" onPress={on.toggleOlder} /> : null}

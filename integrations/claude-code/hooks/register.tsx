@@ -11,11 +11,14 @@ import {
   addHidden,
   addSnooze,
   hiddenKey,
+  neighbourOf,
   nextDue,
   parseActionHref,
   parseHidden,
   parseSnoozes,
   revive,
+  selectedId,
+  shownThreads,
   snoozeKey,
   splitDue,
 } from './actions'
@@ -1312,13 +1315,22 @@ async function interruptWith($: EngineInterface, app: App, id: string) {
   }
 }
 
-/** A press on one of the pane's action links. Anything that is not one of ours, or names nothing known, does nothing. */
+/** Moves the selection to the thread next to `id` before `id` leaves the list, if `id` is the selected one. */
+async function selectNeighbour($: EngineInterface, shown: readonly OrchardPaneThread[], id: string) {
+  const current = await read($, pane)
+  if (selectedId(shown, current?.selected) !== id) return
+  const to = neighbourOf(shown, id)
+  if (to !== null) await update($, pane, p => ({ ...(p ?? EMPTY_PANE), selected: to }))
+}
+
+/** A press on one of the pane's actions. Anything that is not one of ours, or names nothing known, does nothing. */
 async function paneAct($: EngineInterface, app: App, href: string) {
   const action = parseActionHref(href)
   if (action === undefined) return
   const { verb, id } = action
   const current = await read($, pane)
   const thread = current?.threads.find(t => t.replyToId === id)
+  const shown = shownThreads(current)
   const isPending = (await readQueue($, app)).items.some(a => a.id === id)
   switch (verb) {
     case 'refresh':
@@ -1333,6 +1345,15 @@ async function paneAct($: EngineInterface, app: App, href: string) {
       return openInOrchard($, thread?.href ?? '')
     case 'reply':
       return thread === undefined ? undefined : fillReply($, thread)
+    case 'select-prev':
+    case 'select-next': {
+      // One step through the listed threads, newest first; it stops at either end.
+      const at = shown.findIndex(t => t.replyToId === selectedId(shown, current?.selected))
+      const to = shown[Math.max(0, Math.min(shown.length - 1, at + (verb === 'select-next' ? 1 : -1)))]
+      if (to === undefined) return
+      await update($, pane, p => ({ ...(p ?? EMPTY_PANE), selected: to.replyToId }))
+      return
+    }
     case 'more':
       await update($, pane, p => {
         const open = p?.expanded ?? []
@@ -1351,9 +1372,11 @@ async function paneAct($: EngineInterface, app: App, href: string) {
       const asked = verb === 'remove-yes' ? 'remove' : 'interrupt'
       if (current?.confirm?.id !== id || current.confirm.verb !== asked) return
       await setConfirm($, app, null)
+      await selectNeighbour($, shown, id)
       return asked === 'remove' ? removeMessage($, app, id) : interruptWith($, app, id)
     }
     case 'snooze':
+      if (isPending) await selectNeighbour($, shown, id)
       return snoozeMessage($, app, id)
     case 'next':
       return handleNext($, app, id)
@@ -1688,7 +1711,7 @@ export const register: Register = (on, options) => {
     if (word !== '') return { text: 'Usage: /orchard [notify … | reconnect]' }
 
     detach(loadPane($, app))
-    const opened = await $.ui.open({ id: PANE, title: 'Orchard' })
+    const opened = await $.ui.open({ id: PANE, title: 'Orchard', focus: true })
     return { text: opened.isPlaced ? 'Orchard pane opened.' : 'Orchard pane: widen the terminal to see it.' }
   })
 
