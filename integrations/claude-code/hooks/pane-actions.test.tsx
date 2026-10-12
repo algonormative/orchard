@@ -29,7 +29,7 @@ import {
   snoozedLine,
   splitDue,
 } from './actions'
-import { rowLinkText, rowMarkSvg } from './svg'
+import { rowMarkSvg, rowWords } from './svg'
 import { renderPane } from './pane'
 import { MAX_ITEMS_PER_DELIVERY, addToQueue, byQueueOrder, markNext, storeKey, takeBatch } from './alerts'
 import { ENDPOINT, ME, OPTIONS } from './fake-orchard'
@@ -140,13 +140,12 @@ test('the selected row\'s mark carries a citron outline and bar; the others do n
   }
 })
 
-test('a row\'s words are one link: sender, badge, age and preview, with markup in them kept as plain text', () => {
+test('a row\'s words: sender, badge, age and preview, markup in them left as plain text', () => {
   const now = Date.parse('2026-10-10T10:00:00Z')
   const t = { ...thread('a', true), size: 3 } as never as ReturnType<typeof thread> & { last: { senderName: string; snippet: string; sentAt: string }; reason: string }
   t.last = { ...t.last, senderName: 'Test [peer]', snippet: 'run `rm *` (now) <b>', sentAt: '2026-10-10T09:58:00Z' }
   t.reason = 'DM'
-  const text = rowLinkText(t as never, now, 'https://orchard.action/select/a', '▶ ')
-  expect(text).toBe('[▶ **Test \\[peer\\]** · DM · 2m · 3 — run \\`rm \\*\\` \\(now\\) \\<b\\>](https://orchard.action/select/a)')
+  expect(rowWords(t as never, now)).toEqual({ sender: 'Test [peer]', meta: ' · DM · 2m · 3', preview: 'run `rm *` (now) <b>' })
 })
 
 test('handle next puts an alert first and keeps it there; the latest marked leads', () => {
@@ -533,13 +532,13 @@ test('interrupt does not take a message a wake already has in flight', { options
 
 // ---- the toolbar and the selection ----
 
-/** The body id of the row drawn selected: the one whose link starts with the "▶ " marker. */
+/** The body id of the row drawn selected: the one whose Button text starts with the "▶ " marker. */
 async function selectedRow(ui: Awaited<ReturnType<typeof openPane>>) {
-  const line = (await ui.findAll({ type: 'Markdown' })).find(m => String(m.key).startsWith('row-') && String(m.props.text).startsWith('[▶ '))
-  return /body of (\w+)/.exec(String(line?.props.text))?.[1]
+  const line = (await ui.findAll({ type: 'Button' })).find(b => String(b.key).startsWith('row-') && String(b.text ?? '').startsWith('▶ '))
+  return /body of (\w+)/.exec(String(line?.text ?? ''))?.[1]
 }
 
-test('no surface has controls on a row: no overlay, no hover Box, no per-row Button, one link per row, no Button but the toolbar, folds, header and details', { options: OPTIONS }, async ($, on) => {
+test('no surface has controls on a row: no overlay, no hover Box, one plain Button per row and no Markdown, no Button but the toolbar, folds, header and details', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   await begin($, w)
   dm(w, 'd1')
@@ -550,17 +549,18 @@ test('no surface has controls on a row: no overlay, no hover Box, no per-row But
     const ui = await openPane($, w, surface)
     const boxes = await ui.findAll({ type: 'Box' })
     expect(boxes.filter(b => b.props.display === 'none' || b.props.position !== undefined), surface).toEqual([])
-    // the only Markdown: a decision's "answer in Orchard", and each row's words, one link that answers a press by selecting
-    const markdown = await ui.findAll({ type: 'Markdown' })
-    expect(markdown.filter(m => !String(m.key).startsWith('answer-') && !String(m.key).startsWith('row-')), surface).toEqual([])
-    for (const m of markdown.filter(m => String(m.key).startsWith('row-'))) {
-      expect(m.props.pressableLinks, surface).toEqual([`${ACTION_ORIGIN}/select/${String(m.key).slice(4)}`])
-      expect((String(m.props.text).match(/\]\(/g) ?? []).length, surface).toBe(1)
-    }
+    // no Markdown link anywhere (synthetic links never reach the plugin on desktop): rows and "answer in Orchard" are plain Buttons
+    expect(await ui.findAll({ type: 'Markdown' }), surface).toEqual([])
+    const rows = (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('row-'))
+    expect(rows.map(b => b.key).sort(), surface).toEqual(['row-b1', 'row-d1'])
+    for (const b of rows) expect(b.props.plain, surface).toBe(true)
     const keys = (await ui.findAll({ type: 'Button' })).map(b => String(b.key))
     expect(keys.filter(k => k.startsWith('btn-') || k.startsWith('actions-')), surface).toEqual([])
-    // every Button is a standard one
-    for (const b of await ui.findAll({ type: 'Button' })) expect(b.props.plain, `${surface} ${b.key}`).toBeUndefined()
+    // every Button but a row (and the answer line, which reads like one) is a standard one
+    for (const b of await ui.findAll({ type: 'Button' })) {
+      if (/^(row|answer)-/.test(String(b.key))) continue
+      expect(b.props.plain, `${surface} ${b.key}`).toBeUndefined()
+    }
     // and it is one toolbar, once
     expect(keys.filter(k => k === 'tb-remove'), surface).toHaveLength(1)
     await ui.unmount()
@@ -577,7 +577,7 @@ test('selection: the newest unread is selected at first and drawn so on every su
 
   // which row is drawn selected: a "▶ " in its link on every surface, and where there is a drawing, an outlined, "selected" mark
   const marked = async (ui: Awaited<ReturnType<typeof openPane>>, surface: string) => {
-    const lines = (await ui.findAll({ type: 'Markdown' })).filter(m => String(m.key).startsWith('row-') && String(m.props.text).startsWith('[▶ '))
+    const lines = (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('row-') && String(b.text ?? '').startsWith('▶ '))
     if (surface !== 'terminal') {
       const marks = (await ui.findAll({ type: 'Svg' })).filter(v => /^Other Claude/.test(String(v.props.alt)))
       const outlined = marks.map(v => String(v.props.source).includes('class="sel"'))

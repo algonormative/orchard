@@ -43,9 +43,9 @@ async function openPane($: Engine, w: World) {
 async function drawnText(ui: Awaited<ReturnType<typeof mountPane>>) {
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   const svgs = (await ui.findAll({ type: 'Svg' })).flatMap(v => [String(v.props.source), String(v.props.alt)])
-  // a thread row's words are a Markdown link: its text is what a person reads
-  const links = (await ui.findAll({ type: 'Markdown' })).map(m => String(m.props.text))
-  return [...texts, ...links, ...svgs]
+  // a thread row's words are the Text children of a plain Button: its text is what a person reads
+  const rows = (await ui.findAll({ type: 'Button' })).map(b => String(b.text ?? ''))
+  return [...texts, ...rows, ...svgs]
 }
 
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
@@ -99,8 +99,8 @@ test('/orchard opens the pane and lists the inbox, what waits on the owner and t
     const readable = [...(await ui.findAll({ type: 'Text' })).map(t => t.text), ...(await ui.findAll({ type: 'Svg' })).map(v => String(v.props.alt)), ...(await ui.findAll({ type: 'Svg' })).flatMap(v => [...String(v.props.source).matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map(m => m[1] ?? ''))]
     for (const id of ['m1', 'm3', 'd1']) expect(readable.some(t => t.includes(id))).toBe(false)
 
-    // rows carry no controls: no Markdown line, no per-row Button; one toolbar of standard Buttons above the list
-    expect((await ui.findAll({ type: 'Markdown' })).filter(m => String(m.key).startsWith('actions-'))).toEqual([])
+    // rows carry no controls beyond the one pressable row; one toolbar of standard Buttons above the list; no Markdown at all
+    expect(await ui.findAll({ type: 'Markdown' })).toEqual([])
     const buttons = (await ui.findAll({ type: 'Button' })).map(b => String(b.key))
     expect(buttons.filter(k => k.startsWith('btn-') || k.startsWith('actions-'))).toEqual([])
     // nothing is queued in this fixture, so the selected thread is a delivered one: the read subset, once
@@ -110,7 +110,7 @@ test('/orchard opens the pane and lists the inbox, what waits on the owner and t
     expect((await ui.find({ type: 'Button', key: 'open-workspace' }))?.props.label).toBe('Open in Orchard ↗')
     expect(await ui.findAll({ type: 'Link' })).toEqual([])
     // needs-you rows point at Orchard to answer
-    expect(String((await ui.find({ type: 'Markdown', key: 'answer-d1' }))?.props.text)).toContain('answer in Orchard ↗')
+    expect((await ui.find({ type: 'Button', key: 'answer-d1' }))?.props.label).toBe('answer in Orchard ↗')
     await ui.unmount()
   }
   // reading the window also refreshed the band's needs-you count
@@ -400,8 +400,8 @@ test('the pane draws a header, an inbox and a footer: as Svg where a surface has
       expect(texts).toContain('● waiting for you')
       expect(texts.some(t => t.startsWith("◆ Claude's view of Orchard"))).toBe(true)
       expect(texts).toContain(`this session · as ${ME} · Fruit Stand`)
-      const links = (await ui.findAll({ type: 'Markdown' })).map(m => String(m.props.text))
-      expect(links.some(t => /\*\*Nick\*\* · OWNER/.test(t))).toBe(true)
+      const rows = (await ui.findAll({ type: 'Button' })).map(b => String(b.text ?? ''))
+      expect(rows.some(t => /Nick · OWNER/.test(t))).toBe(true)
       expect(texts.some(t => t.includes('tending the grove'))).toBe(true)
     } else {
       expect(svgs.length, surface).toBeGreaterThan(4)

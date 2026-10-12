@@ -4,7 +4,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { ACTION_ORIGIN, actionHref } from './actions'
+import { actionHref } from './actions'
 import type { OrchardAlert, OrchardPaneThread } from '../types'
 import { ENDPOINT, ME, OPTIONS } from './fake-orchard'
 import { same } from './same'
@@ -32,12 +32,13 @@ async function openPane($: Engine, w: World, surface: Surface = 'terminal') {
 }
 type Pane = Awaited<ReturnType<typeof openPane>>
 
-const rowLink = (id: string) => ({ key: `row-${id}`, link: { href: actionHref('select', id) } })
+const rowButton = (id: string) => ({ key: `row-${id}` })
+const rowText = (b: { text?: unknown; props: Record<string, unknown> }) => String(b.text ?? '')
 const selectedRow = async (ui: Pane) => {
-  const line = (await ui.findAll({ type: 'Markdown' })).find(m => String(m.key).startsWith('row-') && String(m.props.text).startsWith('[▶ '))
-  return /body of (\w+)/.exec(String(line?.props.text))?.[1]
+  const line = (await ui.findAll({ type: 'Button' })).find(b => String(b.key).startsWith('row-') && rowText(b).startsWith('▶ '))
+  return /body of (\w+)/.exec(line === undefined ? '' : rowText(line))?.[1]
 }
-const rowIds = async (ui: Pane) => (await ui.findAll({ type: 'Markdown' })).filter(m => String(m.key).startsWith('row-')).map(m => String(m.key).slice(4))
+const rowIds = async (ui: Pane) => (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('row-')).map(b => String(b.key).slice(4))
 const calls = (w: World, tool: string) => w.fake.calls.filter(c => c.tool === tool).length
 const texts = async (ui: Pane) => (await ui.findAll({ type: 'Text' })).map(t => String(t.text))
 
@@ -109,22 +110,21 @@ for (const surface of SURFACES) {
     await w.clock.settle()
 
     const ui = await openPane($, w, surface)
-    // each row's words are the one link, and it answers only its own address
-    for (const m of (await ui.findAll({ type: 'Markdown' })).filter(m => String(m.key).startsWith('row-'))) {
-      expect(m.props.pressableLinks).toEqual([`${ACTION_ORIGIN}/select/${String(m.key).slice(4)}`])
-    }
+    // each row's words are one plain Button: no Markdown link anywhere
+    expect(await ui.findAll({ type: 'Markdown' })).toEqual([])
+    for (const b of (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('row-'))) expect(b.props.plain).toBe(true)
     expect(await selectedRow(ui)).toBe('d2') // the newest unread, by default
-    await ui.press(rowLink('d1'))
+    await ui.press(rowButton('d1'))
     await w.clock.settle()
     expect(await selectedRow(ui)).toBe('d1')
     expect(await ui.find({ type: 'Button', key: 'detail-reply-d1' })).toBeUndefined()
 
-    await ui.press(rowLink('d1'))
+    await ui.press(rowButton('d1'))
     await w.clock.settle()
     expect(await selectedRow(ui)).toBe('d1')
     expect(await ui.find({ type: 'Button', key: 'detail-reply-d1' })).toBeDefined()
 
-    await ui.press(rowLink('d1'))
+    await ui.press(rowButton('d1'))
     await w.clock.settle()
     expect(await ui.find({ type: 'Button', key: 'detail-reply-d1' })).toBeUndefined()
     // the toolbar follows the pick, and pressing a row acknowledges nothing
@@ -152,7 +152,7 @@ test('an alert page updates the pane threads at once, without a history call', {
   expect(calls(w, 'mail_history')).toBe(history)
   expect(calls(w, 'workspace_info')).toBe(info)
   // it is unread until the wake delivers it, then not
-  const dimmed = async () => (await ui.findAll({ type: 'Markdown' })).find(m => m.key === 'row-d2')?.props.dimColor
+  const dimmed = async () => (await ui.findAll({ type: 'Button' })).find(b => b.key === 'row-d2')?.props.dimColor
   expect(await dimmed()).toBe(false)
   await w.clock.advance(10_000)
   expect(w.submits.length).toBeGreaterThan(0)

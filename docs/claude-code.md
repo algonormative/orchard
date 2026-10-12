@@ -74,9 +74,10 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
 - **Pane actions (one toolbar, one selection).** Rows carry no buttons on any surface, so
   nothing hovers, overlays or changes a row's height. A row is a small drawn mark (an Svg
   avatar with an unread edge bar, on desktop, VS Code and mobile) beside its words, which are
-  one Markdown link: `**sender** · badge · age — preview`. An Svg cannot take a press, so the
-  link is what you click: a press **selects** the row, and a second press on the selected row
-  toggles its detail (More). On the terminal the row is the same link as text. One thread is *selected* (kept in
+  one plain Button of Text (0.5.1; synthetic Markdown links never reached the plugin on
+  desktop): `sender · badge · age` over the preview. An Svg cannot take a press, so the
+  Button is what you click: a press **selects** the row, and a second press on the selected row
+  toggles its detail (More). On the terminal the row is the same Button, drawn as text. One thread is *selected* (kept in
   `$.state`, so it survives redraws; it defaults to the newest unread thread, else the newest,
   and falls back to that when the pick is removed, snoozed or folded away; removing or
   snoozing the selected thread hands the selection to its neighbour). The selected row is

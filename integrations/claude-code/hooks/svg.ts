@@ -153,13 +153,13 @@ export function rowHeight(thread: OrchardPaneThread): number {
   return thread.isUnread ? UNREAD_ROW_HEIGHT : READ_ROW_HEIGHT
 }
 
-/** How wide the drawn mark of a row is: an edge bar and the avatar. The words beside it are a Markdown link. */
+/** How wide the drawn mark of a row is: an edge bar and the avatar. The words beside it are a pressable Button. */
 export const MARK_WIDTH = 52
 
 /**
  * The small drawing at the left of a thread row: an avatar, a citron edge bar when the thread is
  * unread, and a thicker outlined bar plus ring when it is selected. Svg cannot take a press, so the
- * words of the row (sender, badge, age, preview) are a Markdown link beside it (pane.tsx).
+ * words of the row (sender, badge, age, preview) are a plain Button beside it (pane.tsx).
  */
 export function rowMarkSvg(thread: OrchardPaneThread, selected = false): string {
   const h = rowHeight(thread)
@@ -176,16 +176,11 @@ export function rowMarkSvg(thread: OrchardPaneThread, selected = false): string 
   return svg(MARK_WIDTH, h, body)
 }
 
-/** Backslash-escapes what Markdown would read as markup, so a name or a preview stays plain text inside a link. */
-export function mdEscape(value: string): string {
-  return value.replace(/[\\`*_{}\[\]()<>#+!|~&]/g, ch => `\\${ch}`)
-}
-
-/** The row's words as one Markdown link: `[**Sender** · DM · 2m — preview](href)`. `mark` leads it where no drawing does. */
-export function rowLinkText(thread: OrchardPaneThread, nowMs: number, href: string, mark = ''): string {
+/** The words of a row, as the parts of a pressable Button's Text children: the sender, the rest of the first line, and the preview line. */
+export function rowWords(thread: OrchardPaneThread, nowMs: number): { sender: string; meta: string; preview: string } {
   const { last } = thread
   const age = relativeTime(last.sentAt, nowMs) + (thread.size > 1 ? ` · ${thread.size}` : '')
-  return `[${mark}**${mdEscape(cut(last.senderName, 22))}** · ${thread.reason} · ${age} — ${mdEscape(cut(last.snippet, 80))}](${href})`
+  return { sender: cut(last.senderName, 22), meta: ` · ${thread.reason} · ${age}`, preview: cut(last.snippet, 80) }
 }
 
 // ---- footer ----

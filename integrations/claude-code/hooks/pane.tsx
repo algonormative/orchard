@@ -2,21 +2,21 @@
 // table (`$.ui.resolve`) and builds the handlers (they are the `$` calls), so nothing here
 // touches `$`. Drawn parts (header, a thread row's avatar mark, section labels, footer) are Svg
 // strings from svg.ts on the surfaces that draw an Svg; the terminal has none and gets the same
-// structure as Text. An Svg cannot take a press, so everything clickable is a Markdown link
-// (a thread row's words), a Button or a Select. The pane is one Claude session's view of the
+// structure as Text. An Svg cannot take a press, so everything clickable is a Button
+// (a thread row's words are a plain Button of Text) or a Select. The pane is one Claude session's view of the
 // workspace, and its labels say so.
 // The mobile app draws no Input or Select: there the notification settings are text.
 import type { Elements } from 'claude-code'
 
 import type { OrchardCounts, OrchardPane, OrchardPaneThread, OrchardSettings, OrchardStatus } from '../types'
-import { VISIBLE_THREADS, actionHref, answerLink, confirmQuestion, selectedId, shownThreads, snoozedLine, toolbarItems } from './actions'
-import type { ActionLine, Verb } from './actions'
+import { VISIBLE_THREADS, actionHref, confirmQuestion, selectedId, shownThreads, snoozedLine, toolbarItems } from './actions'
+import type { Verb } from './actions'
 import { LEVELS } from './classify'
 import { describeSettings } from './notify'
 import { relativeTime } from './threads'
-import { FOOTER_HEIGHT, MARK_WIDTH, PANE_TITLE, chipOf, cut, footerSvg, footerText, headerSvg, rowHeight, rowLinkText, rowMarkSvg, sectionSvg, sublineOf, widthOf } from './svg'
+import { FOOTER_HEIGHT, MARK_WIDTH, PANE_TITLE, chipOf, cut, footerSvg, footerText, headerSvg, rowHeight, rowMarkSvg, rowWords, sectionSvg, sublineOf, widthOf } from './svg'
 
-export type Table = Pick<Elements['mobile'], 'Box' | 'Text' | 'Button' | 'Markdown'> & {
+export type Table = Pick<Elements['mobile'], 'Box' | 'Text' | 'Button'> & {
   /** Absent on the terminal; the caller also leaves it out where a surface should not draw one. */
   Svg?: Elements['desktop']['Svg']
   Input?: Elements['terminal']['Input']
@@ -79,7 +79,7 @@ function openButton(ui: Table, id: string, href: string, on: PaneHandlers, label
 const CHIP_TOKEN = { listening: 'success', waiting: 'warning', offline: 'error', error: 'error', shared: undefined, connecting: undefined } as const
 
 export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
-  const { Box, Text, Button, Markdown, Input, Select, Svg } = ui
+  const { Box, Text, Button, Input, Select, Svg } = ui
   const { pane, settings, nowMs } = view
   const w = widthOf(view.columns)
   const chip = chipOf(view.status, view.counts)
@@ -130,11 +130,6 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
       )
     )
 
-  /** One line of text links: a Markdown whose links are answered by `on.act` and nothing else. */
-  const links = (key: string, action: ActionLine, isDim = true) => (
-    <Markdown key={key} text={action.text} dimColor={isDim} pressableLinks={action.links} onLinkPress={link => on.act(link.href)} />
-  )
-
   /** One standard Button; a press goes through the same `act` as every other action. */
   const press = (key: string, label: string, verb: Verb, id: string, hotkey?: string, variant?: 'primary') => (
     <Button key={key} label={label} hotkey={hotkey} variant={variant} onPress={() => on.act(actionHref(verb, id))} />
@@ -176,8 +171,18 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
     const href = actionHref('select', key)
     // The row is one link: a press selects it, a second press on the selected row opens its detail.
     const mark = Svg === undefined ? (isSelected ? '▶ ' : thread.isUnread ? '● ' : '· ') : isSelected ? '▶ ' : ''
+    const { sender, meta, preview } = rowWords(thread, nowMs)
+    // Plain Buttons of Text: one press anywhere on the words selects, a second on the selected row toggles More.
     const words = (
-      <Markdown key={`row-${key}`} text={rowLinkText(thread, nowMs, href, mark)} dimColor={!thread.isUnread} pressableLinks={[href]} onLinkPress={link => on.act(link.href)} />
+      <Button key={`row-${key}`} plain dimColor={!thread.isUnread} onPress={() => on.act(href)}>
+        <Text bold={thread.isUnread}>
+          {mark}
+          {sender}
+        </Text>
+        <Text>{meta}</Text>
+        {'\n'}
+        <Text dimColor>{preview}</Text>
+      </Button>
     )
     const card =
       Svg === undefined ? (
@@ -240,7 +245,7 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
         <Box key={`decision-${decision.id}`}>
           <Text color="warning">◆ {decision.snippet}</Text>
           <Text dimColor> {relativeTime(decision.sentAt, nowMs)} </Text>
-          {decision.href === null ? null : links(`answer-${decision.id}`, answerLink(decision.id), false)}
+          {decision.href === null ? null : <Button key={`answer-${decision.id}`} plain label="answer in Orchard ↗" onPress={() => on.act(actionHref('answer', decision.id))} />}
         </Box>
       ))}
 
