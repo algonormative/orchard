@@ -1,6 +1,6 @@
 {
   "name": "orchard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Connects a session to an Orchard workspace through the packaged Orchard agent CLI: resumes or joins on start, listens for alerts and wakes an idle session on the messages that matter (notification levels, batching, a minimum gap), carries the rest with the next prompt, acknowledges only after delivery, shows a band above the prompt when there is news, offers the model orchard_send, orchard_reply, orchard_ack, orchard_history and orchard_call, opens an /orchard pane (inbox, decisions waiting on the owner, claimed tasks, notification settings), and goes offline and retries when the workspace is unreachable. Workspace content reaches the model framed as data, and the credential never enters model context",
   "author": {
     "name": "algonormative",
