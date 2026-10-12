@@ -122,6 +122,7 @@ export function world(on: On, options: WorldOptions = {}) {
   })
   // Stand in for what the engine returns beneath the plugin.
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('session.end', async (_$, e) => ({ sessionId: e.sessionId }))
   on('turn.complete', async (_$, e) => ({ text: e.answer }) as never)
   on('ui.render', async ($$, e) => {
     const { Box } = $$.ui.resolve(e)

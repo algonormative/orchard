@@ -26,7 +26,7 @@ import {
 } from './alerts'
 import type { AlertsPage } from './alerts'
 import { bandLine } from './band'
-import { LEASE_BEAT_MS, LEASE_RECHECK_MS, RECENT_KEY, isHeldByOther, leaseKey, parseLease, parseRecent, planEviction } from './lease'
+import { CLAIM_RECHECK_MS, LEASE_BEAT_MS, LEASE_RECHECK_MS, RECENT_KEY, inflightKey, isHeldByOther, leaseKey, liveClaims, parseClaims, parseLease, parseRecent, planEviction, withoutIds } from './lease'
 import { DEFAULT_SETTINGS, addParticipation, classify, isLevel, parseParticipation, parseSettings, participationKey, settingsKey } from './classify'
 import { checkConn, parseProjectFile, PROJECT_FILE, readOptions, resolveIdentity } from './config'
 import type { Options, Parsed, ProjectOverrides } from './config'
@@ -331,6 +331,73 @@ async function recheckLease($: EngineInterface, app: App) {
   }
   await setStatus($, connectedStatus(ls))
   detach(startListener($, app))
+}
+
+/**
+ * Ids this session must not hand to the model now: another module instance of this participant
+ * (a reinstall, a reload) has them in a delivery that has not resolved, or has delivered them
+ * (the stored record knows, this instance's memory does not). Alerts already delivered are
+ * dropped from this instance's queue.
+ */
+async function blockedIds($: EngineInterface, app: App, q: OrchardQueue): Promise<Set<string>> {
+  const { rt, ls } = app
+  const here = rt.current
+  const blocked = new Set<string>(ls.inFlight)
+  if (here === undefined) return blocked
+  const { endpoint } = here.conn
+  const me = here.identity.participantId
+  const now = await $.clock.now()
+  for (const claim of liveClaims(parseClaims(await storeGet($, inflightKey(endpoint, me))), now)) {
+    if (claim.owner !== ls.instanceId) for (const id of claim.ids) blocked.add(id)
+  }
+  const done = new Set(parseStoreRecord(await storeGet($, storeKey(endpoint, me)))?.delivered ?? [])
+  const gone = q.items.filter(a => done.has(a.id)).map(a => a.id)
+  if (gone.length > 0) {
+    await updateQueue($, app, cur => removeFromQueue(cur, gone, 0))
+    await syncCounts($, app)
+  }
+  for (const id of gone) blocked.add(id)
+  return blocked
+}
+
+/** Writes (`ids` given) or clears this instance's claim on a delivery, before the submit and after it resolves. */
+async function setClaim($: EngineInterface, app: App, ids: readonly string[], isClaiming: boolean) {
+  const { rt, ls } = app
+  const here = rt.current
+  if (here === undefined) return
+  const key = inflightKey(here.conn.endpoint, here.identity.participantId)
+  const now = await $.clock.now()
+  const claims = liveClaims(parseClaims(await storeGet($, key)), now)
+  const next = isClaiming ? [...claims, { owner: ls.instanceId, at: now, ids: [...ids] }] : withoutIds(claims, ls.instanceId, ids)
+  if (next.length === 0) {
+    try {
+      await $.store.delete(key)
+    } catch {
+      // A claim left behind expires on its own.
+    }
+    return
+  }
+  await storeSet($, app, key, next)
+}
+
+/** session.end: let go of the lease so the next session of this participant listens at once, not after it goes stale. */
+async function releaseLease($: EngineInterface, app: App) {
+  const { rt, ls } = app
+  const here = rt.current
+  if (here === undefined || ls.leaseId === undefined) return
+  const key = leaseKey(here.conn.endpoint, here.identity.participantId)
+  const held = parseLease(await storeGet($, key))
+  if (held?.session !== ls.leaseId) return
+  stopLoop(ls, 'offline')
+  ls.watchdog?.cancel()
+  ls.watchdog = undefined
+  ls.leaseTimer?.cancel()
+  ls.leaseTimer = undefined
+  try {
+    await $.store.delete(key)
+  } catch {
+    // The lease then goes stale on its own.
+  }
 }
 
 /** Marks this record used and forgets the least recently used ones past the cap. */
@@ -759,11 +826,22 @@ async function wake($: EngineInterface, app: App): Promise<boolean> {
   // The queue as it is now, after the waits above: the person's own prompt may have carried some
   // of it meanwhile. Nothing is awaited between choosing the batch and marking it in flight.
   const q = await readQueue($, app)
-  const batch = takeBatch(q, ls.inFlight, wakeOf(ls))
-  if (batch.length === 0) return false
+  const blocked = await blockedIds($, app, q)
+  const batch = takeBatch(q, blocked, wakeOf(ls))
+  if (batch.length === 0) {
+    // What is pending is in another instance's delivery: look again once it has resolved or expired.
+    if (q.items.some(a => blocked.has(a.id) && !ls.inFlight.has(a.id) && wakeOf(ls)(a))) {
+      ls.retryAfter = (await $.clock.now()) + CLAIM_RECHECK_MS
+      return true
+    }
+    return false
+  }
   for (const alert of batch) ls.inFlight.add(alert.id)
   let isDelivered = false
+  let isClaimed = false
   try {
+    await setClaim($, app, batch.map(a => a.id), true)
+    isClaimed = true
     // Written before the submit: the gap runs from the attempt, whatever becomes of it.
     await updateQueue($, app, cur => ({ ...cur, lastWakeAt: now }))
     const owner = (await read($, workspace))?.ownerId ?? null
@@ -778,6 +856,7 @@ async function wake($: EngineInterface, app: App): Promise<boolean> {
     else ls.retryAfter = (await $.clock.now()) + Math.max(ls.settings.gapSeconds * 1000, 30_000)
   } finally {
     for (const alert of batch) ls.inFlight.delete(alert.id)
+    if (isClaimed) await setClaim($, app, batch.map(a => a.id), false)
   }
   return true
 }
@@ -1318,18 +1397,27 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('session.end', async ($, e, next) => {
+    // /clear keeps this process, its loop and its lease holder id; every other end is a session that will not beat again.
+    if (e.reason !== 'clear') await releaseLease($, app)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('prompt.submit', async ($, e, next) => {
     detach(ensureListening($, app))
     if (!isPersonsPrompt(e.origin)) return next(e)
 
     const { ls } = app
     const pending = await readQueue($, app)
-    const batch = takeBatch(pending, ls.inFlight, wakeOf(ls))
+    const batch = takeBatch(pending, await blockedIds($, app, pending), wakeOf(ls))
     if (batch.length === 0) return next(e)
 
     // The queue rides along as context: the model reads it, the person does not see it typed.
     for (const alert of batch) ls.inFlight.add(alert.id)
+    let isClaimed = false
     try {
+      await setClaim($, app, batch.map(a => a.id), true)
+      isClaimed = true
       const owner = (await read($, workspace))?.ownerId ?? null
       const context = clean(app, frameMessages(batch.map(toFrameMessage), { ownerId: owner, nonce: newNonce(), note: deliveryNote(pending.dropped) }))
       const result = await next({ ...e, context: [...(e.context ?? []), context] })
@@ -1338,6 +1426,7 @@ export const register: Register = (on, options) => {
       return result
     } finally {
       for (const alert of batch) ls.inFlight.delete(alert.id)
+      if (isClaimed) await setClaim($, app, batch.map(a => a.id), false)
     }
   }).catch(($, e, next) => next(e)) // a hook that fails never costs the person their prompt
 

@@ -15,6 +15,11 @@ export const MAX_RECORDS = 50
 /** Where the recency index lives. */
 export const RECENT_KEY = 'recent records'
 
+/** A delivery that has not resolved is claimed this long; a claim older than that was left by a dead instance. */
+export const CLAIM_TTL_MS = 10 * 60_000
+/** How soon a session looks again when what is pending sits in another instance's delivery. */
+export const CLAIM_RECHECK_MS = 15_000
+
 export type Lease = { session: string; at: number }
 
 export const leaseKey = (endpoint: string, participantId: string): string => `lease ${endpoint} ${participantId}`
@@ -30,6 +35,33 @@ export function isHeldByOther(lease: Lease | undefined, me: string, now: number)
   return lease !== undefined && lease.session !== me && Math.abs(now - lease.at) < LEASE_STALE_MS
 }
 
+/** One module instance's delivery that has not resolved: the alert ids it handed to the prompt queue. */
+export type Claim = { owner: string; at: number; ids: string[] }
+
+export const inflightKey = (endpoint: string, participantId: string): string => `inflight ${endpoint} ${participantId}`
+
+export function parseClaims(value: unknown): Claim[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item: unknown) => {
+    const { owner, at, ids } = (item ?? {}) as Partial<Claim>
+    return typeof owner === 'string' && typeof at === 'number' && Number.isFinite(at) && Array.isArray(ids)
+      ? [{ owner, at, ids: ids.filter((id): id is string => typeof id === 'string') }]
+      : []
+  })
+}
+
+export const liveClaims = (claims: readonly Claim[], now: number): Claim[] => claims.filter(c => Math.abs(now - c.at) < CLAIM_TTL_MS)
+
+/** The claims with `ids` taken out of `owner`'s, an emptied claim dropped. */
+export function withoutIds(claims: readonly Claim[], owner: string, ids: readonly string[]): Claim[] {
+  const gone = new Set(ids)
+  return claims.flatMap(c => {
+    if (c.owner !== owner) return [c]
+    const left = c.ids.filter(id => !gone.has(id))
+    return left.length === 0 ? [] : [{ ...c, ids: left }]
+  })
+}
+
 export type RecordRef = { endpoint: string; participantId: string }
 type Recent = RecordRef & { at: number }
 
@@ -39,9 +71,10 @@ export const recordKeys = (endpoint: string, participantId: string): string[] =>
   settingsKey(endpoint, participantId),
   participationKey(endpoint, participantId),
   leaseKey(endpoint, participantId),
+  inflightKey(endpoint, participantId),
 ]
 
-const PREFIXES = ['inbox ', 'settings ', 'participation ', 'lease ']
+const PREFIXES = ['inbox ', 'settings ', 'participation ', 'lease ', 'inflight ']
 
 function refOfKey(key: string): RecordRef | undefined {
   const prefix = PREFIXES.find(p => key.startsWith(p))

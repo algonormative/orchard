@@ -70,6 +70,8 @@ export type ListenerState = {
   heldStatus: string | undefined
   /** This module instance has unpinned a status line an earlier instance may have left. */
   isStatusSwept: boolean
+  /** Tells this module instance's claims on deliveries from another's (a reinstall or reload leaves both alive). */
+  instanceId: string
   /** A waking delivery is in flight (a `$.prompt.submit` that has not resolved). */
   isDelivering: boolean
   /** Ids handed to a delivery that has not resolved; another delivery must not take them. */
@@ -121,6 +123,7 @@ export function createListenerState(): ListenerState {
     holdTimer: undefined,
     heldStatus: undefined,
     isStatusSwept: false,
+    instanceId: crypto.randomUUID(),
     isDelivering: false,
     inFlight: new Set(),
     retryAfter: 0,
