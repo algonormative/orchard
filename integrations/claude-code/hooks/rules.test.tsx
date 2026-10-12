@@ -451,9 +451,11 @@ test('history: open decisions are the ones this participant raised that the owne
     ],
   })
   // d1 answered; d4 answered through its follow-up f4; d3 is another participant's; d2 stays open
-  expect(openDecisions(messages, 'claude-me', 'owner').map(m => m.id)).toEqual(['d2'])
-  expect(openDecisions(messages, 'claude-other', 'owner').map(m => m.id)).toEqual(['d3'])
-  expect(openDecisions([], 'claude-me', 'owner')).toEqual([])
+  expect(openDecisions(messages, ['claude-me'], 'owner').map(m => m.id)).toEqual(['d2'])
+  expect(openDecisions(messages, ['claude-other'], 'owner').map(m => m.id)).toEqual(['d3'])
+  // every participant of the list counts: a session's own and the handles its subagents act as
+  expect(openDecisions(messages, ['claude-me', 'claude-other'], 'owner').map(m => m.id)).toEqual(['d2', 'd3'])
+  expect(openDecisions([], ['claude-me'], 'owner')).toEqual([])
 })
 
 test('history: a thread the participant started or posted in is all of its messages', () => {
@@ -509,7 +511,7 @@ test('pinActor pins the participant nested in a plugin_call role_declare: filled
   expect(own.ok).toBe(true)
   const other = pinActor('plugin_call', call({ participant_id: 'owner' }), 'claude-me')
   expect(other.ok).toBe(false)
-  expect(other.ok ? '' : other.message).toContain("participant_id must be this session's own participant")
+  expect(other.ok ? '' : other.message).toContain("participant_id must be this agent's own participant")
   expect(pinActor('plugin_call', call({ participant_id: 7 }), 'claude-me').ok).toBe(false)
   // reads and the other operations are left as they are
   const read = { plugin_id: 'roles', operation: 'roles_list', arguments: {} }

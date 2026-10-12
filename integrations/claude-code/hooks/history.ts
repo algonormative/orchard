@@ -99,12 +99,12 @@ export function participationFrom(messages: readonly HistoryMessage[], me: strin
 }
 
 /**
- * Decisions `me` raised that no owner message has answered yet. A decision is a
- * `kind: "decision"` message delivered to the owner; an owner message answers the nearest
- * decision up its reply chain (so a reply to a follow-up inside the thread counts, while an
- * outer decision stays open).
+ * Decisions that any of `mine` (a session's participants: its own and the handles its subagents
+ * act as) raised and no owner message has answered yet. A decision is a `kind: "decision"`
+ * message delivered to the owner; an owner message answers the nearest decision up its reply
+ * chain (so a reply to a follow-up inside the thread counts, while an outer decision stays open).
  */
-export function openDecisions(messages: readonly HistoryMessage[], me: string, ownerId: string): HistoryMessage[] {
+export function openDecisions(messages: readonly HistoryMessage[], mine: readonly string[], ownerId: string): HistoryMessage[] {
   const byId = new Map(messages.map(m => [m.id, m]))
   const resolved = new Set<string>()
   for (const reply of messages.filter(m => m.senderId === ownerId)) {
@@ -122,6 +122,6 @@ export function openDecisions(messages: readonly HistoryMessage[], me: string, o
     }
   }
   return messages.filter(
-    m => m.kind === 'decision' && m.senderId === me && m.senderId !== ownerId && m.recipients.includes(ownerId) && !resolved.has(m.id),
+    m => m.kind === 'decision' && mine.includes(m.senderId) && m.senderId !== ownerId && m.recipients.includes(ownerId) && !resolved.has(m.id),
   )
 }

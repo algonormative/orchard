@@ -366,11 +366,23 @@ export function stubFiles(on: On, files: Record<string, string>): { reads: strin
 export function stubStore(
   on: On,
   entries: Record<string, unknown> = {},
-): { data: Map<string, unknown>; writes: { key: string; value: unknown }[]; fail: { set: boolean }; after: { set: ((key: string) => void) | undefined } } {
+): {
+  data: Map<string, unknown>
+  writes: { key: string; value: unknown }[]
+  fail: { set: boolean }
+  after: { set: ((key: string) => void) | undefined }
+  before: { get: ((key: string) => Promise<void> | undefined) | undefined }
+} {
   const data = new Map<string, unknown>(Object.entries(entries))
   const writes: { key: string; value: unknown }[] = []
   const clone = (value: unknown) => (value === undefined ? undefined : (JSON.parse(JSON.stringify(value)) as unknown))
-  on('store.get', async (_$, e) => ({ value: clone(data.get(e.key)) }) as never)
+  // Holds a read after it has seen the value, as a read in flight does: what it answers is what was there when it began.
+  const before: { get: ((key: string) => Promise<void> | undefined) | undefined } = { get: undefined }
+  on('store.get', async (_$, e) => {
+    const value = clone(data.get(e.key))
+    await before.get?.(e.key)
+    return { value } as never
+  })
   const fail = { set: false }
   // Runs right after a write lands: another session writing in the same moment.
   const after: { set: ((key: string) => void) | undefined } = { set: undefined }
@@ -386,7 +398,7 @@ export function stubStore(
     return { value: undefined } as never
   })
   on('store.keys', async () => ({ value: [...data.keys()] }) as never)
-  return { data, writes, fail, after }
+  return { data, writes, fail, after, before }
 }
 
 /** How `$.ui.notify` answers in a test: sent by a channel, or refused for the reason named (`denied`: it rejects). */

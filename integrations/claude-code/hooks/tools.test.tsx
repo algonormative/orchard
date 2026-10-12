@@ -339,7 +339,7 @@ test('orchard_call acts as this session\'s participant: naming another is refuse
   for (const [name, args] of impostors) {
     const answer = await callTool($, 'orchard_call', { name, arguments: args })
     expect(answer.deny, name).toContain('Orchard:')
-    expect(answer.deny, name).toContain('must be this session\'s own participant')
+    expect(answer.deny, name).toContain('must be this agent\'s own participant')
     // the answer does not hand the participant id back, and the refusal came before any call
     expect(answer.deny?.includes(ME)).toBe(false)
   }
@@ -425,7 +425,7 @@ test('orchard_call plugin_call role_declare acts as this participant: filled in 
 
   const before = w.fake.calls.length
   const other = await declare({ participant_id: 'owner', request_id: 'r5', roles: ['reviewer'], skills: [] })
-  expect(other.deny).toContain("participant_id must be this session's own participant")
+  expect(other.deny).toContain("participant_id must be this agent's own participant")
   expect(w.fake.calls).toHaveLength(before)
 })
 

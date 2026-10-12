@@ -1409,14 +1409,15 @@ test('a wake queued behind a running turn is neither recorded nor acknowledged u
 
 const decisionCalls = (w: World) => w.fake.calls.filter(c => c.tool === 'workspace_decisions')
 
-test('needs-you comes from workspace_decisions with this participant as sender_id, asked over the whole history', { options: OPTIONS }, async ($, on) => {
+test('needs-you comes from workspace_decisions over the whole history, kept to the participants of this session', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   w.fake.hasDecisionsTool = true
   w.fake.push({ id: 'dec1', sender_id: ME, kind: 'decision', body: 'ship it?', destination: { kind: 'direct', id: 'owner' }, recipient_ids: ['owner'] })
   w.fake.push({ id: 'dec2', sender_id: 'claude-other', kind: 'decision', body: 'not mine', destination: { kind: 'direct', id: 'owner' }, recipient_ids: ['owner'] })
   await begin($, w)
 
-  expect(JSON.parse(decisionCalls(w)[0]?.stdin ?? '{}')).toEqual({ sender_id: ME })
+  // one call for every handle of the session: the host's list is not narrowed to one sender
+  expect(JSON.parse(decisionCalls(w)[0]?.stdin ?? '{}')).toEqual({})
   expect(counts(w)).toMatchObject({ unread: 0, forYou: 0, needsYou: 1 })
   expect(await bandText($)).toBe('◆ claude-fruit-stand in Fruit Stand · needs you 1')
 

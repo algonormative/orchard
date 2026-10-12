@@ -60,6 +60,7 @@ import {
   callNote,
   declaredRoles,
   inboundText,
+  isEnded,
   nextAgentLook,
   pruned,
   pushActivity,
@@ -427,8 +428,8 @@ async function storeGet($: EngineInterface, key: string): Promise<unknown> {
 
 const connectedStatus = (ls: ListenerState): OrchardStatus => (ls.isStoreFailing ? { kind: 'connected', isStoreFailing: true } : { kind: 'connected' })
 
-/** Writes to `$.store`. A failure does not stop delivery (the store is a backstop against replay) but the band says so. */
-async function storeSet($: EngineInterface, app: App, key: string, value: unknown) {
+/** Writes to `$.store`; false when the store refused. A failure does not stop delivery (the store is a backstop against replay) but the band says so. */
+async function storeSet($: EngineInterface, app: App, key: string, value: unknown): Promise<boolean> {
   let isFailing = false
   try {
     await $.store.set(key, value)
@@ -436,9 +437,11 @@ async function storeSet($: EngineInterface, app: App, key: string, value: unknow
     isFailing = true
   }
   const { ls } = app
-  if (isFailing === ls.isStoreFailing) return
-  ls.isStoreFailing = isFailing
-  await putStatusShown($, app, current => (current?.kind === 'connected' ? connectedStatus(ls) : current))
+  if (isFailing !== ls.isStoreFailing) {
+    ls.isStoreFailing = isFailing
+    await putStatusShown($, app, current => (current?.kind === 'connected' ? connectedStatus(ls) : current))
+  }
+  return !isFailing
 }
 
 /** Reads the lease of this connection. */
@@ -628,25 +631,28 @@ async function readWindow($: EngineInterface, app: App): Promise<Window> {
 }
 
 /**
- * The decisions this participant raised that the owner has not answered, as the host counts them
- * over the whole history (`workspace_decisions`). Undefined when the host cannot say (it has no
- * such tool, or the call failed): the caller then reconstructs from the history window. A tool
- * error is taken to mean an older host and remembered for the connection; a lost connection is not.
+ * The decisions that any of `handles` (the session's participant, the handles its subagents act as)
+ * raised and the owner has not answered, as the host lists them over the whole history
+ * (`workspace_decisions`). The host narrows its list to one sender at most: asking it per handle
+ * would be a call for each of up to a few dozen, so it is asked once, for every sender, and the
+ * list kept to `handles` here. Undefined when the host cannot say (it has no such tool, or the call
+ * failed): the caller then reconstructs from the history window. A tool error is taken to mean an
+ * older host and remembered for the connection; a lost connection is not.
  */
-async function countOpenDecisions($: EngineInterface, app: App, me: string): Promise<number | undefined> {
+async function listedDecisions($: EngineInterface, app: App, handles: readonly string[]): Promise<unknown[] | undefined> {
   const { ls } = app
   if (ls.decisionsTool === 'missing') return undefined
-  const result = await tool($, app.rt, 'workspace_decisions', { sender_id: me })
-  if (result.exitCode === EXIT_OK) {
-    const decisions = (result.json as { decisions?: unknown } | undefined)?.decisions
-    if (Array.isArray(decisions)) {
-      ls.decisionsTool = 'available'
-      return decisions.length
-    }
+  const result = await tool($, app.rt, 'workspace_decisions', {})
+  const listed = result.exitCode === EXIT_OK ? (result.json as { decisions?: unknown } | undefined)?.decisions : undefined
+  if (Array.isArray(listed)) {
+    ls.decisionsTool = 'available'
+    return listed.filter(d => handles.includes((d as { sender_id?: string } | null)?.sender_id as string))
   }
   if (result.exitCode !== EXIT_CONNECTION) ls.decisionsTool = 'missing'
   return undefined
 }
+
+const countOpenDecisions = async ($: EngineInterface, app: App, handles: readonly string[]): Promise<number | undefined> => (await listedDecisions($, app, handles))?.length
 
 async function applyWindow($: EngineInterface, app: App, messages: readonly HistoryMessage[]) {
   const { rt, ls } = app
@@ -655,7 +661,8 @@ async function applyWindow($: EngineInterface, app: App, messages: readonly Hist
   const me = here.identity.participantId
   await noteParticipation($, app, participationFrom(messages, me))
   const owner = (await read($, workspace))?.ownerId ?? 'owner'
-  await syncCounts($, app, (await countOpenDecisions($, app, me)) ?? openDecisions(messages, me, owner).length)
+  const handles = myHandles(app)
+  await syncCounts($, app, (await countOpenDecisions($, app, handles)) ?? openDecisions(messages, handles, owner).length)
   ls.decisionsAt = await $.clock.now()
 }
 
@@ -674,8 +681,7 @@ async function refreshDecisions($: EngineInterface, app: App, isForced = false) 
   if (here === undefined) return
   ls.isReadingDecisions = true
   try {
-    const me = here.identity.participantId
-    const counted = await countOpenDecisions($, app, me)
+    const counted = await countOpenDecisions($, app, myHandles(app))
     if (counted !== undefined) {
       await syncCounts($, app, counted)
       ls.decisionsAt = await $.clock.now()
@@ -1445,25 +1451,39 @@ async function setMainStatus($: EngineInterface, app: App, status: 'running' | '
  * acts as the session.
  */
 async function actorFor($: EngineInterface, app: App, agentId: string | undefined): Promise<string> {
+  const { ls } = app
   const base = app.rt.current?.identity.participantId ?? ''
   if (agentId === undefined || agentId === MAIN || base === '') return base
   try {
-    const now = await $.clock.now()
-    if (stanceOf(touch(app.ls.subs, agentId, now), now) === 'try') await claimOnce($, app, agentId)
+    // A claim that ends stale (the session started over under it) has given back what it took, and the session is
+    // still connected: the call claims once more, once, rather than act as the session for the rest of the call.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const now = await $.clock.now()
+      if (stanceOf(touch(ls.subs, agentId, now), now) !== 'try') break
+      const epoch = ls.subs.epoch
+      await claimOnce($, app, agentId)
+      if (ls.subs.epoch === epoch || ls.isDisconnected) break
+    }
   } catch {
     // The handle is bookkeeping; the call goes on as the session.
   }
   return handleOf(app, agentId)
 }
 
-/** One claim per agent at a time: a second call of an agent whose claim is running waits for it and gets its answer. */
+/**
+ * One claim per agent at a time: a second call of an agent whose claim is running waits for it and gets its answer.
+ * releaseHandles forgets the claims running, so a call after a restart of the pool starts a claim of its own.
+ */
 function claimOnce($: EngineInterface, app: App, agentId: string): Promise<void> {
   const { subClaims } = app.ls
   const running = subClaims.get(agentId)
   if (running !== undefined) return running
-  const work = claimHandle($, app, agentId)
+  const work: Promise<void> = claimHandle($, app, agentId)
     .catch(() => undefined)
-    .finally(() => subClaims.delete(agentId))
+    .finally(() => {
+      // Not a claim that took this one's place after the pool was restarted.
+      if (subClaims.get(agentId) === work) subClaims.delete(agentId)
+    })
   subClaims.set(agentId, work)
   return work
 }
@@ -1482,10 +1502,12 @@ async function claimHandle($: EngineInterface, app: App, agentId: string) {
   const isStale = () => book.epoch !== epoch || ls.isDisconnected
   let held: { slot: number; handle: string } | undefined
   try {
-    // An agent the table does not know yet (a forked skill's) is looked for in the engine's list once, so its end is seen.
-    if ((await read($, agents))[agentId] === undefined) await lookAtAgents($, app, true)
+    // An agent the table does not know yet (a forked skill's), or whose row says it ended (a message may have resumed it),
+    // is looked for in the engine's list once, so its end, or its running again, is seen.
+    const row = (await read($, agents))[agentId]
+    if (row === undefined || isEnded(row.status)) await lookAtAgents($, app, true)
     const slot = await takeSlot($, app, agentId)
-    if (slot === undefined) return await fallBack($, app, agentId, 'full')
+    if (typeof slot !== 'number') return await fallBack($, app, agentId, slot)
     held = { slot, handle: subHandle(here.identity.participantId, slot) }
     const identity = { participantId: held.handle, name: subName(here.identity.name, slot) }
     const entered = await enterOnce(runner($), enteringOf(book, held.handle), here.conn, identity)
@@ -1521,15 +1543,16 @@ async function claimHandle($: EngineInterface, app: App, agentId: string) {
  * Reserves the lowest slot no other session holds and takes its lease, true to lease.ts: a lease
  * another session beat recently keeps the slot; this session's own, or a stale one, does not. The
  * write is read back, because two sessions can write together and the store is the only thing they
- * share; one that lost the race is found at the next beat (beatHandles). Undefined when no slot is
- * free, or the store would not keep the lease.
+ * share; one that lost the race is found at the next beat (beatHandles). Otherwise why there is none:
+ * `full` when no slot is free, `failed` when the store would not keep a lease.
  */
-async function takeSlot($: EngineInterface, app: App, agentId: string): Promise<number | undefined> {
+async function takeSlot($: EngineInterface, app: App, agentId: string): Promise<number | 'full' | 'failed'> {
   const { rt, ls } = app
   const here = rt.current
-  if (here === undefined) return undefined
+  if (here === undefined) return 'full'
   const { endpoint } = here.conn
   const book = ls.subs
+  let isRefused = false
   for (const slot of freeSlots(book)) {
     if (book.slots.has(slot)) continue
     // Reserved before anything is awaited: an agent racing for the same slot passes it by.
@@ -1540,7 +1563,7 @@ async function takeSlot($: EngineInterface, app: App, agentId: string): Promise<
       const now = await $.clock.now()
       const holder = await leaseHolder($, ls)
       if (isHeldByOther(parseLease(await storeGet($, key)), holder, now)) continue
-      await storeSet($, app, key, { session: holder, at: now })
+      if (!(await storeSet($, app, key, { session: holder, at: now }))) isRefused = true
       if (parseLease(await storeGet($, key))?.session !== holder) continue
       isTaken = true
       return slot
@@ -1548,7 +1571,7 @@ async function takeSlot($: EngineInterface, app: App, agentId: string): Promise<
       if (!isTaken) book.slots.delete(slot)
     }
   }
-  return undefined
+  return isRefused ? 'failed' : 'full'
 }
 
 /**
@@ -1617,15 +1640,27 @@ async function forgetAgent($: EngineInterface, app: App, agentId: string) {
   detach(askRefresh($, app, 'soon'))
 }
 
-/** session.end, Disconnect, a start over: every handle goes back, and a claim still running undoes itself. */
+/**
+ * session.end, Disconnect, a start over: every handle goes back, and a claim still running undoes itself.
+ * Nothing is awaited before no call is pinned to a handle and no beat may renew its lease any more.
+ */
 async function releaseHandles($: EngineInterface, app: App) {
   const { ls } = app
   const book = ls.subs
   book.epoch += 1
   ls.subTimer?.cancel()
   ls.subTimer = undefined
-  const held = [...book.agents.values()].flatMap(entry => (entry.pooled === undefined ? [] : [entry.pooled]))
+  const held: { slot: number; handle: string }[] = []
+  const joined: string[] = []
+  for (const entry of book.agents.values()) {
+    if (entry.pooled !== undefined) held.push(entry.pooled)
+    joined.push(...entry.observed)
+    entry.pooled = undefined
+  }
   book.agents.clear()
+  // A claim that began before this is not joined by a call after it: that call claims on its own.
+  ls.subClaims.clear()
+  markReleased(book, [...held.map(h => h.handle), ...joined], await $.clock.now())
   for (const handle of held) await giveBack($, app, handle, true)
 }
 
@@ -1657,13 +1692,14 @@ async function beatHandles($: EngineInterface, app: App) {
       if (held === undefined) continue
       const key = leaseKey(here.conn.endpoint, held.handle)
       const lease = parseLease(await storeGet($, key))
-      // Given back while the lease was read (its agent ended): not renewed, or it would outlive the slot.
-      if (entry.pooled !== held) continue
+      // Given back while the lease was read (its agent ended, the session did): not renewed, or it would outlive the slot.
+      if (entry.pooled !== held || ls.isDisconnected) continue
       if (isHeldByOther(lease, holder, now)) {
         entry.pooled = undefined
         markReleased(ls.subs, [held.handle], now)
         await giveBack($, app, held, false)
-        await fallBack($, app, agentId, 'taken')
+        // Not for an agent let go, or a new one in its place, while the slot was given back.
+        if (ls.subs.agents.get(agentId) === entry) await fallBack($, app, agentId, 'taken')
       } else {
         await storeSet($, app, key, { session: holder, at: now })
       }
@@ -1790,27 +1826,19 @@ async function countOpenTasks($: EngineInterface, app: App, storeIds: readonly s
   return total
 }
 
-/** The decisions this participant raised that the owner has not answered, as the pane lists them. Undefined when the workspace could not say. */
-async function readOpenDecisions($: EngineInterface, app: App): Promise<OrchardPaneDecision[] | undefined> {
-  const { ls } = app
+/** The decisions that any of `handles` raised and the owner has not answered, as the pane lists them. Undefined when the workspace could not say. */
+async function readOpenDecisions($: EngineInterface, app: App, handles: readonly string[]): Promise<OrchardPaneDecision[] | undefined> {
   const here = app.rt.current
   if (here === undefined) return undefined
-  const me = here.identity.participantId
   const asRow = (m: { id: string; body: string; sentAt: string }) => ({ id: m.id, snippet: snippetOf(m.body), sentAt: m.sentAt, href: messageHref(here.conn.endpoint, m.id) })
-  if (ls.decisionsTool !== 'missing') {
-    const result = await tool($, app.rt, 'workspace_decisions', { sender_id: me })
-    const listed = result.exitCode === EXIT_OK ? (result.json as { decisions?: unknown } | undefined)?.decisions : undefined
-    if (Array.isArray(listed)) {
-      ls.decisionsTool = 'available'
-      const parsed = listed.map(parseHistoryMessage).filter((m): m is NonNullable<typeof m> => m !== undefined)
-      if (parsed.length === listed.length) return parsed.map(asRow)
-    } else if (result.exitCode !== EXIT_CONNECTION) {
-      ls.decisionsTool = 'missing'
-    }
+  const listed = await listedDecisions($, app, handles)
+  if (listed !== undefined) {
+    const parsed = listed.map(parseHistoryMessage).filter((m): m is NonNullable<typeof m> => m !== undefined)
+    if (parsed.length === listed.length) return parsed.map(asRow)
   }
   const window = await readWindow($, app)
   if (window.kind !== 'ok') return undefined
-  return openDecisions(window.messages, me, (await read($, workspace))?.ownerId ?? 'owner').map(asRow)
+  return openDecisions(window.messages, handles, (await read($, workspace))?.ownerId ?? 'owner').map(asRow)
 }
 
 /**
@@ -1842,7 +1870,7 @@ async function refreshWorkspace($: EngineInterface, app: App, known?: unknown) {
     const attached = attachedPluginIds(info)
     const open = await countOpenTasks($, app, storeIds)
     const claimed = await readClaims($, app, storeIds, handles)
-    const decisions = await readOpenDecisions($, app)
+    const decisions = await readOpenDecisions($, app, handles)
     const roles = attached.includes('roles') ? await readRoles($, app, handles) : []
     const claimedIds = new Set((claimed ?? []).map(t => t.id))
     const states = attached.includes('state') && claimed !== undefined ? await readStates($, app, handles, claimedIds) : attached.includes('state') ? undefined : []
@@ -1946,6 +1974,8 @@ function paneHandlers($: EngineInterface, app: App): PaneHandlers {
 type ToolAnswer = { result: string } | { deny: string }
 
 const denied = (message: string): ToolAnswer => ({ deny: `Orchard: ${message}` })
+
+const DISCONNECTED = 'this session is disconnected from Orchard; /orchard connect puts it back'
 
 /** The secrets of this connection, for scrubbing anything the model is about to read. */
 function secretsOf(app: App): string[] {
@@ -2129,9 +2159,11 @@ async function answerCall($: EngineInterface, app: App, input: unknown, agentId:
 
 async function answerTool($: EngineInterface, app: App, name: string, input: unknown, agentId: string | undefined): Promise<ToolAnswer> {
   // A disconnected session is out of the workspace: nothing the model asks reaches it.
-  if (app.ls.isDisconnected) return denied('this session is disconnected from Orchard; /orchard connect puts it back')
+  if (app.ls.isDisconnected) return denied(DISCONNECTED)
   // The participant this call acts as, settled once at the start: a handle given back mid-call does not change who sent it.
   const as = await actorFor($, app, agentId)
+  // Disconnected while the handle was being set up (the lease, resume, join take a while): the call must not go out as anyone.
+  if (app.ls.isDisconnected) return denied(DISCONNECTED)
   try {
     switch (name) {
       case 'orchard_send':
