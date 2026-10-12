@@ -29,6 +29,10 @@ export type OrchardCounts = {
   forYou: number
   /** Open decisions this participant raised, as the workspace reports them. */
   needsYou: number
+  /** The pending wake is held back by a draft in the prompt box (the band says it sends when the box is empty). */
+  isHeld?: boolean
+  /** Clock time the alert loop last heard back from the workspace; the pane's footer shows its age. */
+  lastPollAt?: number | null
 }
 
 /** One alert the listener fetched and has not yet delivered to the model. */
@@ -107,7 +111,13 @@ export type OrchardPaneThread = {
   size: number
   /** Where to open it in the browser UI. */
   href: string | null
+  /** Why it is in the inbox, as the badge says it. */
+  reason: OrchardPaneReason
+  /** An alert for it is still waiting to be delivered. */
+  isUnread: boolean
 }
+
+export type OrchardPaneReason = 'DM' | 'MENTION' | 'REPLY' | 'BROADCAST' | 'OWNER' | 'CHANNEL'
 
 export type OrchardPaneDecision = { id: string; snippet: string; sentAt: string; href: string | null }
 export type OrchardPaneTask = { id: string; title: string; status: string; href: string | null }
@@ -122,6 +132,10 @@ export type OrchardPane = {
   tasks: OrchardPaneTask[]
   /** The channels the participant can see, for the per-channel notification levels. */
   channels: { id: string; name: string }[]
+  /** The "older threads" fold is open. */
+  isOlderShown?: boolean
+  /** Replies of the threads (by reply id) whose detail is open. */
+  expanded?: string[]
 }
 
 declare module 'claude-code' {

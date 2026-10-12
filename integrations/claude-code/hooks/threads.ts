@@ -1,6 +1,6 @@
 // What the pane lists, from one window of history: the threads this participant is in, the
 // decisions it raised that wait on the owner, and where each opens in the browser UI. No `$`.
-import type { OrchardPaneThread } from '../types'
+import type { OrchardPaneReason, OrchardPaneThread } from '../types'
 import { plain } from './config'
 import type { HistoryMessage } from './history'
 import { parentsOf, rootOf } from './history'
@@ -45,6 +45,30 @@ export type ThreadContext = {
   endpoint: string
   /** Display names by participant id. */
   names: ReadonlyMap<string, string>
+  /** Pending alerts by message id, with the reasons the workspace gave them. */
+  pending?: ReadonlyMap<string, readonly string[]>
+}
+
+/** The badge of a thread: what the pending alert said if there is one, else how the message reached this participant. */
+export function reasonOf(destination: string, isOwner: boolean, size: number, alertReasons: readonly string[] | undefined): OrchardPaneReason {
+  if (alertReasons?.includes('mention')) return 'MENTION'
+  if (destination === 'broadcast') return 'BROADCAST'
+  if (isOwner) return 'OWNER'
+  if (destination === 'channel') return 'CHANNEL'
+  if (alertReasons?.includes('reply') || size > 1) return 'REPLY'
+  return 'DM'
+}
+
+/** "now", "2m", "3h", "4d", "2w": how long ago; anything unreadable or in the future is "now". */
+export function relativeTime(sentAt: string, nowMs: number): string {
+  const at = Date.parse(sentAt)
+  if (!Number.isFinite(at) || !Number.isFinite(nowMs)) return 'now'
+  const s = Math.max(0, Math.floor((nowMs - at) / 1000))
+  if (s < 60) return 'now'
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  if (s < 86_400) return `${Math.floor(s / 3600)}h`
+  if (s < 14 * 86_400) return `${Math.floor(s / 86_400)}d`
+  return `${Math.floor(s / (7 * 86_400))}w`
 }
 
 /**
@@ -78,6 +102,8 @@ export function buildThreads(messages: readonly HistoryMessage[], ctx: ThreadCon
         },
         size: sorted.length,
         href: messageHref(ctx.endpoint, theirs.id),
+        reason: reasonOf(theirs.destination, theirs.senderId === ctx.ownerId, sorted.length, ctx.pending?.get(theirs.id)),
+        isUnread: ctx.pending?.has(theirs.id) === true,
       } satisfies OrchardPaneThread,
     }
   })

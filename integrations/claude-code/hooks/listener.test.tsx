@@ -42,9 +42,9 @@ for (const reasons of [['direct'], ['mention'], ['reply'], ['broadcast', 'mentio
 
     deliver(w, 'm1', reasons)
     await w.clock.settle()
-    expect(counts(w)).toEqual({ unread: 1, forYou: 1, needsYou: 0 })
+    expect(counts(w)).toMatchObject({ unread: 1, forYou: 1, needsYou: 0 })
     expect(w.submits).toEqual([])
-    expect(await bandText($)).toBe('Orchard · Fruit Stand · 1 new (1 for you)')
+    expect(await bandText($)).toBe('◆ orchard · 1 new · 1 for you')
 
     await w.clock.advance(9_999)
     expect(w.submits).toEqual([])
@@ -59,8 +59,8 @@ for (const reasons of [['direct'], ['mention'], ['reply'], ['broadcast', 'mentio
     expect(sent?.text).toContain('display_name: "Other Claude"')
     expect(sent?.text).toContain('owner: no')
     expect(sent?.text).toContain(`message_id: "m1"`)
-    expect(counts(w)).toEqual({ unread: 0, forYou: 0, needsYou: 0 })
-    expect(await bandText($)).toBeUndefined()
+    expect(counts(w)).toMatchObject({ unread: 0, forYou: 0, needsYou: 0 })
+    expect(await bandText($)).toBe('◆ orchard · Fruit Stand · ● listening')
   })
 }
 
@@ -77,8 +77,8 @@ test('a broadcast alone and a plain channel post never start a turn; the broadca
   // `--channels` is asked for, and the plain post is dropped at the door: not queued, not counted
   expect(alertsCalls(w).every(c => c.argv.includes('--channels'))).toBe(true)
   expect(queued(w)).toEqual(['b1'])
-  expect(counts(w)).toEqual({ unread: 1, forYou: 0, needsYou: 0 })
-  expect(await bandText($)).toBe('Orchard · Fruit Stand · 1 new')
+  expect(counts(w)).toMatchObject({ unread: 1, forYou: 0, needsYou: 0 })
+  expect(await bandText($)).toBe('◆ orchard · 1 new')
 })
 
 test('a broadcast rides along with the next wake, and is acknowledged with it', { options: OPTIONS }, async ($, on) => {
@@ -106,7 +106,7 @@ test('a broadcast rides along with the next prompt the person types', { options:
   const w = await start($, on)
   deliver(w, 'b1', ['broadcast'], { body: 'deploy freeze at noon', destination: { kind: 'broadcast' } })
   await w.clock.settle()
-  expect(await bandText($)).toBe('Orchard · Fruit Stand · 1 new')
+  expect(await bandText($)).toBe('◆ orchard · 1 new')
 
   // A prompt another plugin or a scheduled task raised does not carry it.
   await $.prompt.submit({ text: 'tick', wait: false, origin: { kind: 'scheduled-trigger' } })
@@ -123,7 +123,7 @@ test('a broadcast rides along with the next prompt the person types', { options:
   expect(sent?.context?.[0]).toContain('deploy freeze at noon')
   expect(queued(w)).toEqual([])
   expect(w.fake.acks.map(a => a.ids)).toEqual([['b1']])
-  expect(await bandText($)).toBeUndefined()
+  expect(await bandText($)).toBe('◆ orchard · Fruit Stand · ● listening')
 })
 
 // ---- batching and the gap ----
@@ -231,7 +231,7 @@ test('a default of nothing is do-not-disturb: nothing wakes, everything still co
 
   expect(w.submits).toEqual([])
   expect(counts(w)).toMatchObject({ unread: 1, forYou: 0 })
-  expect(await bandText($)).toBe('Orchard · Fruit Stand · 1 new')
+  expect(await bandText($)).toBe('◆ orchard · 1 new')
 
   await $.prompt.submit(typed('hello'))
   await w.clock.settle()
@@ -265,7 +265,7 @@ test('a draft in the prompt box blocks the wake: notify once, deliver with the n
   await w.clock.advance(5 * 60_000)
   expect(w.submits).toEqual([])
   expect(w.sinks.events.filter(e => e.name === 'ui.notify')).toHaveLength(1)
-  expect(await bandText($)).toBe('Orchard · Fruit Stand · 2 new (2 for you)')
+  expect(await bandText($)).toBe('◆ orchard · 2 new · 2 for you · sends when box is empty')
 
   await $.prompt.submit(typed('half a thought I was typing, finished'))
   await w.clock.settle()
@@ -355,7 +355,7 @@ test('the recheck keeps the hold while the draft stays and counts what arrived; 
   expect(pendingRechecks(w)).toBe(0)
   expect(w.fake.acks.map(a => [...a.ids].sort())).toEqual([['d1', 'd2']])
   expect(counts(w)).toMatchObject({ unread: 0, forYou: 0 })
-  expect(await bandText($)).toBeUndefined()
+  expect(await bandText($)).toBe('◆ orchard · Fruit Stand · ● listening')
 
   // and that was all: nothing looks at the box again, nothing more is said or sent
   const reads = w.box.reads
@@ -703,7 +703,7 @@ test('exit 3 and a timed-out call from the loop back off 5 s doubling, show offl
   isDown = true
   // the waiting call comes back empty at t=60 s; the next one is the first to fail
   await w.clock.advance(31_000)
-  expect(await bandText($)).toBe('Orchard · offline')
+  expect(await bandText($)).toBe('◆ orchard · ○ offline')
   expect(w.state.latest.status).toEqual({ kind: 'offline', failures: 1 })
 
   await w.clock.advance(5 * 60_000)
@@ -732,7 +732,7 @@ test('exit 4 from the loop shows the cleaned error, stops, and only /orchard rec
   await begin($, w)
 
   const text = (await bandText($)) ?? ''
-  expect(text.startsWith('Orchard · error: ')).toBe(true)
+  expect(text.startsWith('◆ orchard · error: ')).toBe(true)
   expect(text).toContain('workspace is archived')
   expectNoSecrets(await visible($, w))
 
@@ -838,14 +838,14 @@ test('needs-you is read from the workspace: the decisions this participant raise
   w.fake.push({ id: 'dec2', sender_id: 'claude-other', kind: 'decision', body: 'not mine', destination: { kind: 'direct', id: 'owner' }, recipient_ids: ['owner'] })
   await begin($, w)
 
-  expect(counts(w)).toEqual({ unread: 0, forYou: 0, needsYou: 1 })
-  expect(await bandText($)).toBe('Orchard · Fruit Stand · needs-you 1')
+  expect(counts(w)).toMatchObject({ unread: 0, forYou: 0, needsYou: 1 })
+  expect(await bandText($)).toBe('◆ orchard · Fruit Stand · needs you 1')
 
   // the owner answers in the thread; the next page that arrives refreshes the count
   await w.clock.advance(20_000)
   deliver(w, 'ans', ['direct'], { sender_id: 'owner', thread_id: 'dec1', body: 'yes, ship it' })
   await w.clock.settle()
-  expect(counts(w)).toEqual({ unread: 1, forYou: 1, needsYou: 0 })
+  expect(counts(w)).toMatchObject({ unread: 1, forYou: 1, needsYou: 0 })
 })
 
 test('replies in a thread this participant posted in wake it, with no server reason but the thread', { options: OPTIONS }, async ($, on) => {
@@ -1014,8 +1014,8 @@ test('a queue left by another workspace is reset on start: its cursor is not fet
 
   // the other workspace's cursor did not become this one's fetch cursor
   expect(alertsCalls(w)[0]?.argv).toEqual(expect.arrayContaining(['--after', '3']))
-  expect(counts(w)).toEqual({ unread: 0, forYou: 0, needsYou: 0 })
-  expect(await bandText($)).toBeUndefined()
+  expect(counts(w)).toMatchObject({ unread: 0, forYou: 0, needsYou: 0 })
+  expect(await bandText($)).toBe('◆ orchard · Fruit Stand · ● listening')
   // the queue was reset to this connection's, and its stamp is neither the endpoint nor the participant
   expect(w.state.latest.queue).toMatchObject({ items: [], cursor: 0 })
   const stamp = (w.state.latest.queue as { scope: string }).scope
@@ -1173,11 +1173,11 @@ test('a loop that stops moving is restarted by the watchdog with no prompt to pr
   expect(alertsCalls(w)).toHaveLength(2)
   // the loop is due to move again at 60 s + the call's timeout + slack; until then nothing is wrong
   await w.clock.advance(235_000)
-  expect(await bandText($)).toBeUndefined()
+  expect(await bandText($)).toBe('◆ orchard · Fruit Stand · ● listening')
   expect(resumes(w)).toHaveLength(1)
 
   await w.clock.advance(10_000)
-  expect(await bandText($)).toBe('Orchard · offline')
+  expect(await bandText($)).toBe('◆ orchard · ○ offline')
   expect(w.state.latest.status).toEqual({ kind: 'offline', failures: 1 })
 
   isHanging = false
@@ -1200,7 +1200,7 @@ test('a loop that crashes takes the session offline instead of leaving it lookin
   w.state.refuse.key = 'queue'
   deliver(w, 'm1')
   await w.clock.settle()
-  expect(await bandText($)).toBe('Orchard · offline')
+  expect(await bandText($)).toBe('◆ orchard · ○ offline')
   expect(w.state.latest.status).toEqual({ kind: 'offline', failures: 1 })
 
   await w.clock.advance(5_000)
@@ -1221,7 +1221,7 @@ test('a second session for the same participant is read-only while the first one
 
   expect(alertsCalls(w)).toHaveLength(0)
   expect(w.state.latest.status).toEqual({ kind: 'shared' })
-  expect(await bandText($)).toBe('Orchard · another session is listening')
+  expect(await bandText($)).toBe('◆ orchard · another session is listening')
   await w.clock.advance(100_000)
   expect(alertsCalls(w)).toHaveLength(0)
   expect(w.submits).toEqual([])
@@ -1366,7 +1366,7 @@ test('past 50 (endpoint, participant) records the least recently used are evicte
 
 test('a failed store write shows in the band, and the band clears once a write goes through', { options: OPTIONS }, async ($, on) => {
   const w = await start($, on)
-  expect(await bandText($)).toBeUndefined()
+  expect(await bandText($)).toBe('◆ orchard · Fruit Stand · ● listening')
 
   w.store.fail.set = true
   deliver(w, 'm1')
@@ -1382,7 +1382,7 @@ test('a failed store write shows in the band, and the band clears once a write g
   await w.clock.advance(70_000)
   expect(w.submits).toHaveLength(2)
   expect(w.state.latest.status).toEqual({ kind: 'connected' })
-  expect(await bandText($)).toBeUndefined()
+  expect(await bandText($)).toBe('◆ orchard · Fruit Stand · ● listening')
 })
 
 test('a wake queued behind a running turn is neither recorded nor acknowledged until its own turn starts (the submit call resolves)', { options: OPTIONS }, async ($, on) => {
@@ -1416,13 +1416,13 @@ test('needs-you comes from workspace_decisions with this participant as sender_i
   await begin($, w)
 
   expect(JSON.parse(decisionCalls(w)[0]?.stdin ?? '{}')).toEqual({ sender_id: ME })
-  expect(counts(w)).toEqual({ unread: 0, forYou: 0, needsYou: 1 })
-  expect(await bandText($)).toBe('Orchard · Fruit Stand · needs-you 1')
+  expect(counts(w)).toMatchObject({ unread: 0, forYou: 0, needsYou: 1 })
+  expect(await bandText($)).toBe('◆ orchard · Fruit Stand · needs you 1')
 
   await w.clock.advance(20_000)
   deliver(w, 'ans', ['direct'], { sender_id: 'owner', thread_id: 'dec1', body: 'yes, ship it' })
   await w.clock.settle()
-  expect(counts(w)).toEqual({ unread: 1, forYou: 1, needsYou: 0 })
+  expect(counts(w)).toMatchObject({ unread: 1, forYou: 1, needsYou: 0 })
 })
 
 test('a host without workspace_decisions is asked once per connection, then needs-you is rebuilt from the history window', { options: OPTIONS }, async ($, on) => {
@@ -1431,7 +1431,7 @@ test('a host without workspace_decisions is asked once per connection, then need
   await begin($, w)
 
   expect(decisionCalls(w)).toHaveLength(1)
-  expect(counts(w)).toEqual({ unread: 0, forYou: 0, needsYou: 1 })
+  expect(counts(w)).toMatchObject({ unread: 0, forYou: 0, needsYou: 1 })
 
   // later refreshes use the history alone: the tool is not asked about again
   await w.clock.advance(20_000)
