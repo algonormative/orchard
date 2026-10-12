@@ -196,14 +196,14 @@ export async function select(ui: Pressable, w: World, id: string) {
 
 /**
  * Presses what a person would press: the header Buttons for refresh and open-workspace; the detail's
- * own Buttons for reply; the decision's Markdown link for answer; and for every row verb, the toolbar,
+ * own Buttons for reply; the decision's own Button for answer; and for every row verb, the toolbar,
  * after selecting that thread. The toolbar has no Button the thread does not get, so a verb it is not
  * offered rejects, as pressing a missing element does.
  */
 export async function act(ui: Pressable, w: World, verb: Verb, id = '-') {
   if (verb === 'refresh') return ui.press({ key: 'refresh' })
   if (verb === 'open-workspace') return ui.press({ key: 'open-workspace' })
-  if (verb === 'answer') return ui.press({ key: `answer-${id}`, link: { href: actionHref(verb, id) } })
+  if (verb === 'answer') return ui.press({ key: `answer-${id}` })
   if (verb === 'reply') return ui.press({ key: `detail-reply-${id}` })
   if (verb === 'remove-yes' || verb === 'interrupt-yes') return ui.press({ key: 'tb-confirm' })
   if (verb === 'cancel') return ui.press({ key: 'tb-cancel' })

@@ -1987,7 +1987,6 @@ export const register: Register = (on, options) => {
       Box: t.Box,
       Text: t.Text,
       Button: t.Button,
-      Markdown: t.Markdown,
       // The terminal draws no Svg: it gets the same structure as Text.
       Svg: e.surface !== 'terminal' && 'Svg' in t ? t.Svg : undefined,
       // The mobile app draws no field (its table answers a stub): there the settings are text.

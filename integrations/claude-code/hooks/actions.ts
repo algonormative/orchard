@@ -2,9 +2,7 @@
 // toolbar and selection model (which thread is selected, which buttons it gets), and the snooze and
 // hidden records kept in `$.store`. No `$` here; register.tsx performs the actions.
 //
-// The addresses are `https://orchard.action/<verb>/<id>`. Buttons press them through `act`; the one
-// Markdown links (a decision's "answer in Orchard", and each thread row's words: `select`) are listed in
-// `pressableLinks`. Nothing opens them.
+// The addresses are `https://orchard.action/<verb>/<id>`. Buttons press them through `act`. Rows and "answer in Orchard" are plain Buttons whose press goes through `act` too. Nothing opens them.
 import type { OrchardAlert, OrchardPaneThread } from '../types'
 
 export const ACTION_ORIGIN = 'https://orchard.action'
@@ -61,25 +59,6 @@ export function parseActionHref(href: string): Action | undefined {
     return undefined
   }
   return id === '' ? undefined : { verb: verb as Verb, id }
-}
-
-export type ActionLine = {
-  /** Markdown: links separated by a middle dot. */
-  text: string
-  /** Every address in `text`, for `pressableLinks`. */
-  links: string[]
-}
-
-function line(parts: readonly (string | { label: string; href: string })[], separator = ' · '): ActionLine {
-  const links: string[] = []
-  const text = parts
-    .map(part => {
-      if (typeof part === 'string') return part
-      links.push(part.href)
-      return `[${part.label}](${part.href})`
-    })
-    .join(separator)
-  return { text, links }
 }
 
 /** How many of the newest threads show before the rest fold away. */
@@ -155,11 +134,6 @@ export function toolbarItems(state: ToolbarState): ToolbarItem[] {
 /** The question the toolbar asks in place of its buttons; it names the message so it cannot be mistaken. */
 export function confirmQuestion(verb: 'remove' | 'interrupt', sender: string): string {
   return verb === 'remove' ? `Remove ${sender}'s message?` : `Interrupt Claude with ${sender}'s message?`
-}
-
-/** "answer in Orchard ↗" for a decision waiting on the owner. */
-export function answerLink(id: string): ActionLine {
-  return line([{ label: 'answer in Orchard ↗', href: actionHref('answer', id) }])
 }
 
 // ---- snoozed alerts ----
