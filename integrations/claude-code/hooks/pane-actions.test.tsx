@@ -29,7 +29,7 @@ import {
   snoozedLine,
   splitDue,
 } from './actions'
-import { rowSvg } from './svg'
+import { rowLinkText, rowMarkSvg } from './svg'
 import { renderPane } from './pane'
 import { MAX_ITEMS_PER_DELIVERY, addToQueue, byQueueOrder, markNext, storeKey, takeBatch } from './alerts'
 import { ENDPOINT, ME, OPTIONS } from './fake-orchard'
@@ -126,18 +126,27 @@ test('the selection: defaults to the newest unread, else the newest; a stale pic
   expect(neighbourOf([thread('a', false)] as never, 'a')).toBeNull()
 })
 
-test('the selected card carries a citron outline; the others do not', () => {
-  const now = Date.parse('2026-10-10T10:00:00Z')
+test('the selected row\'s mark carries a citron outline and bar; the others do not', () => {
   for (const isUnread of [true, false]) {
     const t = thread('a', isUnread) as never
-    expect(rowSvg(440, t, now)).not.toContain('class="sel"')
-    expect(rowSvg(440, t, now, false)).not.toContain('class="sel"')
-    const picked = rowSvg(440, t, now, true)
+    expect(rowMarkSvg(t)).not.toContain('class="sel"')
+    expect(rowMarkSvg(t, false)).not.toContain('class="sel"')
+    const picked = rowMarkSvg(t, true)
     expect(picked.split('class="sel"').length - 1).toBe(1)
+    expect(picked).toContain('class="bar"')
     // a colour token, not a hex literal, so it follows the light/dark theme
     expect(picked.replace(/<style>[\s\S]*<\/style>/, '')).not.toMatch(/(fill|stroke)="#/)
     expect(picked).toContain('.sel{fill:none;stroke:var(--dot)')
   }
+})
+
+test('a row\'s words are one link: sender, badge, age and preview, with markup in them kept as plain text', () => {
+  const now = Date.parse('2026-10-10T10:00:00Z')
+  const t = { ...thread('a', true), size: 3 } as never as ReturnType<typeof thread> & { last: { senderName: string; snippet: string; sentAt: string }; reason: string }
+  t.last = { ...t.last, senderName: 'Test [peer]', snippet: 'run `rm *` (now) <b>', sentAt: '2026-10-10T09:58:00Z' }
+  t.reason = 'DM'
+  const text = rowLinkText(t as never, now, 'https://orchard.action/select/a', '▶ ')
+  expect(text).toBe('[▶ **Test \\[peer\\]** · DM · 2m · 3 — run \\`rm \\*\\` \\(now\\) \\<b\\>](https://orchard.action/select/a)')
 })
 
 test('handle next puts an alert first and keeps it there; the latest marked leads', () => {
@@ -524,7 +533,13 @@ test('interrupt does not take a message a wake already has in flight', { options
 
 // ---- the toolbar and the selection ----
 
-test('no surface has controls on a row: no overlay, no hover Box, no Markdown line, no Button but the toolbar, folds, header and details', { options: OPTIONS }, async ($, on) => {
+/** The body id of the row drawn selected: the one whose link starts with the "▶ " marker. */
+async function selectedRow(ui: Awaited<ReturnType<typeof openPane>>) {
+  const line = (await ui.findAll({ type: 'Markdown' })).find(m => String(m.key).startsWith('row-') && String(m.props.text).startsWith('[▶ '))
+  return /body of (\w+)/.exec(String(line?.props.text))?.[1]
+}
+
+test('no surface has controls on a row: no overlay, no hover Box, no per-row Button, one link per row, no Button but the toolbar, folds, header and details', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   await begin($, w)
   dm(w, 'd1')
@@ -535,8 +550,13 @@ test('no surface has controls on a row: no overlay, no hover Box, no Markdown li
     const ui = await openPane($, w, surface)
     const boxes = await ui.findAll({ type: 'Box' })
     expect(boxes.filter(b => b.props.display === 'none' || b.props.position !== undefined), surface).toEqual([])
-    // the only Markdown left is a decision's "answer in Orchard"; none carries a row action
-    expect((await ui.findAll({ type: 'Markdown' })).filter(m => String(m.props.text).includes(ACTION_ORIGIN) && !String(m.key).startsWith('answer-')), surface).toEqual([])
+    // the only Markdown: a decision's "answer in Orchard", and each row's words, one link that answers a press by selecting
+    const markdown = await ui.findAll({ type: 'Markdown' })
+    expect(markdown.filter(m => !String(m.key).startsWith('answer-') && !String(m.key).startsWith('row-')), surface).toEqual([])
+    for (const m of markdown.filter(m => String(m.key).startsWith('row-'))) {
+      expect(m.props.pressableLinks, surface).toEqual([`${ACTION_ORIGIN}/select/${String(m.key).slice(4)}`])
+      expect((String(m.props.text).match(/\]\(/g) ?? []).length, surface).toBe(1)
+    }
     const keys = (await ui.findAll({ type: 'Button' })).map(b => String(b.key))
     expect(keys.filter(k => k.startsWith('btn-') || k.startsWith('actions-')), surface).toEqual([])
     // every Button is a standard one
@@ -555,15 +575,18 @@ test('selection: the newest unread is selected at first and drawn so on every su
   dm(w, 'd3')
   await w.clock.settle()
 
-  // which card is drawn selected: a "▶ " row on the terminal, an outlined, "selected" card elsewhere
+  // which row is drawn selected: a "▶ " in its link on every surface, and where there is a drawing, an outlined, "selected" mark
   const marked = async (ui: Awaited<ReturnType<typeof openPane>>, surface: string) => {
-    if (surface === 'terminal') return (await ui.findAll({ type: 'Text' })).filter(t => String(t.text).startsWith('▶ ')).length
-    const cards = (await ui.findAll({ type: 'Svg' })).filter(v => /^Other Claude/.test(String(v.props.alt)))
-    const outlined = cards.map(v => String(v.props.source).includes('class="sel"'))
-    expect(outlined, surface).toEqual(cards.map(v => String(v.props.alt).includes(', selected')))
-    return outlined.filter(Boolean).length
+    const lines = (await ui.findAll({ type: 'Markdown' })).filter(m => String(m.key).startsWith('row-') && String(m.props.text).startsWith('[▶ '))
+    if (surface !== 'terminal') {
+      const marks = (await ui.findAll({ type: 'Svg' })).filter(v => /^Other Claude/.test(String(v.props.alt)))
+      const outlined = marks.map(v => String(v.props.source).includes('class="sel"'))
+      expect(outlined, surface).toEqual(marks.map(v => String(v.props.alt).includes(', selected')))
+      expect(outlined.filter(Boolean).length, surface).toBe(lines.length)
+    }
+    return lines.length
   }
-  const selectedKey = async (ui: Awaited<ReturnType<typeof openPane>>) => /body of (\w+)/.exec(String((await ui.findAll({ type: 'Svg' })).find(v => String(v.props.alt).includes(', selected'))?.props.alt))?.[1]
+  const selectedKey = selectedRow
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await openPane($, w, surface)
@@ -605,7 +628,7 @@ test('selection with a delivered newest thread defaults to the newest unread; th
   dm(w, 'd2', { sent_at: '2026-10-10T09:30:00Z' })
   await w.clock.settle()
   const ui = await openPane($, w, 'desktop')
-  const selectedKey = async () => /body of (\w+)/.exec(String((await ui.findAll({ type: 'Svg' })).find(v => String(v.props.alt).includes(', selected'))?.props.alt))?.[1]
+  const selectedKey = () => selectedRow(ui)
   expect(await selectedKey()).toBe('d2')
   await select(ui, w, 'd1')
   expect(await selectedKey()).toBe('d1')
@@ -699,12 +722,12 @@ test('the header says whose inbox it is', { options: OPTIONS }, async ($, on) =>
   await begin($, w)
   const terminal = await openPane($, w, 'terminal')
   const texts = (await terminal.findAll({ type: 'Text' })).map(t => t.text)
-  expect(texts).toContain("◆ Claude's inbox · Fruit Stand")
-  expect(texts).toContain(` · as ${ME}`)
+  expect(texts).toContain("◆ Claude's view of Orchard")
+  expect(texts).toContain(`this session · as ${ME} · Fruit Stand`)
   await terminal.unmount()
   const desktop = await openPane($, w, 'desktop')
   const header = (await desktop.findAll({ type: 'Svg' }))[0]
-  expect(String(header?.props.source)).toContain("Claude&#39;s inbox · Fruit Stand")
-  expect(String(header?.props.source)).toContain(`as ${ME}`)
+  expect(String(header?.props.source)).toContain("Claude&#39;s view of Orchard")
+  expect(String(header?.props.source)).toContain(`this session · as ${ME} · Fruit Stand`)
 })
 

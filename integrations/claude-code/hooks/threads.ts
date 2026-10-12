@@ -1,6 +1,6 @@
 // What the pane lists, from one window of history: the threads this participant is in, the
 // decisions it raised that wait on the owner, and where each opens in the browser UI. No `$`.
-import type { OrchardPaneReason, OrchardPaneThread } from '../types'
+import type { OrchardAlert, OrchardPaneReason, OrchardPaneThread } from '../types'
 import { plain } from './config'
 import type { HistoryMessage } from './history'
 import { parentsOf, rootOf } from './history'
@@ -117,4 +117,63 @@ export function buildThreads(messages: readonly HistoryMessage[], ctx: ThreadCon
 export function whenOf(sentAt: string): string {
   const match = /^(\d{4}-\d\d-\d\d)T(\d\d:\d\d)/.exec(sentAt)
   return match === null ? plain(sentAt, 20) : `${match[1]} ${match[2]}`
+}
+
+// ---- live: threads from the alerts the listener already fetched ----
+
+/** The channel Orchard posts task intents and outcomes to; its messages are receipts, not mail. */
+export const RECEIPTS_CHANNEL = 'task-receipts'
+
+/** A task receipt (`task_intent`, `task_result`, `task_unknown`) in the receipts channel. */
+export const isReceipt = (alert: OrchardAlert): boolean => alert.channelId === RECEIPTS_CHANNEL || /^task_/.test(alert.kind)
+
+/** A message that may change what waits on the owner: a decision, or an owner's reply inside a thread. */
+export const isDecisionRelated = (alert: OrchardAlert, ownerId: string | null): boolean =>
+  alert.kind === 'decision' || (ownerId !== null && alert.senderId === ownerId && alert.threadId !== null)
+
+export type LiveContext = {
+  me: string
+  ownerId: string | null
+  endpoint: string
+  /** Ids of the alerts that went into the queue (waiting to be delivered): those threads are unread. */
+  queued: ReadonlySet<string>
+}
+
+/**
+ * The threads with a page of alerts folded in, newest first, without asking the workspace for history.
+ * A reply to a thread's newest message extends that thread (its reply target moves to the new message);
+ * anything else starts a thread of one. Receipts, this participant's own messages and ids already listed
+ * are skipped, so a page seen twice changes nothing. A later load reads the real history and settles
+ * what the alert did not say (threads whose parents it never saw).
+ */
+export function mergeAlerts(threads: readonly OrchardPaneThread[], alerts: readonly OrchardAlert[], ctx: LiveContext): OrchardPaneThread[] {
+  let list = [...threads]
+  const known = new Set(list.flatMap(t => [t.replyToId, t.last.id]))
+  for (const alert of [...alerts].sort((a, b) => a.sequence - b.sequence)) {
+    if (isReceipt(alert) || alert.senderId === ctx.me || known.has(alert.id)) continue
+    // A channel post nobody queued is not mail for this participant (the pane never listed those).
+    if (alert.channelId !== null && !ctx.queued.has(alert.id)) continue
+    known.add(alert.id)
+    const parent = alert.threadId === null ? undefined : list.find(t => t.replyToId === alert.threadId || t.last.id === alert.threadId)
+    const isOwner = ctx.ownerId !== null && alert.senderId === ctx.ownerId
+    const size = (parent?.size ?? 0) + 1
+    const destination = alert.channelId !== null || alert.where.startsWith('channel') ? 'channel' : alert.where
+    const thread: OrchardPaneThread = {
+      replyToId: alert.id,
+      last: {
+        id: alert.id,
+        senderName: plain(alert.senderName ?? 'someone', 60),
+        isOwner,
+        isMine: false,
+        snippet: snippetOf(alert.body),
+        sentAt: alert.sentAt,
+      },
+      size,
+      href: messageHref(ctx.endpoint, alert.id),
+      reason: reasonOf(destination, isOwner, size, alert.reasons),
+      isUnread: ctx.queued.has(alert.id),
+    }
+    list = [thread, ...list.filter(t => t !== parent)]
+  }
+  return list.slice(0, MAX_THREADS)
 }

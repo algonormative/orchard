@@ -43,7 +43,9 @@ async function openPane($: Engine, w: World) {
 async function drawnText(ui: Awaited<ReturnType<typeof mountPane>>) {
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   const svgs = (await ui.findAll({ type: 'Svg' })).flatMap(v => [String(v.props.source), String(v.props.alt)])
-  return [...texts, ...svgs]
+  // a thread row's words are a Markdown link: its text is what a person reads
+  const links = (await ui.findAll({ type: 'Markdown' })).map(m => String(m.props.text))
+  return [...texts, ...links, ...svgs]
 }
 
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
@@ -191,12 +193,12 @@ test('Refresh reads the workspace again', { options: OPTIONS }, async ($, on) =>
   await begin($, w)
   await openPane($, w)
   const ui = await mountPane($, 'terminal')
-  expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n').includes('A brand new question')).toBe(false)
+  expect((await drawnText(ui)).join('\n').includes('A brand new question')).toBe(false)
 
   w.fake.push({ id: 'm9', sender_id: 'claude-other', body: 'A brand new question', destination: { kind: 'direct', id: ME }, recipient_ids: [ME] })
   await act(ui, w, 'refresh')
   await w.clock.settle()
-  expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).toContain('A brand new question')
+  expect((await drawnText(ui)).join('\n')).toContain('A brand new question')
 })
 
 test('an unreachable workspace shows in the pane instead of an empty inbox', { options: OPTIONS }, async ($, on) => {
@@ -290,7 +292,7 @@ test('a changed level applies at once: do-not-disturb stops the wake of a messag
   expect(w.state.latest.counts).toMatchObject({ unread: 1, forYou: 0 })
   await w.clock.advance(5 * 60_000)
   expect(w.submits).toEqual([])
-  expect(await bandText($)).toBe('◆ orchard · 1 new')
+  expect(await bandText($)).toBe('◆ claude-fruit-stand in Fruit Stand · 1 new')
 })
 
 test('a changed level takes out of the pending queue what it would no longer let in', { options: OPTIONS }, async ($, on) => {
@@ -396,8 +398,10 @@ test('the pane draws a header, an inbox and a footer: as Svg where a surface has
       expect(svgs).toEqual([])
       const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
       expect(texts).toContain('● waiting for you')
-      expect(texts.some(t => t.startsWith("◆ Claude's inbox · Fruit Stand"))).toBe(true)
-      expect(texts.some(t => /Nick \[OWNER\]/.test(t))).toBe(true)
+      expect(texts.some(t => t.startsWith("◆ Claude's view of Orchard"))).toBe(true)
+      expect(texts).toContain(`this session · as ${ME} · Fruit Stand`)
+      const links = (await ui.findAll({ type: 'Markdown' })).map(m => String(m.props.text))
+      expect(links.some(t => /\*\*Nick\*\* · OWNER/.test(t))).toBe(true)
       expect(texts.some(t => t.includes('tending the grove'))).toBe(true)
     } else {
       expect(svgs.length, surface).toBeGreaterThan(4)

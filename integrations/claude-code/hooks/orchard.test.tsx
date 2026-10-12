@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
+import { bandLine } from './band'
 import { BIN, CREDENTIAL, CWD, ENDPOINT, ME, OPTIONS } from './fake-orchard'
 import type { Call } from './fake-orchard'
 import { bandText, begin, connectionCalls, expectNoSecrets, resumes, visible, world } from './test-world'
@@ -59,19 +60,18 @@ test('resume succeeds: connected and quiet draws no band; with news it names the
 
   // Connected, nothing pending, nothing waiting on the owner: the band draws nothing.
   for (const surface of ['terminal', 'desktop'] as const) {
-    expect(await bandText($, surface)).toBe('◆ orchard · Fruit Stand · ● listening')
+    expect(await bandText($, surface)).toBe('◆ claude-fruit-stand in Fruit Stand · ● listening')
   }
   expect(w.state.latest.workspace).toEqual({ name: WORKSPACE, ownerId: 'owner' })
   expect(w.state.latest.status).toEqual(CONNECTED)
 
   // Any count above zero brings it back, with the workspace name and no ids, request ids or paths.
-  w.state.override.counts = { unread: 1, forYou: 0, needsYou: 0 }
+  w.state.override.band = bandLine({ kind: 'connected' }, { name: WORKSPACE, ownerId: 'owner' }, { unread: 1, forYou: 0, needsYou: 0 }, ME)
   for (const surface of ['terminal', 'desktop'] as const) {
-    expect(await bandText($, surface)).toBe('◆ orchard · 1 new')
+    expect(await bandText($, surface)).toBe('◆ claude-fruit-stand in Fruit Stand · 1 new')
   }
   const text = (await bandText($)) ?? ''
   expect(text.includes('/')).toBe(false)
-  expect(text.includes('claude-fruit-stand')).toBe(false)
   expect(text.includes('ws_')).toBe(false)
 
   expectNoSecrets(await visible($, w))
@@ -82,9 +82,9 @@ test('connected and quiet, an offline or error session still shows its band', { 
   const w = world(on)
   w.fake.script = () => ({ exitCode: 3 })
   await begin($, w)
-  expect(await bandText($)).toBe('◆ orchard · ○ offline')
+  expect(await bandText($)).toBe('◆ claude-fruit-stand · ○ offline')
   w.state.override.counts = { unread: 0, forYou: 0, needsYou: 2 }
-  expect(await bandText($)).toBe('◆ orchard · ○ offline')
+  expect(await bandText($)).toBe('◆ claude-fruit-stand · ○ offline')
 })
 
 test('a band yields to a survey', { options: OPTIONS }, async ($, on) => {
@@ -117,7 +117,7 @@ test('a join that ended in exit 3 is retried with the same request id', { option
     return joins === 1 ? 'reject' : undefined
   }
   await begin($, w)
-  expect(await bandText($)).toBe('◆ orchard · ○ offline')
+  expect(await bandText($)).toBe('◆ claude-fruit-stand · ○ offline')
 
   await w.clock.advance(5_000)
 
@@ -133,14 +133,14 @@ test('exit 3 shows offline and retries 5 s, 10 s, 20 s ... capped at 5 min', { o
   w.fake.script = () => (isDown ? { exitCode: 3, stderr: 'Orchard agent: connection refused\n' } : undefined)
 
   await begin($, w)
-  expect(await bandText($)).toBe('◆ orchard · ○ offline')
+  expect(await bandText($)).toBe('◆ claude-fruit-stand · ○ offline')
   expect(w.state.latest.status).toEqual({ kind: 'offline', failures: 1 })
 
   await w.clock.advance(16 * 60_000)
 
   const seconds = resumes(w).map(c => c.at / 1000)
   expect(seconds).toEqual([0, 5, 15, 35, 75, 155, 315, 615, 915])
-  expect(await bandText($)).toBe('◆ orchard · ○ offline')
+  expect(await bandText($)).toBe('◆ claude-fruit-stand · ○ offline')
 
   // Back up: the next retry connects, shows the workspace and stops retrying.
   isDown = false
@@ -158,7 +158,7 @@ test('a rejected run (timeout) counts as exit 3', { options: OPTIONS }, async ($
   w.fake.script = (_call, n) => (n === 1 ? 'reject' : undefined)
 
   await begin($, w)
-  expect(await bandText($)).toBe('◆ orchard · ○ offline')
+  expect(await bandText($)).toBe('◆ claude-fruit-stand · ○ offline')
 
   await w.clock.advance(5_000)
   expect(resumes(w).map(c => c.at)).toEqual([0, 5_000])
@@ -199,7 +199,7 @@ test('exit 4 shows a sanitized error in the band and stops', { options: OPTIONS 
   await begin($, w)
 
   const text = (await bandText($)) ?? ''
-  expect(text.startsWith('◆ orchard · error: ')).toBe(true)
+  expect(text.startsWith('◆ claude-fruit-stand · error: ')).toBe(true)
   expect(text).toContain('mail repository is corrupt')
   expect(text.includes('/')).toBe(false)
   expect(text.includes('Users')).toBe(false)
@@ -223,7 +223,7 @@ test('exit 2 that echoes the credential path never shows it', { options: OPTIONS
   await begin($, w)
 
   const text = (await bandText($)) ?? ''
-  expect(text.startsWith('◆ orchard · error: ')).toBe(true)
+  expect(text.startsWith('◆ claude-fruit-stand · error: ')).toBe(true)
   expectNoSecrets(await visible($, w))
   await w.clock.advance(30 * 60_000)
   expect(w.fake.calls.length).toBe(1)
@@ -324,9 +324,9 @@ test('the band shows new counts from state', { options: OPTIONS }, async ($, on)
   const w = world(on)
   await begin($, w)
 
-  w.state.override.counts = { unread: 2, forYou: 1, needsYou: 1 }
-  expect(await bandText($)).toBe('◆ orchard · 2 new · 1 for you · needs you 1')
+  w.state.override.band = bandLine({ kind: 'connected' }, { name: WORKSPACE, ownerId: 'owner' }, { unread: 2, forYou: 1, needsYou: 1 }, ME)
+  expect(await bandText($)).toBe('◆ claude-fruit-stand in Fruit Stand · 2 new · 1 for you · needs you 1')
 
-  w.state.override.counts = { unread: 0, forYou: 0, needsYou: 0 }
-  expect(await bandText($)).toBe('◆ orchard · Fruit Stand · ● listening')
+  w.state.override.band = bandLine({ kind: 'connected' }, { name: WORKSPACE, ownerId: 'owner' }, { unread: 0, forYou: 0, needsYou: 0 }, ME)
+  expect(await bandText($)).toBe('◆ claude-fruit-stand in Fruit Stand · ● listening')
 })
