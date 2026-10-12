@@ -33,8 +33,9 @@
 //   CLAIMING -> SHARING      no slot was free, or entering it failed: it acts as the session's participant
 //   HELD -> SHARING          its lease was lost to another session
 //   SHARING -> CLAIMING      a call after SHARE_RETRY_MS, never sooner
-//   any -> forgotten         it ended in the agents table, or the table never knew it and it was quiet for
-//                            UNTRACKED_IDLE_MS
+//   any -> forgotten         it ended in the agents table (but not while its last Orchard call is newer than the
+//                            row's end: it ran again and nothing has listed it since), or the table never knew it
+//                            and it was quiet for UNTRACKED_IDLE_MS
 import type { OrchardAgent, OrchardAgents } from '../types'
 import { MAX_NAME, plain } from './config'
 import { isEnded } from './feed'
@@ -168,13 +169,18 @@ export function shown(base: string, entry: AgentHandle): { handle: string; obser
 /**
  * Which agents of the book to let go: those the table says have ended (completed, failed, killed, or
  * `lost` once they left `$.agent.list()`), and those the table does not know at all once they have been
- * quiet for UNTRACKED_IDLE_MS (nothing will ever say such an agent ended).
+ * quiet for UNTRACKED_IDLE_MS (nothing will ever say such an agent ended). A row that ended before the
+ * agent's last Orchard call is no news: a message resumed the agent and the table has not been listed
+ * since, so it is treated like an agent the table does not know.
  */
 export function finished(book: HandleBook, table: OrchardAgents, now: number): string[] {
   return [...book.agents.entries()]
     .filter(([id, entry]) => {
       const listed: OrchardAgent | undefined = table[id]
-      return listed === undefined ? Math.abs(now - entry.lastCallAt) >= UNTRACKED_IDLE_MS : isEnded(listed.status)
+      const isQuiet = Math.abs(now - entry.lastCallAt) >= UNTRACKED_IDLE_MS
+      if (listed === undefined) return isQuiet
+      if (!isEnded(listed.status)) return false
+      return listed.endedAt !== undefined && entry.lastCallAt > listed.endedAt ? isQuiet : true
     })
     .map(([id]) => id)
 }

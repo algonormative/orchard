@@ -6,10 +6,11 @@ import type { Engine } from 'claude-code/testing'
 
 import { ENDPOINT, ME, OPTIONS } from './fake-orchard'
 import type { Call } from './fake-orchard'
-import { POOL_SUFFIX, RELEASED_LINGER_MS, SHARE_RETRY_MS, createBook, finished, joinedAs, lingering, markReleased, observe, ownHandles, shown, stanceOf, subHandle, subName, touch } from './handles'
+import { POOL_SUFFIX, RELEASED_LINGER_MS, SHARE_RETRY_MS, UNTRACKED_IDLE_MS, createBook, finished, joinedAs, lingering, markReleased, observe, ownHandles, shown, stanceOf, subHandle, subName, touch } from './handles'
 import { LEASE_BEAT_MS, LEASE_STALE_MS, MAX_RECORDS, leaseKey, planEviction } from './lease'
 import { begin, callTool, resumes, world } from './test-world'
 import type { World } from './test-world'
+import { RETRY_ADVICE } from './tools'
 import type { OrchardActivityEntry, OrchardAgents, OrchardPlugins, OrchardWorkspaceActivity } from '../types'
 
 const SUB = (n: number) => `${ME}.sub${n}`
@@ -53,6 +54,45 @@ async function start($: Engine, on: Parameters<typeof world>[0]) {
   const w = world(on)
   await begin($, w)
   return w
+}
+
+const tick = async (n = 20) => {
+  for (let i = 0; i < n; i += 1) await Promise.resolve()
+}
+/** Waits (a bounded number of turns) until `isTrue`, for something held up inside the engine to be reached. */
+async function until(w: World, isTrue: () => boolean) {
+  for (let i = 0; i < 200 && !isTrue(); i += 1) {
+    await tick(50)
+    await w.clock.settle()
+  }
+  expect(isTrue()).toBe(true)
+}
+
+/** Holds the resume of slot `n`'s handle, which is the entering of it, until `open`. Holds for other slots set earlier stay. */
+function holdResume(w: World, n: number) {
+  const hold = { isReached: false, open: () => {} }
+  const gate = new Promise<void>(resolve => (hold.open = resolve))
+  const earlier = w.fake.script
+  w.fake.script = async (call, at) => {
+    if (call.cmd !== 'resume' || idOf(call) !== SUB(n)) return earlier?.(call, at)
+    hold.isReached = true
+    await gate
+    return undefined
+  }
+  return hold
+}
+
+/** Holds the next read of `key` in the store, after it has seen the value, until `open`. */
+function holdRead(w: World, key: string) {
+  const hold = { isReached: false, open: () => {} }
+  const gate = new Promise<void>(resolve => (hold.open = resolve))
+  w.store.before.get = read => {
+    if (read !== key) return undefined
+    w.store.before.get = undefined
+    hold.isReached = true
+    return gate
+  }
+  return hold
 }
 
 // ---- the pure parts ----
@@ -108,6 +148,22 @@ test('what the book says an agent acts as, which handles are the session\'s, and
   // ended in the table: finished at once; unknown to it: only once quiet for a minute; running or idle: not
   expect(finished(book, table, 59_000).sort()).toEqual(['a2'])
   expect(finished(book, table, 60_000).sort()).toEqual(['a2', 'a3'])
+})
+
+test('an agent whose row says ended but whose last Orchard call is newer is let go only once it has been quiet for a minute', () => {
+  const book = createBook()
+  touch(book, 'a1', 10_000)
+  const row = (endedAt: number | undefined): OrchardAgents => ({
+    a1: { agentId: 'a1', description: '', type: 'Explore', status: 'completed', startedAt: 0, ...(endedAt === undefined ? {} : { endedAt }) },
+  })
+  // it ended after its last call (or at the same moment, or the row has no time): let go at once
+  expect(finished(book, row(12_000), 12_000)).toEqual(['a1'])
+  expect(finished(book, row(10_000), 10_000)).toEqual(['a1'])
+  expect(finished(book, row(undefined), 10_000)).toEqual(['a1'])
+  // the row is older than its last call: it ran again after it ended, and nothing has listed it since
+  expect(finished(book, row(5_000), 11_000)).toEqual([])
+  expect(finished(book, row(5_000), 10_000 + UNTRACKED_IDLE_MS - 1)).toEqual([])
+  expect(finished(book, row(5_000), 10_000 + UNTRACKED_IDLE_MS)).toEqual(['a1'])
 })
 
 test('an agent sharing the session\'s participant waits one minute, a clock that moved back does not make it wait longer, and given-back handles linger two', () => {
@@ -168,7 +224,7 @@ test('a subagent\'s first Orchard call registers <base>.sub1 and the call acts a
   await callTool($, 'orchard_call', { name: 'task_claim', arguments: { store_id: 'store1', task_id: 't1' }, agentId })
   expect(w.fake.tasks[0]).toMatchObject({ assignee: SUB(1), status: 'in_progress' })
   const forged = await callTool($, 'orchard_call', { name: 'mail_send', arguments: { sender_id: ME, destination: { kind: 'broadcast' }, body: 'as the session' }, agentId })
-  expect(String(forged.deny)).toContain("sender_id must be this session's own participant")
+  expect(String(forged.deny)).toContain("sender_id must be this agent's own participant")
   await callTool($, 'orchard_call', { name: 'mail_send', arguments: { sender_id: SUB(1), destination: { kind: 'broadcast' }, body: 'as myself' }, agentId })
   expect(w.fake.sent[2]).toMatchObject({ sender_id: SUB(1), body: 'as myself' })
   // a reply to the handle's own message goes where that message went
@@ -229,7 +285,7 @@ test('two agents get two handles, whether their first calls come one after the o
   expect(joinedIds(w).sort()).toEqual([SUB(1), SUB(2), SUB(3), SUB(4)])
 })
 
-// ---- the lease: two sessions never share a slot ----
+// ---- the lease: a slot another session holds is passed over, and a clash is found at the next beat ----
 
 test('a slot another session leases is skipped; a stale lease, and this session\'s own, are taken', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
@@ -407,10 +463,180 @@ test('/orchard reconnect starts the pool over: the handles go back and are taken
   await say($, a)
   await $.command.run(RUN('reconnect'))
   await w.clock.settle()
-  expect(leaseOf(w, 1)?.session === mySession(w) && w.fake.calls.length > 0).toBe(false)
+  expect(leases(w)).toEqual([])
   await say($, a, 'again')
   expect(senders(w)).toEqual([SUB(1), SUB(1)])
   expect(joinedIds(w)).toEqual([SUB(1)])
+})
+
+// ---- the session changes while a handle is being taken, or while a lease is being renewed ----
+
+test('Disconnect while a handle is being entered: the call is refused as disconnected, nothing is sent as the session, and the handle goes back', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  const hold = holdResume(w, 1)
+  const agentId = await spawn($)
+
+  const pending = say($, agentId, 'after disconnect')
+  await until(w, () => hold.isReached)
+  await $.command.run(RUN('disconnect'))
+  hold.open()
+  const answer = await pending
+  await w.clock.settle()
+
+  expect(String(answer.deny)).toContain('disconnected')
+  expect(w.fake.sent).toEqual([])
+  expect(leases(w)).toEqual([])
+})
+
+// What the claim that started before the session started over must not leave behind, whichever way the session started over.
+const STARTS_OVER: { how: string; run: ($: Engine, w: World) => Promise<void> }[] = [
+  {
+    how: '/orchard reconnect',
+    run: async ($, w) => {
+      await $.command.run(RUN('reconnect'))
+      await w.clock.settle()
+    },
+  },
+  {
+    how: 'Disconnect and Connect',
+    run: async ($, w) => {
+      await $.command.run(RUN('disconnect'))
+      await $.command.run(RUN('connect'))
+      await w.clock.settle()
+    },
+  },
+]
+
+for (const { how, run } of STARTS_OVER) {
+  test(`${how} while a handle is being entered: the call that waited for it claims again, and the old claim hands its slot back`, { options: OPTIONS }, async ($, on) => {
+    const w = await start($, on)
+    const hold = holdResume(w, 1)
+    const agentId = await spawn($)
+
+    const pending = say($, agentId, 'across it')
+    await until(w, () => hold.isReached)
+    await run($, w)
+    hold.open()
+    const answer = await pending
+    await w.clock.settle()
+
+    // it acts as a handle of its own, not as the session, and holds the one lease
+    expect(String(answer.result)).toContain('Sent')
+    expect(senders(w)).toEqual([SUB(1)])
+    expect(leases(w)).toEqual([leaseKey(ENDPOINT, SUB(1))])
+    expect(table(w)[agentId]).toMatchObject({ handle: SUB(1) })
+  })
+
+  test(`${how} while a handle is being entered, then another call of the agent: it does not join the old claim, and the old claim does not take the slot it was handed`, { options: OPTIONS }, async ($, on) => {
+    const w = await start($, on)
+    const hold = holdResume(w, 1)
+    const agentId = await spawn($)
+
+    const first = say($, agentId, 'first')
+    await until(w, () => hold.isReached)
+    await run($, w)
+    const second = say($, agentId, 'second')
+    await tick(200)
+    hold.open()
+    const answers = await Promise.all([first, second])
+    await w.clock.settle()
+
+    // both went as one handle of this session (the old claim still had slot 1, so the new one took slot 2) and only that one is leased
+    expect(answers.map(a => String(a.result).startsWith('Sent'))).toEqual([true, true])
+    const used = [...new Set(senders(w))]
+    expect(used).toHaveLength(1)
+    expect(POOL_SUFFIX.test(String(used[0]))).toBe(true)
+    expect(leases(w)).toEqual([leaseKey(ENDPOINT, String(used[0]))])
+    expect(table(w)[agentId]).toMatchObject({ handle: used[0] })
+  })
+}
+
+test('a claim that began before the pool started over does not end the single flight of the claim that took its place', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  const [oldHold, newHold] = [holdResume(w, 1), holdResume(w, 2)]
+  const agentId = await spawn($)
+
+  const first = say($, agentId, 'first')
+  await until(w, () => oldHold.isReached)
+  await $.command.run(RUN('reconnect'))
+  await w.clock.settle()
+  const second = say($, agentId, 'second')
+  await until(w, () => newHold.isReached)
+  // the old claim ends while the new one is still entering slot 2: a call now waits for the new one, it does not start a third
+  oldHold.open()
+  await w.clock.settle()
+  const third = say($, agentId, 'third')
+  await w.clock.settle()
+  newHold.open()
+  await Promise.all([first, second, third])
+  await w.clock.settle()
+
+  expect(new Set(senders(w))).toEqual(new Set([SUB(2)]))
+  expect(senders(w)).toHaveLength(3)
+  expect(leases(w)).toEqual([leaseKey(ENDPOINT, SUB(2))])
+  expect(joinedIds(w).filter(id => id === SUB(3))).toEqual([])
+})
+
+test('a beat that is reading the lease when the session ends does not write it back', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  const agentId = await spawn($)
+  await say($, agentId, 'one')
+  expect(leaseOf(w, 1)).toBeDefined()
+
+  const read = holdRead(w, leaseKey(ENDPOINT, SUB(1)))
+  const beat = w.clock.advance(LEASE_BEAT_MS + 500)
+  await until(w, () => read.isReached)
+  await $.session.end(END('prompt_input_exit'))
+  expect(leases(w)).toEqual([])
+  read.open()
+  await beat
+  await w.clock.settle()
+
+  expect(leases(w)).toEqual([])
+})
+
+test('a beat that is reading the lease when its agent ends does not write it back', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  const agentId = await spawn($)
+  await say($, agentId, 'one')
+
+  const read = holdRead(w, leaseKey(ENDPOINT, SUB(1)))
+  const beat = w.clock.advance(LEASE_BEAT_MS + 500)
+  await until(w, () => read.isReached)
+  const listed = w.agents.list.find(x => x.id === agentId)
+  if (listed !== undefined) listed.status = 'completed'
+  await turnEnds($, agentId)
+  await until(w, () => leaseOf(w, 1) === undefined)
+  read.open()
+  await beat
+  await w.clock.settle()
+
+  expect(leases(w)).toEqual([])
+})
+
+test('an agent whose row says ended but that runs again keeps its handle: the call asks the engine, and a beat does not give it back', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  const a = await spawn($, 'A')
+  await say($, a, 'one')
+  const listed = w.agents.list.find(x => x.id === a)
+  if (listed !== undefined) listed.status = 'completed'
+  await turnEnds($, a)
+  await w.clock.settle()
+  expect(leaseOf(w, 1)).toBeUndefined()
+  expect(table(w)[a]).toMatchObject({ status: 'completed' })
+
+  // a message resumes it: the engine lists it running again, but nothing has asked the list yet
+  await w.clock.advance(5_000)
+  if (listed !== undefined) listed.status = 'running'
+  await say($, a, 'two')
+  expect(table(w)[a]).toMatchObject({ status: 'running', handle: SUB(1) })
+
+  await w.clock.advance(LEASE_BEAT_MS + 1_000)
+  expect(leaseOf(w, 1)?.session).toBe(mySession(w))
+  await say($, a, 'three')
+  expect(senders(w)).toEqual([SUB(1), SUB(1), SUB(1)])
+  // one resume for each of the two times it took the handle, none for the third call
+  expect(resumedIds(w).filter(id => id === SUB(1))).toHaveLength(2)
 })
 
 // ---- the pool is full, or the handle cannot be set up: the call still works ----
@@ -493,6 +719,8 @@ test('a workspace that cannot be reached for the resume, and a store that keeps 
   expect(senders(w)).toEqual([ME, ME])
   expect(joinedIds(w)).toEqual([])
   expect(table(w)[b]).toMatchObject({ handle: ME, sharesBase: true })
+  // a store that keeps nothing is a handle that could not be set up, not a full pool
+  expect(feed(w).find(e => e.kind === 'handle' && e.agentId === b)?.text).toBe("Shares this session's Orchard identity: its own handle could not be set up")
 })
 
 // ---- a subagent that joins Orchard by itself ----
@@ -588,4 +816,81 @@ test('a pooled handle is the session\'s: the tasks it claimed are listed, its me
   channelPost('c4', SUB(1))
   await w.clock.settle()
   expect(around(w).recentFromOthers).toBe(2)
+})
+
+const channelPost = (w: World, id: string, sender: string) =>
+  w.fake.push({ id, sender_id: sender, body: 'hello', destination: { kind: 'channel', id: 'general' }, recipient_ids: [] }, { reasons: ['channel'], channel: { id: 'general', name: 'general' } })
+
+test('a handle given back by a reconnect is still the session\'s for a while: a late message from it is not counted as another\'s', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  const agentId = await spawn($, 'Builder')
+  await say($, agentId, 'one')
+  await $.command.run(RUN('reconnect'))
+  await w.clock.settle()
+  expect(leases(w)).toEqual([])
+
+  channelPost(w, 'c1', SUB(1))
+  channelPost(w, 'c2', 'claude-other')
+  await w.clock.settle()
+  expect(around(w).recentFromOthers).toBe(1)
+})
+
+// ---- decisions a subagent's handle raised ----
+
+for (const hasTool of [true, false]) {
+  test(`a decision a subagent's handle raised is the session's: listed in the pane and counted in needs-you, from ${hasTool ? "the host's own list" : 'the history window'}`, { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    w.fake.hasDecisionsTool = hasTool
+    await begin($, w)
+    const a = await spawn($, 'Asker')
+    await say($, a, 'one')
+    const decision = (id: string, sender: string) =>
+      w.fake.push({ id, sender_id: sender, kind: 'decision', body: `${id}?`, destination: { kind: 'direct', id: 'owner' }, recipient_ids: ['owner'] })
+    decision('dBase', ME)
+    decision('dSub', SUB(1))
+    decision('dElse', 'claude-other')
+    decision('dOtherSub', 'claude-other.sub1')
+
+    // the pane lists the session's and its subagent's, not another session's, and the count agrees
+    await $.command.run(RUN(''))
+    await w.clock.settle()
+    expect(held(w).decisions.map(d => d.id).sort()).toEqual(['dBase', 'dSub'])
+    expect(w.state.latest.counts).toMatchObject({ needsYou: 2 })
+
+    // the owner answers the session's own: the count the listener keeps falls to the subagent's one
+    // (the listener waits out the rest of a minute after a poll that came back early)
+    await w.clock.advance(61_000)
+    w.fake.push({ id: 'ans', sender_id: 'owner', thread_id: 'dBase', body: 'yes', destination: { kind: 'direct', id: ME }, recipient_ids: [ME] }, { reasons: ['direct'] })
+    await w.clock.settle()
+    expect(w.state.latest.counts).toMatchObject({ needsYou: 1 })
+    await $.command.run(RUN(''))
+    await w.clock.settle()
+    expect(held(w).decisions.map(d => d.id)).toEqual(['dSub'])
+  })
+}
+
+// ---- two agents, one session ----
+
+test('two agents sending the same words after a lost connection are two requests: each keeps its own request id for the retry', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  const [a, b] = [await spawn($, 'A'), await spawn($, 'B')]
+  await say($, a, 'warm up')
+  await say($, b, 'warm up')
+  const warm = w.fake.calls.filter(c => c.tool === 'mail_send').length
+  let isDown = true
+  w.fake.script = call => (call.tool === 'mail_send' && isDown ? 'reject' : undefined)
+
+  expect((await say($, a, 'same words')).deny).toBe(RETRY_ADVICE)
+  expect((await say($, b, 'same words')).deny).toBe(RETRY_ADVICE)
+  isDown = false
+  await say($, a, 'same words')
+  await say($, b, 'same words')
+
+  const ids = w.fake.calls.filter(c => c.tool === 'mail_send').slice(warm).map(c => (JSON.parse(c.stdin ?? '{}') as { request_id?: string }).request_id)
+  const [aFirst, bFirst, aRetry, bRetry] = ids
+  expect(ids).toHaveLength(4)
+  expect(aFirst).not.toBe(bFirst)
+  expect(aRetry).toBe(aFirst)
+  expect(bRetry).toBe(bFirst)
+  expect(w.fake.sent.slice(-2).map(m => m.sender_id)).toEqual([SUB(1), SUB(2)])
 })

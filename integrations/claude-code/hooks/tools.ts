@@ -307,7 +307,7 @@ export function pinActor(tool: string, args: Record<string, unknown>, me: string
     const nested = record(args.arguments)
     if (nested.participant_id !== undefined && nested.participant_id !== me) {
       return fail(
-        `participant_id must be this session's own participant: ${PINNED_PLUGIN_WRITE} acts as it, and it cannot act as another participant. ` +
+        `participant_id must be this agent's own participant: ${PINNED_PLUGIN_WRITE} acts as it, and it cannot act as another participant. ` +
           'Leave participant_id out and it is filled in',
       )
     }
@@ -317,7 +317,7 @@ export function pinActor(tool: string, args: Record<string, unknown>, me: string
   for (const field of ['sender_id', 'participant_id'] as const) {
     if (args[field] !== undefined && args[field] !== me) {
       return fail(
-        `${field} must be this session's own participant: ${tool} acts as it, and it cannot act as another participant. ` +
+        `${field} must be this agent's own participant: ${tool} acts as it, and it cannot act as another participant. ` +
           `Leave ${field} out and it is filled in`,
       )
     }
