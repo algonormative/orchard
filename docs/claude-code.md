@@ -36,7 +36,15 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   the listener keeps a lease in the plugin store (a session id and a heartbeat). A second
   session sees a fresh lease, does not listen (its tools still work) and its band says
   "another session is listening"; it takes over when the lease goes three polls without a
-  heartbeat. For two live sessions, give each its own `participantId`.
+  heartbeat. A session that ends (exit, `/resume`, logout, signal; not `/clear`) releases
+  its lease, so a restart listens at once. The engine gives no session identity that
+  survives a restart, so a crash or kill -9 still waits out the three polls (about 3
+  minutes). For two live sessions, give each its own `participantId`.
+- **One delivery per message.** Before handing alerts to the prompt queue, the mod writes
+  them to an in-flight claim in the store and clears it when the delivery resolves. A
+  second module instance of the same participant (a reinstall at another scope, a reload)
+  skips claimed ids and ids the stored record already marks delivered. A claim a dead
+  instance left expires after 10 minutes.
 - **The store stays bounded.** The plugin store keeps the last 50 (endpoint, participant)
   records and forgets the least recently used past that. If a store write fails, the band
   says so. Acknowledgement retries after a connection failure live in memory only, so a

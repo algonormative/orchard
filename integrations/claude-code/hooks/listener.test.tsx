@@ -6,7 +6,7 @@ import type { Engine } from 'claude-code/testing'
 
 import { storeKey } from './alerts'
 import { participationKey, settingsKey } from './classify'
-import { LEASE_STALE_MS, RECENT_KEY, leaseKey, recordKeys } from './lease'
+import { CLAIM_TTL_MS, LEASE_STALE_MS, RECENT_KEY, inflightKey, leaseKey, recordKeys } from './lease'
 import { CREDENTIAL, ENDPOINT, ME, OPTIONS } from './fake-orchard'
 import type { NotifyMode } from './fake-orchard'
 import { HELD_RECHECK_MS, bandText, begin, expectNoSecrets, resumes, typed, visible, world } from './test-world'
@@ -1236,6 +1236,90 @@ test('a second session for the same participant is read-only while the first one
   await w.clock.settle()
   await w.clock.advance(20_000)
   expect(w.submits).toHaveLength(1)
+})
+
+const END = (reason: 'clear' | 'prompt_input_exit' | 'resume' | 'other') => ({ reason, sessionId: 'ending', resume: { id: 'ending' } })
+
+const INFLIGHT = inflightKey(ENDPOINT, ME)
+
+test('an alert another module instance has in an unresolved delivery is not submitted again, nor after that instance delivered it', { options: OPTIONS }, async ($, on) => {
+  // instance A (the old install) handed m1 to the prompt queue and has not heard back
+  const w = world(on, { store: { [INFLIGHT]: [{ owner: 'instance-a', at: 0, ids: ['m1'] }] } })
+  await begin($, w)
+  deliver(w, 'm1')
+  await w.clock.settle()
+  await w.clock.advance(60_000)
+  expect(w.submits).toEqual([])
+  expect(queued(w)).toEqual(['m1'])
+
+  // the session goes idle: A's submit resolves, records the delivery and drops its claim
+  w.store.data.set(INBOX, { cursor: 1, delivered: ['m1'] })
+  w.store.data.delete(INFLIGHT)
+  await w.clock.advance(60_000)
+  expect(w.submits).toEqual([])
+  expect(queued(w)).toEqual([])
+})
+
+test('a claim a dead instance left expires, and the alert is delivered once', { options: OPTIONS }, async ($, on) => {
+  const w = world(on, { store: { [INFLIGHT]: [{ owner: 'instance-a', at: 0, ids: ['m1'] }] } })
+  await begin($, w)
+  deliver(w, 'm1')
+  await w.clock.settle()
+  await w.clock.advance(CLAIM_TTL_MS + 60_000)
+  expect(w.submits).toHaveLength(1)
+  expect(w.submits[0]?.text).toContain('body of m1')
+  expect(w.store.data.has(INFLIGHT)).toBe(false)
+})
+
+test('a delivery claims its ids in the store before the submit and releases them after', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  let release!: () => void
+  w.submit.hold = new Promise<void>(resolve => (release = resolve))
+  deliver(w, 'm1')
+  await w.clock.settle()
+  await w.clock.advance(15_000)
+  expect(w.submits).toHaveLength(1)
+  expect(w.store.data.get(INFLIGHT)).toMatchObject([{ ids: ['m1'] }])
+
+  release()
+  await w.clock.settle()
+  expect(w.store.data.has(INFLIGHT)).toBe(false)
+  expect(w.store.data.get(INBOX)).toMatchObject({ delivered: ['m1'] })
+})
+
+test('session.end releases the lease the session holds, so the next session listens at once', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  expect(w.store.data.has(LEASE)).toBe(true)
+
+  await $.session.end(END('prompt_input_exit'))
+  await w.clock.settle()
+  expect(w.store.data.has(LEASE)).toBe(false)
+})
+
+test('session.end after /clear keeps the lease: the same loop goes on', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  const mine = w.store.data.get(LEASE)
+
+  await $.session.end(END('clear'))
+  await w.clock.settle()
+  expect(w.store.data.get(LEASE)).toEqual(mine)
+})
+
+test('session.end never releases a lease another session holds', { options: OPTIONS }, async ($, on) => {
+  const w = world(on, { store: { [LEASE]: { session: 'the-other-session', at: 0 } } })
+  await begin($, w)
+  await $.session.end(END('other'))
+  await w.clock.settle()
+  expect(w.store.data.get(LEASE)).toEqual({ session: 'the-other-session', at: 0 })
+})
+
+test('a fresh foreign lease keeps a second live session read-only', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  w.store.data.set(LEASE, { session: 'the-other-session', at: await w.clock.now() })
+  await begin($, w)
+  await w.clock.advance(LEASE_STALE_MS - 30_000)
+  expect(w.state.latest.status).toEqual({ kind: 'shared' })
+  expect(alertsCalls(w)).toHaveLength(0)
 })
 
 test('a listening session beats its lease, and stands down when another session has taken it', { options: OPTIONS }, async ($, on) => {
