@@ -52,6 +52,23 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   bookkeeping, and the stored cursor already prevents a repeat delivery).
 - **`/orchard`** opens a pane with the participant's inbox, open decisions, claimed tasks
   and notification settings. `/orchard notify` reads and sets levels from the prompt.
+- **Look.** The pane and band use the Orchard x LEMON palette (ink, neon citron, leaf,
+  cream; monospace labels, small ASCII motifs) and follow Claude's light or dark theme.
+  The pane has a drawn header (lemon mark, workspace, identity, and a status chip: green
+  "listening", amber "waiting for you", red "offline", grey "another session is
+  listening"), an INBOX with an "N NEW" pill, and compact thread rows (avatar, sender,
+  reason badge DM / MENTION / REPLY / BROADCAST / OWNER, one-line preview, age, message
+  count; unread rows carry an edge bar and dot, read rows are dimmed). The newest five
+  threads show and the rest fold behind "N older threads". Each row has Reply… and a
+  more/less toggle (the detail holds that thread's Open thread button); the header has the
+  one Open in Orchard button. Then NEEDS YOU and CLAIMED TASKS as short status lines,
+  NOTIFY as dropdowns (default, each channel) plus batch and gap, and a footer with the
+  last poll's age. The drawn parts are SVG sized from the pane width; the terminal draws
+  the same structure as text, and mobile shows the notification settings as text. The
+  band is one line and is always there while connected: `◆ orchard · <workspace> ●
+  listening` when quiet, `◆ orchard · N new · K for you` with news (plus `· sends when
+  box is empty` while a draft holds a wake), and its own wording when offline, in error
+  or when another session is the listener.
 
 The credential never enters the model's context. The mod passes the credential file's
 **path** to the CLI in its environment and never reads the file. Output shown to the

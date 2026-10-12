@@ -7,6 +7,7 @@ import { storeKey } from './alerts'
 import { settingsKey } from './classify'
 import { DEFAULT_SETTINGS } from './classify'
 import { ENDPOINT, ME, OPTIONS } from './fake-orchard'
+import { chipOf, widthOf } from './svg'
 import { begin, bandText, callTool, expectNoSecrets, typed, visible, world } from './test-world'
 import type { World } from './test-world'
 
@@ -38,6 +39,13 @@ async function openPane($: Engine, w: World) {
   return out
 }
 
+/** Every string a pane draws: its Texts, and the markup and alt of its Svgs. */
+async function drawnText(ui: Awaited<ReturnType<typeof mountPane>>) {
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  const svgs = (await ui.findAll({ type: 'Svg' })).flatMap(v => [String(v.props.source), String(v.props.alt)])
+  return [...texts, ...svgs]
+}
+
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
 
 function mountPane<S extends (typeof SURFACES)[number]>($: Engine, surface: S) {
@@ -55,18 +63,23 @@ test('/orchard opens the pane and lists the inbox, what waits on the owner and t
 
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
-    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    const texts = await drawnText(ui)
     const all = texts.join('\n')
 
-    // the header carries the workspace and, once, the participant id
-    expect(texts[0]).toBe('Orchard · Fruit Stand')
-    expect(texts[1]).toBe(` · as ${ME}`)
-    expect(texts.filter(t => t.includes(ME))).toHaveLength(1)
+    // the header carries the workspace and, once, the participant id (in the drawing where there is one)
+    expect(all).toContain('Fruit Stand')
+    expect(all.split(`as ${ME}`).length - 1).toBe(1)
+    expect(all.split(ME).length - 1).toBe(1)
+    // furnish() leaves one open decision, so the chip says the session is waiting on the owner
+    expect(all).toContain('waiting for you')
+    expect(all).toContain('INBOX')
 
     // inbox threads this participant is in; the channel post it never received is not there
-    expect(all).toContain('Nick (owner) · 2026-10-10 09:00 · 2 messages')
+    expect(all).toContain('Nick')
+    expect(all).toContain('OWNER')
     expect(all).toContain('Can you check the build?')
-    expect(all).toContain('Other Claude · 2026-10-10 10:00')
+    expect(all).toContain('Other Claude')
+    expect(all).toContain('DM')
     expect(all).toContain('Question about the awning')
     expect(all.includes('second line')).toBe(false)
     expect(all.includes('noise in a channel')).toBe(false)
@@ -77,17 +90,19 @@ test('/orchard opens the pane and lists the inbox, what waits on the owner and t
     expect(all).toContain(' in progress ')
     expect(all.includes('in_progress')).toBe(false)
     expect(all.includes('Paint the stand')).toBe(false)
-    // message ids never show as text
-    for (const id of ['m1', 'm3', 'd1']) expect(texts.some(t => t.includes(id))).toBe(false)
+    expect(all).toContain('tending the grove')
+    // message ids never show
+    // (the markup's own colours and class names are not text a person reads)
+    const readable = [...(await ui.findAll({ type: 'Text' })).map(t => t.text), ...(await ui.findAll({ type: 'Svg' })).map(v => String(v.props.alt)), ...(await ui.findAll({ type: 'Svg' })).flatMap(v => [...String(v.props.source).matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map(m => m[1] ?? ''))]
+    for (const id of ['m1', 'm3', 'd1']) expect(readable.some(t => t.includes(id))).toBe(false)
 
     expect(await ui.find({ type: 'Button', key: 'reply-m1' })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'reply-m3' })).toBeDefined()
-    // "Open in Orchard" is a Button, never a Link: the surfaces draw a Link only for https and
-    // http://localhost, and Orchard turns the latter away
+    // one "Open in Orchard" for the whole pane, in the header; it is a Button, never a Link: the
+    // surfaces draw a Link only for https and http://localhost, and Orchard turns the latter away
     expect(await ui.findAll({ type: 'Link' })).toEqual([])
-    for (const key of ['open-workspace', 'open-thread-m1', 'open-thread-m3', 'open-decision-d1', 'open-task-t1']) {
-      expect((await ui.find({ type: 'Button', key }))?.props.label, key).toBe('Open in Orchard')
-    }
+    expect((await ui.find({ type: 'Button', key: 'open-workspace' }))?.props.label, surface).toBe('Open in Orchard')
+    expect((await ui.findAll({ type: 'Button' })).filter(b => b.props.label === 'Open in Orchard')).toHaveLength(1)
     await ui.unmount()
   }
   // reading the window also refreshed the band's needs-you count
@@ -110,12 +125,19 @@ test('Open in Orchard runs `open` on the exact loopback address, the endpoint\'s
   ]
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
+    // a thread's own "Open thread" sits in its detail
+    await ui.press({ key: 'toggle-m1' })
+    await ui.press({ key: 'toggle-m3' })
+    await w.clock.settle()
     for (const [key, url] of pages) {
       w.fake.opened.length = 0
       await ui.press({ key })
       await w.clock.settle()
       expect(w.fake.opened, `${surface} ${key}`).toEqual([url])
     }
+    await ui.press({ key: 'toggle-m1' })
+    await ui.press({ key: 'toggle-m3' })
+    await w.clock.settle()
     await ui.unmount()
   }
   // the Orchard CLI was not used for it, and no address but the loopback one was ever opened
@@ -254,7 +276,7 @@ test('a changed level applies at once: do-not-disturb stops the wake of a messag
   expect(w.state.latest.counts).toMatchObject({ unread: 1, forYou: 0 })
   await w.clock.advance(5 * 60_000)
   expect(w.submits).toEqual([])
-  expect(await bandText($)).toBe('Orchard · Fruit Stand · 1 new')
+  expect(await bandText($)).toBe('◆ orchard · 1 new')
 })
 
 test('a changed level takes out of the pending queue what it would no longer let in', { options: OPTIONS }, async ($, on) => {
@@ -337,4 +359,133 @@ test('nothing the pane, the commands or the tools put where the model can read h
   const answers = [await callTool($, 'orchard_history', {}), await callTool($, 'orchard_call', { name: 'workspace_info' })]
   await $.prompt.submit(typed('hi'))
   expectNoSecrets([said, ...answers.map(a => String(a.result ?? a.deny)), ...(await visible($, w))])
+})
+
+// ---- the redesign: drawn header and rows, the fold, the status chip ----
+
+function crowd(w: World, n: number) {
+  for (let i = 1; i <= n; i++) {
+    w.fake.push({ id: `p${i}`, sender_id: `peer-${i}`, body: `Peer message number ${i}`, destination: { kind: 'direct', id: ME }, recipient_ids: [ME], sent_at: `2026-10-10T0${i}:00:00Z` })
+  }
+}
+
+test('the pane draws a header, an inbox and a footer: as Svg where a surface has one, as Text on the terminal', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  furnish(w)
+  await begin($, w)
+  await openPane($, w)
+
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    const svgs = await ui.findAll({ type: 'Svg' })
+    if (surface === 'terminal') {
+      expect(svgs).toEqual([])
+      const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+      expect(texts).toContain('● waiting for you')
+      expect(texts.some(t => t.startsWith('◆ Orchard · Fruit Stand'))).toBe(true)
+      expect(texts.some(t => /Nick \[OWNER\]/.test(t))).toBe(true)
+      expect(texts.some(t => t.includes('tending the grove'))).toBe(true)
+    } else {
+      expect(svgs.length, surface).toBeGreaterThan(4)
+      let total = 0
+      for (const v of svgs) {
+        const source = String(v.props.source)
+        total += source.length
+        expect(source.length).toBeLessThan(120_000)
+        // both themes: variables on :root, redefined for dark; no hex colour outside the style block
+        expect(source).toContain('prefers-color-scheme: dark')
+        expect(source.replace(/<style>[\s\S]*<\/style>/, '')).not.toMatch(/(fill|stroke)="#(?!81e78a)/)
+        expect(source).not.toMatch(/<script|on\w+=/)
+        expect(String(v.props.alt)).not.toBe('')
+      }
+      expect(total).toBeLessThan(240_000)
+    }
+    await ui.unmount()
+  }
+})
+
+test('the newest five threads show; the rest fold behind a button that opens them', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  crowd(w, 7)
+  await begin($, w)
+  await openPane($, w)
+
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    const replies = async () => (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('reply-'))
+    expect(await replies(), surface).toHaveLength(5)
+    expect((await ui.find({ type: 'Button', key: 'older-threads' }))?.props.label).toBe('▸ 2 older threads')
+    expect((await drawnText(ui)).join('\n')).not.toContain('Peer message number 1')
+
+    await ui.press({ key: 'older-threads' })
+    await w.clock.settle()
+    expect(await replies()).toHaveLength(7)
+    expect((await ui.find({ type: 'Button', key: 'older-threads' }))?.props.label).toBe('▾ hide older threads')
+    expect((await drawnText(ui)).join('\n')).toContain('Peer message number 1')
+
+    await ui.press({ key: 'older-threads' })
+    await w.clock.settle()
+    expect(await replies()).toHaveLength(5)
+    await ui.unmount()
+  }
+})
+
+test('a thread opens and closes its detail; unread rows are marked, read ones are not', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  crowd(w, 1)
+  await begin($, w)
+  await openPane($, w)
+
+  const ui = await mountPane($, 'terminal')
+  const text = async () => (await drawnText(ui)).join('\n')
+  expect(await ui.find({ type: 'Button', key: 'open-thread-p1' })).toBeUndefined()
+  expect((await ui.find({ type: 'Button', key: 'toggle-p1' }))?.props.label).toBe('▸ more')
+  await ui.press({ key: 'toggle-p1' })
+  await w.clock.settle()
+  expect((await ui.find({ type: 'Button', key: 'toggle-p1' }))?.props.label).toBe('▾ less')
+  expect((await ui.find({ type: 'Button', key: 'open-thread-p1' }))?.props.label).toBe('Open thread')
+  expect(await text()).toContain('1 message')
+  await ui.press({ key: 'toggle-p1' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Button', key: 'open-thread-p1' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the status chip: green listening, amber waiting for you, red offline or error, grey another session', () => {
+  const quiet = { unread: 0, forYou: 0, needsYou: 0 }
+  expect(chipOf({ kind: 'connected' }, quiet)).toEqual({ kind: 'listening', label: 'listening' })
+  expect(chipOf({ kind: 'connected' }, { ...quiet, needsYou: 1 })).toEqual({ kind: 'waiting', label: 'waiting for you' })
+  expect(chipOf({ kind: 'connected' }, { ...quiet, unread: 1, forYou: 1, isHeld: true })).toEqual({ kind: 'waiting', label: 'waiting for you' })
+  expect(chipOf({ kind: 'offline', failures: 2 }, quiet)).toEqual({ kind: 'offline', label: 'offline' })
+  expect(chipOf({ kind: 'error', message: 'x' }, quiet).kind).toBe('error')
+  expect(chipOf({ kind: 'shared' }, quiet)).toEqual({ kind: 'shared', label: 'another session is listening' })
+  expect(chipOf({ kind: 'connecting' }, quiet).kind).toBe('connecting')
+  expect(chipOf(null, null).kind).toBe('connecting')
+})
+
+test('the header chip follows the connection on the pane', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  await begin($, w)
+  await openPane($, w)
+  const header = async (surface: 'terminal' | 'desktop') => {
+    const ui = await mountPane($, surface)
+    const all = (await drawnText(ui)).join('\n')
+    await ui.unmount()
+    return all
+  }
+  expect(await header('desktop')).toMatch(/class="mono leaf" font-size="10.5">listening</)
+  w.state.override.counts = { unread: 0, forYou: 0, needsYou: 1 }
+  expect(await header('desktop')).toMatch(/class="mono warn" font-size="10.5">waiting for you</)
+  expect(await header('terminal')).toContain('● waiting for you')
+  w.state.override.status = { kind: 'offline', failures: 1 }
+  expect(await header('desktop')).toMatch(/class="mono err" font-size="10.5">offline</)
+  w.state.override.status = { kind: 'shared' }
+  expect(await header('desktop')).toMatch(/class="mono dim" font-size="10.5">another session is listening</)
+})
+
+test('drawings are sized from the pane width and clipped to it', () => {
+  expect(widthOf(undefined)).toBe(440)
+  expect(widthOf(55)).toBe(432)
+  expect(widthOf(10)).toBe(300)
+  expect(widthOf(500)).toBe(560)
 })

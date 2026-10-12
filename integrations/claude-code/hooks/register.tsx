@@ -26,6 +26,7 @@ import {
 } from './alerts'
 import type { AlertsPage } from './alerts'
 import { bandLine } from './band'
+import type { BandTone } from './band'
 import { CLAIM_RECHECK_MS, LEASE_BEAT_MS, LEASE_RECHECK_MS, RECENT_KEY, inflightKey, isHeldByOther, leaseKey, liveClaims, parseClaims, parseLease, parseRecent, planEviction, withoutIds } from './lease'
 import { DEFAULT_SETTINGS, addParticipation, classify, isLevel, parseParticipation, parseSettings, participationKey, settingsKey } from './classify'
 import { checkConn, parseProjectFile, PROJECT_FILE, readOptions, resolveIdentity } from './config'
@@ -699,6 +700,8 @@ async function tick($: EngineInterface, app: App, loop: Loop) {
     }
     const delay = await absorb($, app, loop, result, isWaiting, elapsed)
     ls.crashes = 0
+    const polledAt = await $.clock.now()
+    await update($, counts, prev => ({ ...prev, lastPollAt: polledAt }))
     if (await isLive($, ls, loop)) await schedule($, app, loop, delay)
   } catch {
     await loopDied($, app, loop, 'crashed')
@@ -880,6 +883,7 @@ function showHeld($: EngineInterface, ls: ListenerState, waiting: number) {
 
 /** The hold is over (a delivery took the queue, the box emptied, nothing is left to wake for): its timer and status line go. */
 function endHold($: EngineInterface, ls: ListenerState) {
+  if (ls.isHeld) detach(update($, counts, prev => ({ ...prev, isHeld: false })))
   ls.isHeld = false
   ls.holdTimer?.cancel()
   ls.holdTimer = undefined
@@ -907,6 +911,7 @@ function armHoldRecheck($: EngineInterface, app: App) {
 async function holdWake($: EngineInterface, app: App, pending: { unread: number; forYou: number }) {
   const { ls } = app
   ls.isHeld = true
+  detach(update($, counts, prev => ({ ...prev, isHeld: true })))
   showHeld($, ls, pending.unread)
   armHoldRecheck($, app)
   const text = heldNotice(pending.unread, pending.forYou)
@@ -1042,7 +1047,7 @@ async function runNotify($: EngineInterface, app: App, rest: string): Promise<st
 
 // ---- the pane ----
 
-const EMPTY_PANE: OrchardPane = { state: 'loading', error: null, threads: [], decisions: [], tasks: [], channels: [] }
+const EMPTY_PANE: OrchardPane = { state: 'loading', error: null, threads: [], decisions: [], tasks: [], channels: [], isOlderShown: false, expanded: [] }
 
 /** Reads everything the pane lists. The band's counts and the participation set are refreshed from the same window. */
 async function loadPane($: EngineInterface, app: App) {
@@ -1072,7 +1077,8 @@ async function loadPane($: EngineInterface, app: App) {
 
   const { endpoint } = here.conn
   const owner = (await read($, workspace))?.ownerId ?? 'owner'
-  const threads = buildThreads(window.messages, { me, ownerId: owner, endpoint, names: ls.names })
+  const pendingIds = new Map((await readQueue($, app)).items.map(item => [item.id, item.reasons] as const))
+  const threads = buildThreads(window.messages, { me, ownerId: owner, endpoint, names: ls.names, pending: pendingIds })
   const decisions = openDecisions(window.messages, me, owner).map(m => ({
     id: m.id,
     snippet: snippetOf(m.body),
@@ -1127,6 +1133,14 @@ async function openInOrchard($: EngineInterface, href: string) {
 function paneHandlers($: EngineInterface, app: App): PaneHandlers {
   return {
     refresh: () => detach(loadPane($, app)),
+    toggleOlder: () => detach(update($, pane, p => ({ ...(p ?? EMPTY_PANE), isOlderShown: p?.isOlderShown !== true }))),
+    toggleThread: replyToId =>
+      detach(
+        update($, pane, p => {
+          const open = p?.expanded ?? []
+          return { ...(p ?? EMPTY_PANE), expanded: open.includes(replyToId) ? open.filter(id => id !== replyToId) : [...open, replyToId] }
+        }),
+      ),
     open: href => detach(openInOrchard($, href)),
     reply: thread => detach(fillReply($, thread)),
     setLevel: (channelId, level) => {
@@ -1461,6 +1475,8 @@ export const register: Register = (on, options) => {
       Box: t.Box,
       Text: t.Text,
       Button: t.Button,
+      // The terminal draws no Svg: it gets the same structure as Text.
+      Svg: e.surface !== 'terminal' && 'Svg' in t ? t.Svg : undefined,
       // The mobile app draws no field (its table answers a stub): there the settings are text.
       Input: e.surface !== 'mobile' && 'Input' in t ? t.Input : undefined,
       Select: e.surface !== 'mobile' && 'Select' in t ? t.Select : undefined,
@@ -1473,6 +1489,10 @@ export const register: Register = (on, options) => {
         workspaceHref: app.rt.current === undefined ? null : workspaceHref(app.rt.current.conn.endpoint),
         pane: await read($, pane),
         settings: await read($, settings),
+        status: await read($, status),
+        counts: await read($, counts),
+        nowMs: await $.clock.now(),
+        columns: typeof e.props.bodyColumns === 'number' ? e.props.bodyColumns : undefined,
       },
       paneHandlers($, app),
     )
@@ -1485,15 +1505,16 @@ export const register: Register = (on, options) => {
     if (line === null) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
+    // Theme tokens only (no hex), so the band follows the person's light/dark theme.
+    const paint = (tone: BandTone): { color?: string; dimColor?: boolean } =>
+      tone === 'mark' ? { color: 'suggestion' } : tone === 'ok' ? { color: 'success' } : tone === 'warn' ? { color: 'warning' } : tone === 'err' ? { color: 'error' } : tone === 'dim' ? { dimColor: true } : {}
     return (
       <Box>
-        <Text
-          wrap="truncate-end"
-          dimColor={line.tone === 'quiet'}
-          color={line.tone === 'warning' ? 'warning' : line.tone === 'error' ? 'error' : undefined}
-        >
-          {line.text}
-        </Text>
+        {line.segments.map((segment, i) => (
+          <Text key={`band-${i}`} wrap="truncate-end" bold={segment.tone === 'mark'} {...paint(segment.tone)}>
+            {segment.text}
+          </Text>
+        ))}
       </Box>
     )
   })

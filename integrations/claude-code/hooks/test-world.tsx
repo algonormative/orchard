@@ -140,7 +140,8 @@ export async function begin($: Engine, w: World) {
 
 export async function bandText($: Engine, surface: 'terminal' | 'desktop' = 'terminal', props: unknown = BAND_PROPS) {
   const ui = await $.ui.mount({ plugin: 'orchard', surface, component: 'AbovePrompt', props: props as never })
-  return (await ui.find({ type: 'Text' }))?.text
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  return texts.length === 0 ? undefined : texts.join('')
 }
 
 /** Every string the mod leaves where a person or the model could read it. */
