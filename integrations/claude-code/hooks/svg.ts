@@ -97,7 +97,7 @@ export function headerSvg(w: number, args: { workspaceName: string; participantI
     `<ellipse cx="18" cy="5" rx="5" ry="3" fill="#81e78a" transform="rotate(-30 18 5)"/>` +
     `<text x="9" y="19" class="mono onbadge" font-size="12" font-weight="700">◕‿◕</text>` +
     `<text x="38" y="11" class="mono accent" font-size="10" letter-spacing="1.5">ORCHARD //</text>` +
-    `<text x="38" y="27" class="text" font-size="15" font-weight="700">${esc(cut(args.workspaceName || 'workspace', nameMax))}</text></g>` +
+    `<text x="38" y="27" class="text" font-size="15" font-weight="700">${esc(cut(`Claude's inbox · ${args.workspaceName || 'workspace'}`, nameMax))}</text></g>` +
     `<text x="56" y="66" class="mono dim" font-size="10">as ${esc(cut(args.participantId, idMax))}</text>` +
     `<g transform="translate(${chipX},52)"><rect width="${chipW}" height="22" rx="11" class="${bg}"/>` +
     `<circle cx="14" cy="11" r="4" class="${fg}">${pulse}</circle>` +

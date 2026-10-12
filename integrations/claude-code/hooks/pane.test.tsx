@@ -8,7 +8,7 @@ import { settingsKey } from './classify'
 import { DEFAULT_SETTINGS } from './classify'
 import { ENDPOINT, ME, OPTIONS } from './fake-orchard'
 import { chipOf, widthOf } from './svg'
-import { begin, bandText, callTool, expectNoSecrets, typed, visible, world } from './test-world'
+import { act, begin, bandText, callTool, expectNoSecrets, typed, visible, world } from './test-world'
 import type { World } from './test-world'
 
 const SETTINGS = settingsKey(ENDPOINT, ME)
@@ -47,6 +47,7 @@ async function drawnText(ui: Awaited<ReturnType<typeof mountPane>>) {
 }
 
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
+
 
 function mountPane<S extends (typeof SURFACES)[number]>($: Engine, surface: S) {
   return $.ui.mount({ plugin: 'orchard', surface, component: 'Pane', requestId: 'orchard', props: PANE_PROPS })
@@ -96,13 +97,17 @@ test('/orchard opens the pane and lists the inbox, what waits on the owner and t
     const readable = [...(await ui.findAll({ type: 'Text' })).map(t => t.text), ...(await ui.findAll({ type: 'Svg' })).map(v => String(v.props.alt)), ...(await ui.findAll({ type: 'Svg' })).flatMap(v => [...String(v.props.source).matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map(m => m[1] ?? ''))]
     for (const id of ['m1', 'm3', 'd1']) expect(readable.some(t => t.includes(id))).toBe(false)
 
-    expect(await ui.find({ type: 'Button', key: 'reply-m1' })).toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 'reply-m3' })).toBeDefined()
-    // one "Open in Orchard" for the whole pane, in the header; it is a Button, never a Link: the
-    // surfaces draw a Link only for https and http://localhost, and Orchard turns the latter away
+    // each thread has its action line, and the header its own
+    expect(String((await ui.find({ type: 'Markdown', key: 'actions-m1' }))?.props.text)).toContain('remove')
+    expect(await ui.find({ type: 'Markdown', key: 'actions-m3' })).toBeDefined()
+    // one "Open in Orchard" for the whole pane, in the header; a Markdown link answered by the mod, never a
+    // Link (the surfaces draw one only for https and http://localhost, and Orchard turns the latter away)
     expect(await ui.findAll({ type: 'Link' })).toEqual([])
-    expect((await ui.find({ type: 'Button', key: 'open-workspace' }))?.props.label, surface).toBe('Open in Orchard')
-    expect((await ui.findAll({ type: 'Button' })).filter(b => b.props.label === 'Open in Orchard')).toHaveLength(1)
+    const markdown = await ui.findAll({ type: 'Markdown' })
+    expect(markdown.filter(m => String(m.props.text).includes('Open in Orchard ↗')), surface).toHaveLength(1)
+    expect(String((await ui.find({ type: 'Markdown', key: 'header-actions' }))?.props.text)).toContain('Open in Orchard ↗')
+    // needs-you rows point at Orchard to answer
+    expect(String((await ui.find({ type: 'Markdown', key: 'answer-d1' }))?.props.text)).toContain('answer in Orchard ↗')
     await ui.unmount()
   }
   // reading the window also refreshed the band's needs-you count
@@ -120,23 +125,26 @@ test('Open in Orchard runs `open` on the exact loopback address, the endpoint\'s
     ['open-workspace', `${base}/channels/general`],
     ['open-thread-m1', `${base}/messages/m1`],
     ['open-thread-m3', `${base}/messages/m3`],
-    ['open-decision-d1', `${base}/messages/d1`],
+    ['answer-d1', `${base}/messages/d1`],
     ['open-task-t1', `${base}/tasks/store1/t1`],
   ]
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
-    // a thread's own "Open thread" sits in its detail
-    await ui.press({ key: 'toggle-m1' })
-    await ui.press({ key: 'toggle-m3' })
+    // a thread's own "open thread" sits in its detail
+    await act(ui, 'more', 'm1')
+    await act(ui, 'more', 'm3')
     await w.clock.settle()
     for (const [key, url] of pages) {
       w.fake.opened.length = 0
-      await ui.press({ key })
+      if (key === 'open-workspace') await act(ui, 'open-workspace')
+      else if (key.startsWith('open-thread-')) await act(ui, 'open-thread', key.slice('open-thread-'.length))
+      else if (key.startsWith('answer-')) await act(ui, 'answer', key.slice('answer-'.length))
+      else await ui.press({ key })
       await w.clock.settle()
       expect(w.fake.opened, `${surface} ${key}`).toEqual([url])
     }
-    await ui.press({ key: 'toggle-m1' })
-    await ui.press({ key: 'toggle-m3' })
+    await act(ui, 'more', 'm1')
+    await act(ui, 'more', 'm3')
     await w.clock.settle()
     await ui.unmount()
   }
@@ -156,17 +164,22 @@ test('Reply… fills the prompt with a draft and never submits', { options: OPTI
     const before = w.submits.length
     w.fills.length = 0
     w.box.text = ''
-    await ui.press({ key: 'reply-m3' })
+    await act(ui, 'more', 'm3')
+    await act(ui, 'more', 'm1')
+    await act(ui, 'reply', 'm3')
     await w.clock.settle()
     expect(w.fills).toEqual([{ text: 'Reply on Orchard to message m3 (orchard_reply): ', mode: 'append' }])
 
     // with a draft already in the box the reply starts on a new line, after it
     w.fills.length = 0
     w.box.text = 'something I was typing'
-    await ui.press({ key: 'reply-m1' })
+    await act(ui, 'reply', 'm1')
     await w.clock.settle()
     expect(w.fills).toEqual([{ text: '\n\nReply on Orchard to message m1 (orchard_reply): ', mode: 'append' }])
     expect(w.submits).toHaveLength(before)
+    await act(ui, 'more', 'm3')
+    await act(ui, 'more', 'm1')
+    await w.clock.settle()
     await ui.unmount()
   }
 })
@@ -180,7 +193,7 @@ test('Refresh reads the workspace again', { options: OPTIONS }, async ($, on) =>
   expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n').includes('A brand new question')).toBe(false)
 
   w.fake.push({ id: 'm9', sender_id: 'claude-other', body: 'A brand new question', destination: { kind: 'direct', id: ME }, recipient_ids: [ME] })
-  await ui.press({ key: 'refresh' })
+  await act(ui, 'refresh')
   await w.clock.settle()
   expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).toContain('A brand new question')
 })
@@ -193,7 +206,7 @@ test('an unreachable workspace shows in the pane instead of an empty inbox', { o
   const ui = await mountPane($, 'terminal')
   const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
   expect(all).toContain('The workspace is not reachable')
-  expect(all.includes('Nothing in your inbox')).toBe(false)
+  expect(all.includes("Nothing in Claude's inbox")).toBe(false)
 })
 
 // ---- notification settings in the pane ----
@@ -382,7 +395,7 @@ test('the pane draws a header, an inbox and a footer: as Svg where a surface has
       expect(svgs).toEqual([])
       const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
       expect(texts).toContain('● waiting for you')
-      expect(texts.some(t => t.startsWith('◆ Orchard · Fruit Stand'))).toBe(true)
+      expect(texts.some(t => t.startsWith("◆ Claude's inbox · Fruit Stand"))).toBe(true)
       expect(texts.some(t => /Nick \[OWNER\]/.test(t))).toBe(true)
       expect(texts.some(t => t.includes('tending the grove'))).toBe(true)
     } else {
@@ -412,7 +425,7 @@ test('the newest five threads show; the rest fold behind a button that opens the
 
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
-    const replies = async () => (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('reply-'))
+    const replies = async () => (await ui.findAll({ type: 'Markdown' })).filter(m => String(m.key).startsWith('actions-'))
     expect(await replies(), surface).toHaveLength(5)
     expect((await ui.find({ type: 'Button', key: 'older-threads' }))?.props.label).toBe('▸ 2 older threads')
     expect((await drawnText(ui)).join('\n')).not.toContain('Peer message number 1')
@@ -438,16 +451,17 @@ test('a thread opens and closes its detail; unread rows are marked, read ones ar
 
   const ui = await mountPane($, 'terminal')
   const text = async () => (await drawnText(ui)).join('\n')
-  expect(await ui.find({ type: 'Button', key: 'open-thread-p1' })).toBeUndefined()
-  expect((await ui.find({ type: 'Button', key: 'toggle-p1' }))?.props.label).toBe('▸ more')
-  await ui.press({ key: 'toggle-p1' })
+  const line = async () => String((await ui.find({ type: 'Markdown', key: 'actions-p1' }))?.props.text)
+  expect(await ui.find({ type: 'Markdown', key: 'detail-p1' })).toBeUndefined()
+  expect(await line()).toContain('[more ▾]')
+  await act(ui, 'more', 'p1')
   await w.clock.settle()
-  expect((await ui.find({ type: 'Button', key: 'toggle-p1' }))?.props.label).toBe('▾ less')
-  expect((await ui.find({ type: 'Button', key: 'open-thread-p1' }))?.props.label).toBe('Open thread')
+  expect(await line()).toContain('[less ▴]')
+  expect(String((await ui.find({ type: 'Markdown', key: 'detail-p1' }))?.props.text)).toContain('open thread ↗')
   expect(await text()).toContain('1 message')
-  await ui.press({ key: 'toggle-p1' })
+  await act(ui, 'more', 'p1')
   await w.clock.settle()
-  expect(await ui.find({ type: 'Button', key: 'open-thread-p1' })).toBeUndefined()
+  expect(await ui.find({ type: 'Markdown', key: 'detail-p1' })).toBeUndefined()
   await ui.unmount()
 })
 

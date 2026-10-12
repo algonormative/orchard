@@ -2,6 +2,7 @@
 // lets one session at a time listen as a participant, and the recency index that keeps the
 // store from growing a record for every workspace ever joined. Pure functions, no `$`.
 import { WAIT_SECONDS, storeKey } from './alerts'
+import { hiddenKey, snoozeKey } from './actions'
 import { participationKey, settingsKey } from './classify'
 
 /** A lease no heartbeat has renewed for this long (three polls) is dead; another session may take it. */
@@ -65,16 +66,18 @@ export function withoutIds(claims: readonly Claim[], owner: string, ids: readonl
 export type RecordRef = { endpoint: string; participantId: string }
 type Recent = RecordRef & { at: number }
 
-/** The four keys one record keeps. */
+/** The keys one record keeps. */
 export const recordKeys = (endpoint: string, participantId: string): string[] => [
   storeKey(endpoint, participantId),
   settingsKey(endpoint, participantId),
   participationKey(endpoint, participantId),
   leaseKey(endpoint, participantId),
   inflightKey(endpoint, participantId),
+  snoozeKey(endpoint, participantId),
+  hiddenKey(endpoint, participantId),
 ]
 
-const PREFIXES = ['inbox ', 'settings ', 'participation ', 'lease ', 'inflight ']
+const PREFIXES = ['inbox ', 'settings ', 'participation ', 'lease ', 'inflight ', 'snoozed ', 'hidden ']
 
 function refOfKey(key: string): RecordRef | undefined {
   const prefix = PREFIXES.find(p => key.startsWith(p))

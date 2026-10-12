@@ -4,6 +4,8 @@ import type { On } from 'claude-code'
 import { expect, mock } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
+import { actionHref } from './actions'
+import type { Verb } from './actions'
 import { CWD, SECRETS, fakeOrchard, stubFiles, stubStore, watchSinks } from './fake-orchard'
 
 /** How often a held wake looks at the prompt box again (the mod's own constant, written out: a test should not follow it). */
@@ -175,4 +177,16 @@ export function callTool($: Engine, name: string, input: Record<string, unknown>
 /** What a person's Enter raises at `prompt.submit`. */
 export function typed(text: string) {
   return { text, wait: false, origin: { kind: 'composer' as const } }
+}
+
+/** Presses an action link: the pane's links are Markdown links, not Buttons. */
+const KEYS: Partial<Record<Verb, (id: string) => string>> = {
+  refresh: () => 'header-actions',
+  'open-workspace': () => 'header-actions',
+  answer: id => `answer-${id}`,
+  reply: id => `detail-${id}`,
+  'open-thread': id => `detail-${id}`,
+}
+export function act(ui: { press: (target: { key: string; link: { href: string } }) => Promise<unknown> }, verb: Verb, id = '-') {
+  return ui.press({ key: (KEYS[verb] ?? ((x: string) => `actions-${x}`))(id), link: { href: actionHref(verb, id) } })
 }
