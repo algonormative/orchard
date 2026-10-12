@@ -71,9 +71,15 @@ export type Fake = {
   /** Messages sent through `mail_send`, as the tool received them. */
   sent: Record<string, unknown>[]
   channels: { id: string; name: string }[]
-  /** Task stores and tasks `tasks_list` answers from. */
+  /** Task stores and tasks `tasks_list` answers from: a task without `status` is open, one without `store_id` is in every store. */
   taskStores: { id: string; name: string }[]
   tasks: Record<string, unknown>[]
+  /** The plugins `workspace_info` lists, attached or not. */
+  plugins: { id: string; attached: boolean }[]
+  /** What `roles_list` answers: the declarations of the Roles plugin. `role_declare` adds one. */
+  declarations: { participant_id: string; roles: string[] }[]
+  /** What `state_list` answers: the markers of the State plugin. */
+  markers: Record<string, unknown>[]
   /** Overrides the default answer for a call; `n` is the call's 1-based position. Return undefined for the default. */
   script: ((call: Call, n: number) => Reply | undefined | Promise<Reply | undefined>) | undefined
   /** Adds a message that alerts the participant (or not, with no alert) and wakes a waiting poll. */
@@ -110,7 +116,7 @@ function alertsPage(fake: Fake, argv: readonly string[]): { exitCode: 0; stdout:
     const alert = fake.alerts.get(message.id)
     const reasons = (alert?.reasons ?? []).filter(r => isChannels || r !== 'channel')
     if (alert !== undefined && reasons.length > 0) {
-      alerts.push({ reasons, message, channel: alert.channel ?? null, resource: { href: `/w/ws/messages/${message.id}` } })
+      alerts.push({ reasons, message, channel: alert.channel ?? null, resource: { href: `/w/ws_0123456789abcdef/messages/${message.id}` } })
     }
     if (alerts.length === limit) break
   }
@@ -163,6 +169,7 @@ async function answer(fake: Fake, call: Call, sleep: (ms: number) => Promise<voi
           },
           owner_participant_id: fake.ownerId,
           system_participant_id: 'orchard',
+          plugins: fake.plugins.map(p => ({ id: p.id, name: p.id, attached: p.attached, required: false })),
         })
       case 'mail_channels':
         return json({ channels: fake.channels })
@@ -195,8 +202,16 @@ async function answer(fake: Fake, call: Call, sleep: (ms: number) => Promise<voi
         fake.acks.push({ ids, requestId: String(args.request_id ?? '') })
         return json({ acknowledged: ids.length })
       }
-      case 'tasks_list':
-        return json({ store_id: args.store_id, tasks: fake.tasks })
+      case 'tasks_list': {
+        const tasks = fake.tasks.filter(
+          t => (args.status === undefined || (t.status ?? 'open') === args.status) && (t.store_id === undefined || t.store_id === args.store_id),
+        )
+        return json({ store_id: args.store_id, tasks })
+      }
+      case 'roles_list':
+        return json({ roles: [], declarations: fake.declarations, advisory: true })
+      case 'state_list':
+        return json({ markers: fake.markers })
       case 'workspace_decisions': {
         if (!fake.hasDecisionsTool) return { exitCode: 4, stderr: 'Orchard agent: unknown tool workspace_decisions\n' }
         const answered = new Set(fake.messages.filter(m => m.sender_id === fake.ownerId).map(m => m.thread_id))
@@ -205,7 +220,32 @@ async function answer(fake: Fake, call: Call, sleep: (ms: number) => Promise<voi
         )
         return json({ decisions: open })
       }
+      case 'task_claim':
+      case 'task_release':
+      case 'task_close':
+      case 'task_update': {
+        // The task the call names, changed as the call says; its row is what `tasks_list` answers from afterwards.
+        const task = fake.tasks.find(t => t.id === args.task_id)
+        if (task === undefined) return { exitCode: 4, stderr: 'Orchard agent: task not found\n' }
+        if (call.tool === 'task_claim') Object.assign(task, { status: 'in_progress', assignee: args.participant_id })
+        if (call.tool === 'task_release') Object.assign(task, { status: 'open', assignee: null })
+        if (call.tool === 'task_close') Object.assign(task, { status: 'closed' })
+        return json({ task, task_ref: { store_id: args.store_id, task_id: task.id } })
+      }
+      case 'state_create': {
+        const marker = { id: args.id, title: args.title, state: 'todo', revision: 1, subject: args.subject, created_by: args.participant_id }
+        fake.markers.push(marker)
+        return json({ marker })
+      }
+      case 'state_advance': {
+        const marker = fake.markers.find(m => m.id === args.id)
+        if (marker === undefined) return { exitCode: 4, stderr: 'Orchard agent: unknown state marker\n' }
+        Object.assign(marker, { state: args.to, revision: Number(marker.revision) + 1 })
+        return json({ marker })
+      }
       case 'role_declare':
+        fake.declarations = fake.declarations.filter(d => d.participant_id !== args.participant_id)
+        fake.declarations.push({ participant_id: String(args.participant_id), roles: Array.isArray(args.roles) ? (args.roles as string[]) : [] })
         return json({ declared: true, participant_id: args.participant_id })
     }
   }
@@ -238,6 +278,16 @@ export function fakeOrchard(on: On, now: () => number, sleep: (ms: number) => Pr
     ],
     taskStores: [{ id: 'store1', name: 'Fruit stand tasks' }],
     tasks: [],
+    // The required plugins and Tasks are attached; State and Roles are not until a test attaches them.
+    plugins: [
+      { id: 'core', attached: true },
+      { id: 'chat', attached: true },
+      { id: 'tasks', attached: true },
+      { id: 'state', attached: false },
+      { id: 'roles', attached: false },
+    ],
+    declarations: [],
+    markers: [],
     script: undefined,
     waiting: 0,
     hasDecisionsTool: false,

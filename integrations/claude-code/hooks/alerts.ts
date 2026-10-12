@@ -76,6 +76,15 @@ function whereOf(message: Record<string, unknown>, channel: unknown): { where: s
   return { where: kind ?? 'message', channelId: null }
 }
 
+/**
+ * Where in the workspace the alert's resource opens: its path below `/w/<workspace>` (`/messages/<id>`),
+ * which holds no workspace id and so may sit in state. Undefined when the alert gave none.
+ */
+function hrefOf(resource: unknown): string | undefined {
+  const href = str(record(resource)?.href)
+  return href === undefined ? undefined : /^\/w\/[^/\s]+(\/[^\s]+)$/.exec(href)?.[1]
+}
+
 /** One alert of a page; undefined when it lacks what delivery needs (an id and a sender). */
 export function parseAlert(raw: unknown, arrivedAt: number, nameOf: (id: string) => string | null = () => null): OrchardAlert | undefined {
   const alert = record(raw)
@@ -88,6 +97,7 @@ export function parseAlert(raw: unknown, arrivedAt: number, nameOf: (id: string)
   const fullBody = typeof message.body === 'string' ? message.body : ''
   const body = clip(fullBody, MAX_BODY)
   const { where, channelId } = whereOf(message, alert.channel)
+  const href = hrefOf(alert.resource)
   return {
     id,
     sequence: whole(message.sequence) ?? 0,
@@ -102,6 +112,7 @@ export function parseAlert(raw: unknown, arrivedAt: number, nameOf: (id: string)
     channelId,
     sentAt: str(message.sent_at) ?? '',
     arrivedAt,
+    ...(href === undefined ? {} : { href }),
   }
 }
 
@@ -167,30 +178,8 @@ export function addToQueue(
   }
 }
 
-/**
- * The order of a queue: alerts the person marked "handle next" first (the latest marked first),
- * then the rest by sequence. Sorting by sequence alone would put a marked alert back in its place.
- */
-export function byQueueOrder(a: OrchardAlert, b: OrchardAlert): number {
-  const aNext = a.nextAt !== undefined
-  const bNext = b.nextAt !== undefined
-  if (aNext && bNext && a.nextAt !== b.nextAt) return (b.nextAt as number) - (a.nextAt as number)
-  if (aNext !== bNext) return aNext ? -1 : 1
-  return a.sequence - b.sequence
-}
-
-/** The alert was marked "handle next": it wakes the session whatever its classification said. */
-export const isMarkedNext = (alert: OrchardAlert): boolean => alert.nextAt !== undefined
-
-/**
- * The queue with `id` marked "handle next" at `now` and moved to the front. An id that is not
- * pending changes nothing. The mark makes it wake (see `wakeOf`), and `takeBatch` keeps it first.
- */
-export function markNext(queue: OrchardQueue, id: string, now: number): OrchardQueue {
-  if (!queue.items.some(item => item.id === id)) return queue
-  const items = queue.items.map(item => (item.id === id ? { ...item, nextAt: now } : item)).sort(byQueueOrder)
-  return { ...queue, items }
-}
+/** The order of a queue: by the server's sequence. */
+export const byQueueOrder = (a: OrchardAlert, b: OrchardAlert): number => a.sequence - b.sequence
 
 /**
  * Past MAX_QUEUE_ITEMS the oldest alerts that would not wake a session go, and how many is
@@ -280,9 +269,8 @@ const costOf = (item: OrchardAlert) => Math.min(item.body.length, MAX_BODY) + 40
  * later alert ahead of an earlier one never moves it past anything undelivered.
  */
 export function takeBatch(queue: OrchardQueue, skip: ReadonlySet<string> = new Set(), isWake?: IsWake): OrchardAlert[] {
-  // Marked alerts lead (the latest marked first), whatever order the queue was left in.
   const candidates = queue.items.filter(item => !skip.has(item.id)).sort(byQueueOrder)
-  const reserved = candidates.find(isMarkedNext) ?? (isWake === undefined ? undefined : candidates.find(isWake))
+  const reserved = isWake === undefined ? undefined : candidates.find(isWake)
   const chosen = new Set<string>()
   let chars = 0
   if (reserved !== undefined) {

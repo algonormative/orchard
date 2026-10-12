@@ -19,7 +19,7 @@ export const NOTIFY_USAGE =
 
 const channelWord = (ref: ChannelRef) => `#${ref.name}`
 
-/** A number of seconds for the batch window or the gap; the command and the pane's fields share it. */
+/** A number of seconds for the batch window or the gap. */
 export function parseRate(which: 'batch' | 'gap', text: string): Extract<NotifyCommand, { kind: 'rate' | 'error' }> {
   const max = which === 'batch' ? MAX_BATCH_SECONDS : MAX_GAP_SECONDS
   const value = text.trim()

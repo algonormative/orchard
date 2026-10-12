@@ -4,24 +4,22 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { OrchardAlert, OrchardBand, OrchardCounts, OrchardHeartbeat, OrchardPane, OrchardPaneThread, OrchardQueue, OrchardSettings, OrchardStatus, OrchardWorkspace } from '../types'
-import {
-  CONFIRM_MS,
-  SNOOZE_MS,
-  addHidden,
-  addSnooze,
-  hiddenKey,
-  neighbourOf,
-  nextDue,
-  parseActionHref,
-  parseHidden,
-  parseSnoozes,
-  revive,
-  selectedId,
-  shownThreads,
-  snoozeKey,
-  splitDue,
-} from './actions'
+import type {
+  OrchardActivityEntry,
+  OrchardAgents,
+  OrchardAlert,
+  OrchardBand,
+  OrchardCounts,
+  OrchardHeartbeat,
+  OrchardPaneDecision,
+  OrchardPaneTask,
+  OrchardPlugins,
+  OrchardQueue,
+  OrchardSettings,
+  OrchardStatus,
+  OrchardWorkspace,
+  OrchardWorkspaceActivity,
+} from '../types'
 import {
   ALERTS_TIMEOUT_MS,
   EMPTY_QUEUE,
@@ -29,9 +27,7 @@ import {
   WAIT_SECONDS,
   addToQueue,
   countsOf,
-  isMarkedNext,
   isQueueFull,
-  markNext,
   parseAlertsPage,
   parseStoreRecord,
   queueScope,
@@ -47,24 +43,53 @@ import type { AlertsPage } from './alerts'
 import { bandLine } from './band'
 import type { BandTone } from './band'
 import { CLAIM_RECHECK_MS, LEASE_BEAT_MS, LEASE_RECHECK_MS, RECENT_KEY, inflightKey, isHeldByOther, leaseKey, liveClaims, parseClaims, parseLease, parseRecent, planEviction, withoutIds } from './lease'
-import { DEFAULT_SETTINGS, addParticipation, classify, isLevel, parseParticipation, parseSettings, participationKey, settingsKey } from './classify'
+import { DEFAULT_SETTINGS, addParticipation, classify, parseParticipation, parseSettings, participationKey, settingsKey } from './classify'
 import { checkConn, parseProjectFile, PROJECT_FILE, readOptions, resolveIdentity } from './config'
 import type { Options, Parsed, ProjectOverrides } from './config'
 import { backoffDelay, connectOnce, createRuntime, track } from './connect'
 import type { Runtime } from './connect'
+import {
+  ACTIVITY_KEEP,
+  EMPTY_PLUGINS,
+  MAIN,
+  OTHERS_WINDOW_MS,
+  READ_FLOOR_MS,
+  anyMoving,
+  ackNote,
+  attachedPluginIds,
+  callNote,
+  declaredRoles,
+  inboundText,
+  nextAgentLook,
+  pruned,
+  pushActivity,
+  reconciled,
+  remember,
+  replyNote,
+  sendNote,
+  stateMarkers,
+  taskRows,
+  taskStoreIds,
+  touchesPlugins,
+  withLastAction,
+  withMain,
+  withSpawned,
+  withinWindow,
+} from './feed'
+import type { Names, Note } from './feed'
 import { frameData, frameMessages, newNonce } from './frame'
 import type { FrameMessage } from './frame'
 import { HISTORY_WINDOW, openDecisions, parseHistory, parseHistoryMessage, parentsOf, participationFrom, rootOf } from './history'
 import type { HistoryMessage } from './history'
 import { RETRY_ID_TTL_MS, createListenerState, deliveryNote, heldNotice, heldStatusLine, stopLoop, toFrameMessage } from './listener'
 import type { ListenerState, Loop } from './listener'
-import { NOTIFY_USAGE, applyNotify, describeSettings, parseNotify, parseRate } from './notify'
+import { NOTIFY_USAGE, applyNotify, describeSettings, parseNotify } from './notify'
 import { EXIT_CONNECTION, EXIT_OK, runOrchard, workspaceIdOf } from './orchard-cli'
 import type { CliInit, CliResult, Run } from './orchard-cli'
 import { renderPane } from './pane'
-import type { PaneHandlers, Table } from './pane'
+import type { PaneHandlers, PendingLine, Table } from './pane'
 import { same } from './same'
-import { buildThreads, isDecisionRelated, isReceipt, mergeAlerts, messageHref, snippetOf, taskHref, workspaceHref } from './threads'
+import { alertHref, isDecisionRelated, isReceipt, messageHref, snippetOf, stateHref, taskHref, workspaceHref } from './threads'
 import {
   RETRY_ADVICE,
   RETRY_OWN_ID,
@@ -93,14 +118,22 @@ const counts = atom({ plugin: 'orchard', key: 'counts' } as const, { unread: 0, 
 const generation = atom({ plugin: 'orchard', key: 'generation' } as const, 0)
 // Alerts fetched and not yet delivered. In state, not in a variable, so a hot reload keeps them.
 const queue = atom({ plugin: 'orchard', key: 'queue' } as const, EMPTY_QUEUE)
-// The notification settings (kept in $.store too) and what the /orchard pane draws.
+// The notification settings (kept in $.store too).
 const settings = atom({ plugin: 'orchard', key: 'settings' } as const, DEFAULT_SETTINGS)
-const pane = atom({ plugin: 'orchard', key: 'pane' } as const, null)
 // What the band draws, and the only thing it reads: written when the line itself changes, so the
 // band redraws only then. The heartbeat is the poll clock, which moves on every poll and is
 // read only by the pane's footer.
 const band = atom({ plugin: 'orchard', key: 'band' } as const, null)
 const heartbeat = atom({ plugin: 'orchard', key: 'heartbeat' } as const, { lastPollAt: null })
+// What this session's agents did in Orchard and were told (a ring of about 60), the table of its
+// agents (main and subagents), what happens in the workspace around it, and what the optional
+// plugins hold for it. Each is written only when its value changes. The pane, the status line and
+// the band draw from them.
+const activity = atom({ plugin: 'orchard', key: 'activity' } as const, [])
+const agents = atom({ plugin: 'orchard', key: 'agents' } as const, {})
+const EMPTY_WORKSPACE_ACTIVITY: OrchardWorkspaceActivity = { recentFromOthers: 0, openTasks: null }
+const workspaceActivity = atom({ plugin: 'orchard', key: 'workspaceActivity' } as const, EMPTY_WORKSPACE_ACTIVITY)
+const plugins = atom({ plugin: 'orchard', key: 'plugins' } as const, EMPTY_PLUGINS)
 
 const PANE = 'orchard'
 
@@ -113,10 +146,10 @@ const BACKPRESSURE_RECHECK_MS = 5_000
 /** How often a wake held back by a draft in the prompt box looks at the box again. */
 const HELD_RECHECK_MS = 15_000
 
-/** A receipt waits this long for a burst of them (one task action writes two) before the pane reads tasks again. */
+/** A receipt waits this long for a burst of them (one task action writes two) before the workspace is read again. */
 const WORK_DEBOUNCE_MS = 1_000
 
-/** While the pane is open, claimed tasks and open decisions are read again this often, whatever the alerts said. */
+/** While the pane is open, the tasks and plugins are read again this often, whatever the alerts said. */
 const SAFETY_REFRESH_MS = 60_000
 
 /** What every function below shares: the connection, the listener and the options. */
@@ -171,10 +204,31 @@ async function putCounts($: EngineInterface, change: (current: OrchardCounts) =>
   return true
 }
 
-async function putPane($: EngineInterface, change: (current: OrchardPane | null) => OrchardPane | null): Promise<boolean> {
-  const current = await read($, pane)
+async function putActivity($: EngineInterface, change: (current: OrchardActivityEntry[]) => OrchardActivityEntry[]): Promise<boolean> {
+  const current = await read($, activity)
   if (same(current, change(current))) return false
-  await update($, pane, change)
+  await update($, activity, change)
+  return true
+}
+
+async function putAgents($: EngineInterface, change: (current: OrchardAgents) => OrchardAgents): Promise<boolean> {
+  const current = await read($, agents)
+  if (same(current, change(current))) return false
+  await update($, agents, change)
+  return true
+}
+
+async function putWorkspaceActivity($: EngineInterface, change: (current: OrchardWorkspaceActivity) => OrchardWorkspaceActivity): Promise<boolean> {
+  const current = await read($, workspaceActivity)
+  if (same(current, change(current))) return false
+  await update($, workspaceActivity, change)
+  return true
+}
+
+async function putPlugins($: EngineInterface, change: (current: OrchardPlugins) => OrchardPlugins): Promise<boolean> {
+  const current = await read($, plugins)
+  if (same(current, change(current))) return false
+  await update($, plugins, change)
   return true
 }
 
@@ -210,6 +264,8 @@ async function putCountsShown($: EngineInterface, app: App, change: (current: Or
 }
 
 async function setStatus($: EngineInterface, app: App, next: OrchardStatus) {
+  // A disconnected session stays so: an attempt that was already under way must not paint it connected.
+  if (app.ls.isDisconnected && next.kind !== 'disconnected') return
   await putStatusShown($, app, () => next)
 }
 
@@ -239,6 +295,7 @@ function updateQueue($: EngineInterface, app: App, change: (held: OrchardQueue) 
 /** Records a failed attempt and arms the next retry. The alert listener calls this too. */
 export async function markOffline($: EngineInterface, app: App) {
   const { rt } = app
+  if (app.ls.isDisconnected) return
   rt.failures += 1
   rt.timer?.cancel()
   rt.timer = $.clock.after(backoffDelay(rt.failures), () => {
@@ -257,10 +314,15 @@ export async function reconnect($: EngineInterface, app: App) {
   rt.timer = undefined
   try {
     const outcome = await connectOnce(runner($), rt, here)
+    // Disconnected while the attempt ran: whatever it found is not wanted.
+    if (app.ls.isDisconnected) return
     if (outcome.kind === 'connected') {
       await putWorkspaceShown($, app, () => outcome.workspace)
       await setStatus($, app, connectedStatus(app.ls))
-      detach(startListener($, app))
+      // The tasks and plugins are read at once, from the answer the connection already has, once the listener is set up (both ask the host about decisions).
+      detach(startListener($, app).then(() => refreshWorkspace($, app, outcome.info)))
+      // A pane left open through a disconnect has lost its slow refresh: it starts again.
+      armSafety($, app)
     } else if (outcome.kind === 'offline') {
       await markOffline($, app)
     } else {
@@ -284,10 +346,12 @@ async function readProject($: EngineInterface, cwd: string): Promise<Parsed<Proj
   }
 }
 
-/** session.start (and `/orchard reconnect`): show the band, resolve who we are, make the first attempt. */
+/** session.start (and `/orchard reconnect`, `/orchard connect`): show the band, resolve who we are, make the first attempt. */
 async function start($: EngineInterface, app: App, cwd: string) {
   const { rt, ls, options } = app
   ls.isStarted = true
+  // Starting is connecting: a session the person disconnected listens again.
+  ls.isDisconnected = false
   // A fresh start: nothing of an earlier attempt or loop may fire after this.
   rt.timer?.cancel()
   rt.timer = undefined
@@ -295,6 +359,12 @@ async function start($: EngineInterface, app: App, cwd: string) {
   ls.leaseTimer?.cancel()
   ls.leaseTimer = undefined
   stopLoop(ls, 'superseded')
+  // What the workspace-wide counts are built from lives in memory: they begin again with it.
+  ls.othersAt = []
+  ls.lastOtherAt = undefined
+  ls.decayTimer?.cancel()
+  ls.decayTimer = undefined
+  await putWorkspaceActivity($, () => EMPTY_WORKSPACE_ACTIVITY)
   await setStatus($, app, { kind: 'connecting' })
 
   const conn = checkConn(options)
@@ -311,14 +381,18 @@ async function start($: EngineInterface, app: App, cwd: string) {
   if (!identity.ok) return setStatus($, app, { kind: 'error', message: identity.message })
 
   rt.current = { conn: conn.value, identity: identity.value }
+  const handle = identity.value.participantId
+  const now = await $.clock.now()
+  await putAgents($, held => withMain(held, { handle }, now))
+  // After a reload the table may hold live agents nothing is watching any more.
+  detach(armAgents($, app))
   await refreshBand($, app)
   await reconnect($, app)
 }
 
 // ---- the alert listener ----
 
-/** An alert marked "handle next" wakes whatever its classification says (the person asked for it). */
-const wakeOf = (ls: ListenerState) => (alert: OrchardAlert) => isMarkedNext(alert) || classify(alert, ls.settings, ls.participationSet) === 'wake'
+const wakeOf = (ls: ListenerState) => (alert: OrchardAlert) => classify(alert, ls.settings, ls.participationSet) === 'wake'
 
 /** The loop is the current one: not stopped, not replaced, and no other start took the generation. */
 async function isLive($: EngineInterface, ls: ListenerState, loop: Loop): Promise<boolean> {
@@ -336,15 +410,6 @@ async function syncCounts($: EngineInterface, app: App, needsYou?: number) {
   const held = await readQueue($, app)
   const pending = countsOf(held, wakeOf(app.ls))
   await putCountsShown($, app, prev => ({ ...prev, ...pending, ...(needsYou === undefined ? {} : { needsYou }) }))
-  await syncUnread($, held)
-}
-
-/** The pane's unread marks follow the queue: a thread is unread while an alert for it waits. */
-async function syncUnread($: EngineInterface, held: OrchardQueue) {
-  const waiting = new Set(held.items.map(a => a.id))
-  const current = await read($, pane)
-  if (current === null || current.state !== 'ready') return
-  await putPane($, p => (p === null ? p : { ...p, threads: p.threads.map(t => (t.isUnread === waiting.has(t.replyToId) ? t : { ...t, isUnread: waiting.has(t.replyToId) })) }))
 }
 
 async function storeGet($: EngineInterface, key: string): Promise<unknown> {
@@ -624,7 +689,7 @@ async function refreshDecisions($: EngineInterface, app: App, isForced = false) 
 export async function startListener($: EngineInterface, app: App) {
   const { rt, ls } = app
   const here = rt.current
-  if (here === undefined || ls.isStarting) return
+  if (here === undefined || ls.isStarting || ls.isDisconnected) return
   ls.isStarting = true
   try {
     stopLoop(ls, 'superseded')
@@ -722,6 +787,11 @@ async function prepare($: EngineInterface, app: App, loop: Loop): Promise<boolea
     await standDown($, app, loop)
     return false
   }
+  // Disconnected while the lease was being taken: give it back.
+  if (ls.isDisconnected) {
+    await releaseLease($, app)
+    return false
+  }
   await touchRecords($, app, endpoint, me)
 
   const stored = parseStoreRecord(await storeGet($, storeKey(endpoint, me)))
@@ -730,9 +800,6 @@ async function prepare($: EngineInterface, app: App, loop: Loop): Promise<boolea
   ls.participation = parseParticipation(await storeGet($, participationKey(endpoint, me)))
   ls.participationSet = new Set(ls.participation)
   if (stored !== undefined) ls.record = stored
-  ls.snoozes = parseSnoozes(await storeGet($, snoozeKey(endpoint, me)))
-  ls.hidden = parseHidden(await storeGet($, hiddenKey(endpoint, me)))
-  await syncAway($, app)
   // A queue left by another connection (a reload that changed the workspace or participant) is
   // not this one's: start empty, so none of its alerts is delivered or acknowledged here and
   // its cursor cannot become this connection's fetch cursor.
@@ -768,7 +835,6 @@ async function prepare($: EngineInterface, app: App, loop: Loop): Promise<boolea
     await applyWindow($, app, window.messages)
   }
   await syncCounts($, app)
-  await releaseDueSnoozes($, app)
   return true
 }
 
@@ -796,7 +862,6 @@ async function tick($: EngineInterface, app: App, loop: Loop) {
       return
     }
     await retryAcks($, app)
-    await releaseDueSnoozes($, app)
     // A queue full of alerts that all wake a session has nowhere to put more: leave them on the
     // server (the cursor does not move) and look again once a delivery has made room.
     if (isQueueFull(await readQueue($, app), wakeOf(ls))) {
@@ -871,18 +936,18 @@ async function absorb($: EngineInterface, app: App, loop: Loop, result: CliResul
   ls.fetchCursor = cursor
   ls.hasMore = page.hasMore && isAdvanced
   if (kept.length > 0) {
-    // A snoozed alert is not delivered yet but is not for the queue either: it comes back when its time does.
-    const known = [...ls.record.delivered, ...ls.snoozes.map(s => s.id)]
-    await updateQueue($, app, q => addToQueue(q, kept, cursor, known, wakeOf(ls)))
+    await updateQueue($, app, q => addToQueue(q, kept, cursor, ls.record.delivered, wakeOf(ls)))
     await syncCounts($, app)
     await armFlush($, app)
   }
   if (page.alerts.length > 0) {
     const owner = (await read($, workspace))?.ownerId ?? null
     detach(refreshDecisions($, app, page.alerts.some(a => isDecisionRelated(a, owner))))
-    // The pane takes the page as it came: no history call, and the claims are read once after a receipt.
-    await foldIntoPane($, app, page.alerts, owner)
-    if (page.alerts.some(a => isReceipt(a) || isDecisionRelated(a, owner))) scheduleWork($, app)
+    // The feed takes the page as it came: no history call, and the workspace is read again once after a receipt.
+    await noteArrivals($, app, page.alerts, kept)
+    // A task receipt waits for the floor between reads. So does a decision or the owner's answer, unless the pane is open and shows what waits on the owner.
+    if (page.alerts.some(a => isDecisionRelated(a, owner)) && ls.isPaneOpen) detach(askRefresh($, app, 'soon'))
+    else if (page.alerts.some(a => isReceipt(a) || isDecisionRelated(a, owner))) detach(askRefresh($, app, 'receipt'))
   }
 
   if (page.alerts.length > 0 && !isAdvanced) return 5_000
@@ -906,7 +971,7 @@ async function armFlush($: EngineInterface, app: App) {
   const { ls } = app
   ls.flushTimer?.cancel()
   ls.flushTimer = undefined
-  if (ls.isHeld) return
+  if (ls.isHeld || ls.isDisconnected) return
   // A wake is under way: it looks again when it ends, so what arrived meanwhile is not forgotten.
   if (ls.isDelivering) {
     ls.isRearmWanted = true
@@ -928,7 +993,7 @@ async function armFlush($: EngineInterface, app: App) {
 async function flush($: EngineInterface, app: App) {
   const { ls } = app
   ls.flushTimer = undefined
-  if (ls.isDelivering || ls.isHeld) return
+  if (ls.isDelivering || ls.isHeld || ls.isDisconnected) return
   ls.isDelivering = true
   let isRearming: boolean
   try {
@@ -948,6 +1013,7 @@ async function flush($: EngineInterface, app: App) {
  */
 async function wake($: EngineInterface, app: App): Promise<boolean> {
   const { ls } = app
+  if (ls.isDisconnected) return false
   const first = await readQueue($, app)
   const due = wakeDueAt(first, ls.settings, wakeOf(ls))
   if (due === null) return false
@@ -982,8 +1048,8 @@ async function wake($: EngineInterface, app: App): Promise<boolean> {
  * Hands `batch` to the prompt queue as a wake, claimed so it is delivered once: the ids are in
  * flight (this instance) and claimed in the store (another instance) from before the submit until
  * it resolves. `lastWakeAt` is set before the submit, so the gap runs from the attempt. A wake
- * (`wake`) and an interruption (`interruptWith`) both deliver through here. No await comes
- * between a caller choosing the batch and the ids being marked in flight.
+ * (`wake`) delivers through here. No await comes between a caller choosing the batch and the ids
+ * being marked in flight.
  */
 async function deliver($: EngineInterface, app: App, batch: readonly OrchardAlert[], q: OrchardQueue, now: number): Promise<boolean> {
   const { ls } = app
@@ -1159,7 +1225,7 @@ async function retryAcks($: EngineInterface, app: App) {
 
 // ---- notification settings ----
 
-/** Makes `next` the settings: memory, store, the pane's copy, and what they change in the queue. */
+/** Makes `next` the settings: memory, store, the settings atom, and what they change in the queue. */
 async function saveSettings($: EngineInterface, app: App, next: OrchardSettings) {
   const { rt, ls } = app
   const here = rt.current
@@ -1168,7 +1234,7 @@ async function saveSettings($: EngineInterface, app: App, next: OrchardSettings)
   await update($, settings, () => next)
   // What is already pending was classified under the old settings: what the new ones would drop
   // goes (as it would have at the door), what changes between wake and quiet is counted afresh.
-  await updateQueue($, app, held => retainInQueue(held, alert => isMarkedNext(alert) || classify(alert, next, ls.participationSet) !== 'drop'))
+  await updateQueue($, app, held => retainInQueue(held, alert => classify(alert, next, ls.participationSet) !== 'drop'))
   await syncCounts($, app)
   await armFlush($, app)
 }
@@ -1194,38 +1260,206 @@ async function runNotify($: EngineInterface, app: App, rest: string): Promise<st
   return describeSettings(ls.settings, ls.channels)
 }
 
-// ---- the pane, kept current ----
+// ---- what this session's agents do in Orchard, and what the workspace does around it ----
 
-/** Folds a page of alerts into the pane's threads. Nothing is written when the threads come out as they were. */
-async function foldIntoPane($: EngineInterface, app: App, alerts: readonly OrchardAlert[], ownerId: string | null) {
-  const here = app.rt.current
-  const current = await read($, pane)
-  if (here === undefined || current === null || current.state !== 'ready') return
-  const queued = new Set((await readQueue($, app)).items.map(a => a.id))
-  const live = { me: here.identity.participantId, ownerId, endpoint: here.conn.endpoint, queued }
-  await putPane($, p => (p === null ? p : { ...p, threads: mergeAlerts(p.threads, alerts, live) }))
+/** The participants this session acts as. The connection's own; a subagent that gets a handle of its own belongs here too. */
+function myHandles(app: App): string[] {
+  const me = app.rt.current?.identity.participantId
+  return me === undefined ? [] : [me]
 }
 
-/** Asks for one refresh of claimed tasks and open decisions a moment from now; more asks in that moment are the same one. */
-function scheduleWork($: EngineInterface, app: App) {
+/** The participant an agent of this session acts as. */
+function handleOf(app: App, _agentId: string): string {
+  return app.rt.current?.identity.participantId ?? ''
+}
+
+/** Names for the sentences of the feed: the directory's where it knows one, the id where it does not. */
+function namesOf(app: App): Names {
   const { ls } = app
-  if (!ls.isPaneOpen) return
-  ls.workTimer?.cancel()
-  ls.workTimer = $.clock.after(WORK_DEBOUNCE_MS, () => {
-    ls.workTimer = undefined
-    detach(refreshWork($, app))
+  return { person: id => ls.names.get(id) ?? id, channel: id => ls.channels.find(c => c.id === id)?.name ?? id }
+}
+
+/** Adds an entry to the feed; an outbound one is also the agent's last action. The text is scrubbed of the connection's secrets: a message body can carry anything. */
+async function recordActivity($: EngineInterface, app: App, entry: OrchardActivityEntry) {
+  const text = clean(app, entry.text)
+  const written = { ...entry, text }
+  await putActivity($, feed => pushActivity(feed, written, ACTIVITY_KEEP))
+  if (entry.direction === 'out') await putAgents($, held => withLastAction(held, entry.agentId, text))
+}
+
+/** What a note's reference opens as. */
+function refHref(endpoint: string, ref: NonNullable<Note['ref']>): string | null {
+  return ref.kind === 'message' ? messageHref(endpoint, ref.id) : ref.kind === 'task' ? taskHref(endpoint, ref.storeId, ref.id) : stateHref(endpoint, ref.id)
+}
+
+/**
+ * One thing an agent just did in Orchard, into the feed. It follows a call that already succeeded, so
+ * nothing that goes wrong here may reach the model: the feed is a courtesy. A write to the roles,
+ * state markers or tasks asks for the workspace to be read again soon.
+ */
+async function logOutbound(
+  $: EngineInterface,
+  app: App,
+  agentId: string | undefined,
+  make: (names: Names) => Note | undefined,
+  wanted: { people?: readonly string[]; channel?: string } = {},
+) {
+  try {
+    const { ls, rt } = app
+    const here = rt.current
+    if (here === undefined) return
+    if (wanted.people !== undefined && wanted.people.length > 0) await ensureNames($, app, wanted.people)
+    if (wanted.channel !== undefined && !ls.channels.some(c => c.id === wanted.channel)) await loadChannels($, app)
+    const note = make(namesOf(app))
+    if (note === undefined) return
+    const actor = agentId ?? MAIN
+    const href = note.ref === undefined ? null : refHref(here.conn.endpoint, note.ref)
+    await recordActivity($, app, {
+      at: await $.clock.now(),
+      agentId: actor,
+      handle: handleOf(app, actor),
+      direction: 'out',
+      kind: note.kind,
+      text: note.text,
+      ...(href === null ? {} : { href }),
+    })
+    if (touchesPlugins(note)) detach(askRefresh($, app, 'soon'))
+  } catch {
+    // The call went through; its entry in the feed is a detail.
+  }
+}
+
+/**
+ * A page of alerts, into the feed and the counts. An alert already counted (fetched again after a
+ * restart, or already delivered) changes nothing. The workspace's activity counts every alert from
+ * anyone but this session's handles, task receipts aside (those echo task actions, this session's
+ * own included); the feed logs the ones that reach this session.
+ */
+async function noteArrivals($: EngineInterface, app: App, alerts: readonly OrchardAlert[], kept: readonly OrchardAlert[]) {
+  const { ls, rt } = app
+  const here = rt.current
+  if (here === undefined) return
+  const done = new Set([...ls.seenAlerts, ...ls.record.delivered])
+  const fresh = alerts.filter(a => !done.has(a.id))
+  if (fresh.length === 0) return
+  ls.seenAlerts = remember(ls.seenAlerts, fresh.map(a => a.id))
+  const mine = new Set(myHandles(app))
+  const others = fresh.filter(a => !mine.has(a.senderId) && !isReceipt(a))
+  await followOthers($, app, others.map(a => a.arrivedAt))
+  const reaching = new Set(kept.map(a => a.id))
+  for (const alert of others) {
+    if (!reaching.has(alert.id)) continue
+    const href = alertHref(here.conn.endpoint, alert)
+    await recordActivity($, app, {
+      at: alert.arrivedAt,
+      agentId: MAIN,
+      handle: handleOf(app, MAIN),
+      direction: 'in',
+      kind: alert.kind,
+      text: inboundText(alert),
+      ...(href === null ? {} : { href }),
+    })
+  }
+}
+
+/**
+ * The count of alerts from others in the last ten minutes follows the arrivals, and falls by itself
+ * as they leave the window: one timer, set for when the oldest does. The timer is replaced before
+ * anything is awaited, so two calls together leave one.
+ */
+async function followOthers($: EngineInterface, app: App, arrivals: readonly number[]) {
+  const { ls } = app
+  const now = await $.clock.now()
+  ls.othersAt = withinWindow([...ls.othersAt, ...arrivals], now)
+  if (arrivals.length > 0) ls.lastOtherAt = Math.max(ls.lastOtherAt ?? 0, ...arrivals)
+  ls.decayTimer?.cancel()
+  ls.decayTimer = undefined
+  const oldest = ls.othersAt[0]
+  if (oldest !== undefined && !ls.isDisconnected) {
+    ls.decayTimer = $.clock.after(Math.max(0, oldest + OTHERS_WINDOW_MS - now), () => {
+      ls.decayTimer = undefined
+      detach(followOthers($, app, []))
+    })
+  }
+  const recentFromOthers = ls.othersAt.length
+  const lastAt = ls.lastOtherAt
+  await putWorkspaceActivity($, current => ({ ...current, recentFromOthers, ...(lastAt === undefined ? {} : { lastAt }) }))
+}
+
+// ---- the agents of this session ----
+
+/**
+ * Looks at `$.agent.list()` and lets the table follow it; also lets agents that ended long enough
+ * ago go. The list is asked for only when an agent is live (or `isForced`: a turn of an agent the
+ * table may not know ended), so a session with none costs nothing.
+ */
+async function lookAtAgents($: EngineInterface, app: App, isForced = false) {
+  const { ls } = app
+  ls.agentTimer?.cancel()
+  ls.agentTimer = undefined
+  try {
+    const listed = isForced || anyMoving(await read($, agents)) ? await $.agent.list() : undefined
+    const now = await $.clock.now()
+    await putAgents($, held => (listed === undefined ? pruned(held, now) : reconciled(held, listed, now)))
+  } catch {
+    // A list that will not come is asked for again at the next look.
+  }
+  await armAgents($, app)
+}
+
+/** Arms the one timer that looks at the agents again; replaced before anything more is awaited, so there is never a second. */
+async function armAgents($: EngineInterface, app: App) {
+  const { ls } = app
+  const held = await read($, agents)
+  const now = await $.clock.now()
+  ls.agentTimer?.cancel()
+  ls.agentTimer = undefined
+  const delay = nextAgentLook(held, now)
+  if (delay === null) return
+  ls.agentTimer = $.clock.after(delay, () => {
+    detach(lookAtAgents($, app))
   })
 }
 
-/** The slow refresh that catches what no alert announced. It runs only while the pane is open and re-arms itself. */
+/** The main loop's turn began or ended. */
+async function setMainStatus($: EngineInterface, app: App, status: 'running' | 'idle') {
+  const now = await $.clock.now()
+  await putAgents($, held => withMain(held, { status }, now))
+}
+
+// ---- tasks and plugins, kept current ----
+
+/**
+ * Asks for the workspace to be read again (tasks, decisions, roles, state markers). A burst of asks
+ * is one read, a second after the first. A `receipt` also waits until READ_FLOOR_MS after the last
+ * read; a `soon` ask (this session's own write, a decision answered) does not. The check for a timer
+ * already waiting and the setting of the new one come with nothing awaited between them.
+ */
+async function askRefresh($: EngineInterface, app: App, kind: 'receipt' | 'soon') {
+  const { ls } = app
+  if (ls.isDisconnected) return
+  const now = await $.clock.now()
+  const floor = kind === 'receipt' && ls.workReadAt !== undefined ? ls.workReadAt + READ_FLOOR_MS - now : 0
+  const due = now + Math.max(WORK_DEBOUNCE_MS, floor)
+  if (ls.workTimer !== undefined && ls.workDueAt !== undefined && ls.workDueAt <= due) return
+  ls.workTimer?.cancel()
+  ls.workDueAt = due
+  ls.workTimer = $.clock.after(due - now, () => {
+    ls.workTimer = undefined
+    ls.workDueAt = undefined
+    detach(refreshWorkspace($, app))
+  })
+}
+
+/** The slow safety refresh that catches what no alert announced. It runs only while the pane is open and re-arms itself. */
 function armSafety($: EngineInterface, app: App) {
   const { ls } = app
   ls.safetyTimer?.cancel()
   ls.safetyTimer = undefined
-  if (!ls.isPaneOpen) return
+  if (!ls.isPaneOpen || ls.isDisconnected) return
   ls.safetyTimer = $.clock.after(SAFETY_REFRESH_MS, () => {
     ls.safetyTimer = undefined
-    detach(refreshWork($, app).finally(() => armSafety($, app)))
+    detach(refreshWorkspace($, app).finally(() => armSafety($, app)))
   })
 }
 
@@ -1243,37 +1477,53 @@ async function paneOpened($: EngineInterface, app: App) {
 function paneClosed(app: App) {
   const { ls } = app
   ls.isPaneOpen = false
-  ls.workTimer?.cancel()
-  ls.workTimer = undefined
   ls.safetyTimer?.cancel()
   ls.safetyTimer = undefined
 }
 
-/** In-progress tasks assigned to this participant, in each attached task store. Undefined when the workspace could not say. */
-async function readClaims($: EngineInterface, app: App, storeIds: readonly string[]): Promise<OrchardPane['tasks'] | undefined> {
-  const here = app.rt.current
-  if (here === undefined) return undefined
-  const me = here.identity.participantId
-  const tasks: OrchardPane['tasks'] = []
-  for (const storeId of storeIds.slice(0, 4)) {
-    const listed = await tool($, app.rt, 'tasks_list', { store_id: storeId, status: 'in_progress' })
-    if (listed.exitCode !== EXIT_OK) return undefined
-    const rows = (listed.json as { tasks?: unknown } | undefined)?.tasks
-    for (const row of (Array.isArray(rows) ? rows : []) as Record<string, unknown>[]) {
-      if (row.assignee !== me || typeof row.id !== 'string') continue
-      tasks.push({
+const asTask = (endpoint: string, storeId: string, row: Record<string, unknown>): OrchardPaneTask | undefined =>
+  typeof row.id !== 'string'
+    ? undefined
+    : {
         id: row.id,
         title: snippetOf(typeof row.title === 'string' ? row.title : row.id),
         status: (typeof row.status === 'string' ? row.status : 'in_progress').replace(/_/g, ' '),
-        href: taskHref(here.conn.endpoint, storeId, row.id),
-      })
+        href: taskHref(endpoint, storeId, row.id),
+      }
+
+/** In-progress tasks assigned to one of `handles`, in each attached task store. Undefined when the workspace could not say. */
+async function readClaims($: EngineInterface, app: App, storeIds: readonly string[], handles: readonly string[]): Promise<OrchardPaneTask[] | undefined> {
+  const here = app.rt.current
+  if (here === undefined) return undefined
+  const tasks: OrchardPaneTask[] = []
+  for (const storeId of storeIds.slice(0, 4)) {
+    const listed = await tool($, app.rt, 'tasks_list', { store_id: storeId, status: 'in_progress' })
+    const rows = listed.exitCode === EXIT_OK ? taskRows(listed.json) : undefined
+    if (rows === undefined) return undefined
+    for (const row of rows) {
+      if (typeof row.assignee !== 'string' || !handles.includes(row.assignee)) continue
+      const task = asTask(here.conn.endpoint, storeId, row)
+      if (task !== undefined) tasks.push(task)
     }
   }
   return tasks
 }
 
+/** Open tasks across the task stores. Null with no store; undefined when the workspace could not say. */
+async function countOpenTasks($: EngineInterface, app: App, storeIds: readonly string[]): Promise<number | null | undefined> {
+  if (storeIds.length === 0) return null
+  let total = 0
+  for (const storeId of storeIds.slice(0, 4)) {
+    const listed = await tool($, app.rt, 'tasks_list', { store_id: storeId, status: 'open' })
+    const rows = listed.exitCode === EXIT_OK ? taskRows(listed.json) : undefined
+    if (rows === undefined) return undefined
+    total += rows.length
+  }
+  return total
+}
+
 /** The decisions this participant raised that the owner has not answered, as the pane lists them. Undefined when the workspace could not say. */
-async function readOpenDecisions($: EngineInterface, app: App): Promise<OrchardPane['decisions'] | undefined> {
+async function readOpenDecisions($: EngineInterface, app: App): Promise<OrchardPaneDecision[] | undefined> {
   const { ls } = app
   const here = app.rt.current
   if (here === undefined) return undefined
@@ -1296,27 +1546,46 @@ async function readOpenDecisions($: EngineInterface, app: App): Promise<OrchardP
 }
 
 /**
- * Reads the pane's claimed tasks and waiting-on-you decisions again, and the band's needs-you count
- * with them. One at a time; a request that comes in meanwhile runs once more when this one ends.
+ * Reads the workspace for what the status line, the band and the pane show: the open tasks, this
+ * session's claimed tasks, the decisions it waits on, and (for the plugins that are attached) the
+ * roles and state markers of its handles. A part the workspace could not say keeps its last value.
+ * One at a time; a request that comes in meanwhile runs once more when this one ends. `known` is a
+ * `workspace_info` answer the caller already holds.
  */
-async function refreshWork($: EngineInterface, app: App) {
-  const { ls } = app
+async function refreshWorkspace($: EngineInterface, app: App, known?: unknown) {
+  const { ls, rt } = app
+  const here = rt.current
+  if (here === undefined || ls.isDisconnected) return
   if (ls.isRefreshingWork) {
     ls.isWorkDirty = true
     return
   }
   ls.isRefreshingWork = true
   try {
-    if ((await read($, pane))?.state !== 'ready') return
-    let storeIds = ls.storeIds
-    if (storeIds === undefined) {
-      const info = await tool($, app.rt, 'workspace_info', {})
-      storeIds = storeIdsOf(info)
-      ls.storeIds = storeIds
+    ls.workReadAt = await $.clock.now()
+    let info = known
+    if (info === undefined) {
+      const answer = await tool($, rt, 'workspace_info', {})
+      if (answer.exitCode !== EXIT_OK) return
+      info = answer.json
     }
-    const tasks = await readClaims($, app, storeIds)
+    const handles = myHandles(app)
+    const storeIds = taskStoreIds(info)
+    const attached = attachedPluginIds(info)
+    const open = await countOpenTasks($, app, storeIds)
+    const claimed = await readClaims($, app, storeIds, handles)
     const decisions = await readOpenDecisions($, app)
-    await putPane($, p => (p === null ? p : { ...p, ...(tasks === undefined ? {} : { tasks }), ...(decisions === undefined ? {} : { decisions }) }))
+    const roles = attached.includes('roles') ? await readRoles($, app, handles) : []
+    const claimedIds = new Set((claimed ?? []).map(t => t.id))
+    const states = attached.includes('state') && claimed !== undefined ? await readStates($, app, handles, claimedIds) : attached.includes('state') ? undefined : []
+    await putWorkspaceActivity($, current => ({ ...current, ...(open === undefined ? {} : { openTasks: open }) }))
+    await putPlugins($, current => ({
+      attached,
+      roles: roles ?? current.roles,
+      states: states ?? current.states,
+      decisions: decisions ?? current.decisions,
+      tasks: claimed ?? current.tasks,
+    }))
     if (decisions !== undefined) await syncCounts($, app, decisions.length)
   } catch {
     // The next receipt, refresh or the slow timer tries again.
@@ -1324,85 +1593,27 @@ async function refreshWork($: EngineInterface, app: App) {
     ls.isRefreshingWork = false
     if (ls.isWorkDirty) {
       ls.isWorkDirty = false
-      scheduleWork($, app)
+      // An ask that came in while this read ran has been through its floor already.
+      detach(askRefresh($, app, 'soon'))
     }
   }
 }
 
-function storeIdsOf(info: CliResult): string[] {
-  const stores = (info.json as { workspace?: { task_stores?: unknown } } | undefined)?.workspace?.task_stores
-  return (Array.isArray(stores) ? (stores as { id?: unknown }[]) : []).flatMap(s => (typeof s.id === 'string' ? [s.id] : []))
+/** The roles `handles` declared (Roles plugin). Undefined when the workspace could not say. */
+async function readRoles($: EngineInterface, app: App, handles: readonly string[]): Promise<OrchardPlugins['roles'] | undefined> {
+  const result = await tool($, app.rt, 'plugin_call', { plugin_id: 'roles', operation: 'roles_list', arguments: {} })
+  return result.exitCode === EXIT_OK ? declaredRoles(result.json, handles) : undefined
+}
+
+/** The state markers `handles` created or that sit on a task they claimed (State plugin). Undefined when the workspace could not say. */
+async function readStates($: EngineInterface, app: App, handles: readonly string[], claimedIds: ReadonlySet<string>): Promise<OrchardPlugins['states'] | undefined> {
+  const here = app.rt.current
+  if (here === undefined) return undefined
+  const result = await tool($, app.rt, 'state_list', {})
+  return result.exitCode === EXIT_OK ? stateMarkers(result.json, handles, claimedIds, id => stateHref(here.conn.endpoint, id)) : undefined
 }
 
 // ---- the pane ----
-
-const EMPTY_PANE: OrchardPane = {
-  state: 'loading',
-  error: null,
-  threads: [],
-  decisions: [],
-  tasks: [],
-  channels: [],
-  isOlderShown: false,
-  expanded: [],
-  hidden: [],
-  snoozed: [],
-  confirm: null,
-}
-
-/** Reads everything the pane lists. The band's counts and the participation set are refreshed from the same window. */
-async function loadPane($: EngineInterface, app: App) {
-  const { rt, ls } = app
-  const here = rt.current
-  const show = (change: Partial<OrchardPane>) => putPane($, p => ({ ...(p ?? EMPTY_PANE), ...change }))
-  if (here === undefined) return show({ state: 'failed', error: 'Orchard is not connected' })
-  await show({ state: 'loading', error: null })
-
-  const me = here.identity.participantId
-  const [window, info, channels, people] = await Promise.all([
-    readWindow($, app),
-    tool($, rt, 'workspace_info', {}),
-    loadChannels($, app),
-    tool($, rt, 'mail_participants', {}),
-  ])
-  if (window.kind !== 'ok') {
-    return show({ state: 'failed', error: window.kind === 'offline' ? 'The workspace is not reachable' : window.message })
-  }
-  if (people.exitCode === EXIT_OK) {
-    const list = (people.json as { participants?: unknown } | undefined)?.participants
-    for (const p of Array.isArray(list) ? (list as { id?: unknown; name?: unknown }[]) : []) {
-      if (typeof p.id === 'string' && typeof p.name === 'string') ls.names.set(p.id, p.name)
-    }
-  }
-  await applyWindow($, app, window.messages)
-
-  const { endpoint } = here.conn
-  const owner = (await read($, workspace))?.ownerId ?? 'owner'
-  const pendingIds = new Map((await readQueue($, app)).items.map(item => [item.id, item.reasons] as const))
-  const threads = buildThreads(window.messages, { me, ownerId: owner, endpoint, names: ls.names, pending: pendingIds })
-  const decisions = openDecisions(window.messages, me, owner).map(m => ({
-    id: m.id,
-    snippet: snippetOf(m.body),
-    sentAt: m.sentAt,
-    href: messageHref(endpoint, m.id),
-  }))
-
-  // Claimed tasks: in progress and assigned to this participant, in each attached task store.
-  ls.storeIds = storeIdsOf(info)
-  const tasks = (await readClaims($, app, ls.storeIds)) ?? []
-  await show({ state: 'ready', error: null, threads, decisions, tasks, channels })
-}
-
-/** Reply…: a draft in the prompt box for the person to finish. Never submits. */
-async function fillReply($: EngineInterface, thread: OrchardPaneThread) {
-  const isEmpty = (await readBox($)).trim() === ''
-  const draft = `${isEmpty ? '' : '\n\n'}Reply on Orchard to message ${thread.replyToId} (orchard_reply): `
-  try {
-    await $.prompt.fill({ text: draft, mode: 'append' })
-  } catch {
-    // A refused fill leaves the box as it was.
-  }
-}
 
 /**
  * Opens an address of Orchard's browser UI in the person's browser. Only the loopback address on
@@ -1417,236 +1628,47 @@ async function openInOrchard($: EngineInterface, href: string) {
   }
 }
 
-// ---- the pane's quick actions ----
-
-/** What the pane hides: the removed and the snoozed ids, mirrored from memory (and `$.store`) into `$.state`. */
-async function syncAway($: EngineInterface, app: App) {
-  const { ls } = app
-  const snoozed = ls.snoozes.map(s => ({ id: s.id, until: s.until }))
-  await update($, pane, p => ({ ...(p ?? EMPTY_PANE), hidden: ls.hidden, snoozed }))
-}
-
-/** Asks "remove? ✓ ✗" (or "interrupt Claude?") of one row, or with null stops asking. It lapses after CONFIRM_MS. */
-async function setConfirm($: EngineInterface, app: App, confirm: OrchardPane['confirm']) {
-  const { ls } = app
-  ls.confirmTimer?.cancel()
-  ls.confirmTimer = undefined
-  if (confirm !== null && confirm !== undefined) {
-    ls.confirmTimer = $.clock.after(CONFIRM_MS, () => {
-      ls.confirmTimer = undefined
-      detach(update($, pane, p => (p?.confirm?.id === confirm.id && p.confirm.verb === confirm.verb ? { ...p, confirm: null } : (p ?? EMPTY_PANE))))
-    })
-  }
-  await update($, pane, p => ({ ...(p ?? EMPTY_PANE), confirm: confirm ?? null }))
-}
-
 /**
- * Remove: acknowledge the message on the server, take it out of the pending queue and note it in the
- * delivered record (so it is never delivered, whatever the server sends again), and hide it in the pane.
+ * Disconnect: this session stops listening, lets go of the lease and wakes for nothing, until
+ * Connect. Everything that would call the workspace on its own goes: the loop and its watchdog, the
+ * retry, the flush and hold timers, the refresh timers. Memory only; the next session connects as usual.
  */
-async function removeMessage($: EngineInterface, app: App, id: string) {
+async function disconnect($: EngineInterface, app: App) {
   const { rt, ls } = app
-  const here = rt.current
-  if (here === undefined) return
-  if (ls.inFlight.has(id)) return
-  await updateQueue($, app, q => removeFromQueue(q, [id], 0))
-  ls.record = recordDelivery(ls.record, [id], ls.record.cursor)
-  ls.hidden = addHidden(ls.hidden, id)
-  const { endpoint } = here.conn
-  const me = here.identity.participantId
-  await storeSet($, app, storeKey(endpoint, me), ls.record)
-  await storeSet($, app, hiddenKey(endpoint, me), ls.hidden)
-  await syncAway($, app)
-  await syncCounts($, app)
-  detach(sendAck($, app, { ids: [id], requestId: `orchard-ack-${crypto.randomUUID()}` }))
-  await armFlush($, app)
+  if (ls.isDisconnected) return
+  ls.isDisconnected = true
+  stopLoop(ls, 'disconnected')
+  rt.timer?.cancel()
+  rt.timer = undefined
+  for (const timer of [ls.watchdog, ls.leaseTimer, ls.flushTimer, ls.workTimer, ls.safetyTimer, ls.decayTimer]) timer?.cancel()
+  ls.watchdog = undefined
+  ls.leaseTimer = undefined
+  ls.flushTimer = undefined
+  ls.workTimer = undefined
+  ls.workDueAt = undefined
+  ls.safetyTimer = undefined
+  ls.decayTimer = undefined
+  ls.isRearmWanted = false
+  ls.othersAt = []
+  ls.lastOtherAt = undefined
+  endHold($, app)
+  await releaseLease($, app)
+  await putWorkspaceActivity($, () => EMPTY_WORKSPACE_ACTIVITY)
+  await setStatus($, app, { kind: 'disconnected' })
 }
 
-async function saveSnoozes($: EngineInterface, app: App) {
-  const here = app.rt.current
-  if (here !== undefined) await storeSet($, app, snoozeKey(here.conn.endpoint, here.identity.participantId), app.ls.snoozes)
-  await syncAway($, app)
-  await armSnoozeTimer($, app)
-}
-
-/** Snooze: out of the queue and the pane for SNOOZE_MS; the alert is kept in `$.store` and comes back as a new one. */
-async function snoozeMessage($: EngineInterface, app: App, id: string) {
-  const { ls } = app
-  if (ls.inFlight.has(id)) return
-  const alert = (await readQueue($, app)).items.find(a => a.id === id)
-  if (alert === undefined) return
-  const until = (await $.clock.now()) + SNOOZE_MS
-  ls.snoozes = addSnooze(ls.snoozes, alert, until)
-  await updateQueue($, app, q => removeFromQueue(q, [id], 0))
-  await saveSnoozes($, app)
-  await syncCounts($, app)
-}
-
-/** Arms the one timer that brings the earliest snoozed alert back; replaces any earlier. */
-async function armSnoozeTimer($: EngineInterface, app: App) {
-  const { ls } = app
-  ls.snoozeTimer?.cancel()
-  ls.snoozeTimer = undefined
-  const due = nextDue(ls.snoozes)
-  if (due === null) return
-  const now = await $.clock.now()
-  ls.snoozeTimer = $.clock.after(Math.max(0, due - now), () => {
-    ls.snoozeTimer = undefined
-    detach(releaseDueSnoozes($, app))
-  })
-}
-
-/**
- * Snoozed alerts whose time has come go back into the queue as new ones (their batch window runs
- * from now) and are classified again under the settings in force: one that no longer passes is let go.
- */
-async function releaseDueSnoozes($: EngineInterface, app: App) {
-  const { ls } = app
-  if (ls.snoozes.length === 0) return
-  const now = await $.clock.now()
-  const { due, rest } = splitDue(ls.snoozes, now)
-  if (due.length === 0) return armSnoozeTimer($, app)
-  ls.snoozes = rest
-  const back = due.map(s => revive(s, now)).filter(a => classify(a, ls.settings, ls.participationSet) !== 'drop')
-  if (back.length > 0) await updateQueue($, app, q => addToQueue(q, back, q.cursor, ls.record.delivered, wakeOf(ls)))
-  await saveSnoozes($, app)
-  await syncCounts($, app)
-  await armFlush($, app)
-}
-
-/** Handle next: first in the queue and a wake even if it was quiet. It still waits for the batch window and the minimum gap. */
-async function handleNext($: EngineInterface, app: App, id: string) {
-  const now = await $.clock.now()
-  await updateQueue($, app, q => markNext(q, id, now))
-  await syncCounts($, app)
-  await armFlush($, app)
-}
-
-/**
- * Interrupt: abort the running turn (as Esc does), if there is one, then deliver this message at
- * once as its own wake, past the batch window and the minimum gap (`lastWakeAt` is set as for any
- * wake). The id is in flight from the first step, so a wake that fires meanwhile cannot take it too.
- */
-async function interruptWith($: EngineInterface, app: App, id: string) {
-  const { ls } = app
-  const pending = await readQueue($, app)
-  if (!pending.items.some(a => a.id === id) || (await blockedIds($, app, pending)).has(id)) return
-  ls.inFlight.add(id)
-  try {
-    if (ls.turnId !== undefined) {
-      const turnId = ls.turnId
-      try {
-        await $.turn.abort({ turnId })
-      } catch {
-        // The turn ended on its own meanwhile; the message goes the same way.
-      }
-    }
-    const q = await readQueue($, app)
-    const alert = q.items.find(a => a.id === id)
-    if (alert === undefined) return
-    await deliver($, app, [alert], q, await $.clock.now())
-  } finally {
-    ls.inFlight.delete(id)
-  }
-}
-
-/** Moves the selection to the thread next to `id` before `id` leaves the list, if `id` is the selected one. */
-async function selectNeighbour($: EngineInterface, shown: readonly OrchardPaneThread[], id: string) {
-  const current = await read($, pane)
-  if (selectedId(shown, current?.selected) !== id) return
-  const to = neighbourOf(shown, id)
-  if (to !== null) await update($, pane, p => ({ ...(p ?? EMPTY_PANE), selected: to }))
-}
-
-function toggleMore($: EngineInterface, id: string) {
-  return update($, pane, p => {
-    const open = p?.expanded ?? []
-    return { ...(p ?? EMPTY_PANE), expanded: open.includes(id) ? open.filter(x => x !== id) : [...open, id] }
-  })
-}
-
-/** A press on one of the pane's actions. Anything that is not one of ours, or names nothing known, does nothing. */
-async function paneAct($: EngineInterface, app: App, href: string) {
-  const action = parseActionHref(href)
-  if (action === undefined) return
-  const { verb, id } = action
-  const current = await read($, pane)
-  const thread = current?.threads.find(t => t.replyToId === id)
-  const shown = shownThreads(current)
-  const isPending = (await readQueue($, app)).items.some(a => a.id === id)
-  switch (verb) {
-    case 'refresh':
-      return loadPane($, app)
-    case 'open-workspace': {
-      const here = app.rt.current
-      return here === undefined ? undefined : openInOrchard($, workspaceHref(here.conn.endpoint) ?? '')
-    }
-    case 'answer':
-      return openInOrchard($, current?.decisions.find(d => d.id === id)?.href ?? '')
-    case 'open-thread':
-      return openInOrchard($, thread?.href ?? '')
-    case 'reply':
-      return thread === undefined ? undefined : fillReply($, thread)
-    case 'select-prev':
-    case 'select-next': {
-      // One step through the listed threads, newest first; it stops at either end.
-      const at = shown.findIndex(t => t.replyToId === selectedId(shown, current?.selected))
-      const to = shown[Math.max(0, Math.min(shown.length - 1, at + (verb === 'select-next' ? 1 : -1)))]
-      if (to === undefined) return
-      await update($, pane, p => ({ ...(p ?? EMPTY_PANE), selected: to.replyToId }))
-      return
-    }
-    case 'select': {
-      // A press on a row selects it; a second press on the row already selected opens or closes its detail.
-      if (!shown.some(t => t.replyToId === id)) return
-      if (current?.selected === id) return toggleMore($, id)
-      await update($, pane, p => ({ ...(p ?? EMPTY_PANE), selected: id }))
-      return
-    }
-    case 'more':
-      await update($, pane, p => {
-        const open = p?.expanded ?? []
-        return { ...(p ?? EMPTY_PANE), expanded: open.includes(id) ? open.filter(x => x !== id) : [...open, id] }
-      })
-      return
-    case 'remove':
-      return setConfirm($, app, { verb: 'remove', id })
-    case 'interrupt':
-      return isPending ? setConfirm($, app, { verb: 'interrupt', id }) : undefined
-    case 'cancel':
-      return setConfirm($, app, null)
-    case 'remove-yes':
-    case 'interrupt-yes': {
-      // A yes counts only as the answer to the question that is on screen.
-      const asked = verb === 'remove-yes' ? 'remove' : 'interrupt'
-      if (current?.confirm?.id !== id || current.confirm.verb !== asked) return
-      await setConfirm($, app, null)
-      await selectNeighbour($, shown, id)
-      return asked === 'remove' ? removeMessage($, app, id) : interruptWith($, app, id)
-    }
-    case 'snooze':
-      if (isPending) await selectNeighbour($, shown, id)
-      return snoozeMessage($, app, id)
-    case 'next':
-      return handleNext($, app, id)
-  }
+/** Connect: a disconnected session starts again as at session start. False when it was not disconnected. */
+async function connect($: EngineInterface, app: App): Promise<boolean> {
+  if (!app.ls.isDisconnected) return false
+  detach(start($, app, await $.session.cwd()))
+  return true
 }
 
 function paneHandlers($: EngineInterface, app: App): PaneHandlers {
   return {
-    act: href => detach(paneAct($, app, href)),
-    toggleOlder: () => detach(update($, pane, p => ({ ...(p ?? EMPTY_PANE), isOlderShown: p?.isOlderShown !== true }))),
     open: href => detach(openInOrchard($, href)),
-    setLevel: (channelId, level) => {
-      if (level !== 'inherit' && !isLevel(level)) return
-      const channel = channelId === null ? null : (app.ls.channels.find(c => c.id === channelId) ?? { id: channelId, name: channelId })
-      detach(saveSettings($, app, applyNotify(app.ls.settings, { kind: 'level', channel, level })))
-    },
-    setRate: (which, text) => {
-      const command = parseRate(which, text)
-      if (command.kind === 'rate') detach(saveSettings($, app, applyNotify(app.ls.settings, command)))
-      else $.ui.toast(`Orchard: ${command.message}`)
-    },
+    disconnect: () => detach(disconnect($, app)),
+    connect: () => detach(connect($, app)),
   }
 }
 
@@ -1718,17 +1740,25 @@ async function sendMessage(
   return { result, id: messageIdOf(result) }
 }
 
-async function answerSend($: EngineInterface, app: App, input: unknown): Promise<ToolAnswer> {
+/** The destination's participant, when it is a direct message: the name to look up for the feed. */
+const directTo = (destination: { kind: string; id?: string }): string[] => (destination.kind === 'direct' && destination.id !== undefined ? [destination.id] : [])
+
+async function answerSend($: EngineInterface, app: App, input: unknown, agentId: string | undefined): Promise<ToolAnswer> {
   const parsed = parseSend(input)
   if (!parsed.ok) return denied(parsed.message)
-  const { result, id } = await sendMessage($, app, 'send', parsed.value, { destination: parsed.value.destination, body: parsed.value.body })
+  const { destination, body } = parsed.value
+  const { result, id } = await sendMessage($, app, 'send', parsed.value, { destination, body })
   if (result.exitCode !== EXIT_OK) return failureAnswer(app, result)
   // A message this participant starts is a thread it is in.
   if (id !== undefined) await noteParticipation($, app, [id])
+  await logOutbound($, app, agentId, names => sendNote(destination, body, names, id), {
+    people: directTo(destination),
+    ...(destination.kind === 'channel' ? { channel: destination.id } : {}),
+  })
   return { result: `Sent${id === undefined ? '' : `. message_id: ${id}`}` }
 }
 
-async function answerReply($: EngineInterface, app: App, input: unknown): Promise<ToolAnswer> {
+async function answerReply($: EngineInterface, app: App, input: unknown, agentId: string | undefined): Promise<ToolAnswer> {
   const parsed = parseReply(input)
   if (!parsed.ok) return denied(parsed.message)
   const me = app.rt.current?.identity.participantId ?? ''
@@ -1751,10 +1781,11 @@ async function answerReply($: EngineInterface, app: App, input: unknown): Promis
   const root = rootOf(target.id, parents)
   const thread = window.messages.filter(m => rootOf(m.id, parents) === root).map(m => m.id)
   await noteParticipation($, app, id === undefined ? thread : [...thread, id])
+  await logOutbound($, app, agentId, names => replyNote(names.person(target.senderId), parsed.value.body, id, target.id), { people: [target.senderId] })
   return { result: `Replied${id === undefined ? '' : `. message_id: ${id}`}` }
 }
 
-async function answerAck($: EngineInterface, app: App, input: unknown): Promise<ToolAnswer> {
+async function answerAck($: EngineInterface, app: App, input: unknown, agentId: string | undefined): Promise<ToolAnswer> {
   const parsed = parseAck(input)
   if (!parsed.ok) return denied(parsed.message)
   const me = app.rt.current?.identity.participantId ?? ''
@@ -1765,6 +1796,7 @@ async function answerAck($: EngineInterface, app: App, input: unknown): Promise<
     return cli($, app.rt, args, { scrub: [requestId] })
   })
   if (result.exitCode !== EXIT_OK) return failureAnswer(app, result)
+  await logOutbound($, app, agentId, () => ackNote(parsed.value.messageIds.length))
   return { result: `Acknowledged ${parsed.value.messageIds.length} message${parsed.value.messageIds.length === 1 ? '' : 's'}` }
 }
 
@@ -1795,7 +1827,7 @@ async function answerHistory($: EngineInterface, app: App, input: unknown): Prom
   return { result: clean(app, text) }
 }
 
-async function answerCall($: EngineInterface, app: App, input: unknown): Promise<ToolAnswer> {
+async function answerCall($: EngineInterface, app: App, input: unknown, agentId: string | undefined): Promise<ToolAnswer> {
   const parsed = parseCall(input)
   if (!parsed.ok) return denied(parsed.message)
   const { tool: name } = parsed.value
@@ -1816,22 +1848,31 @@ async function answerCall($: EngineInterface, app: App, input: unknown): Promise
     const id = messageIdOf(result)
     if (id !== undefined) await noteParticipation($, app, [id])
   }
+  if (isMutating || name === 'plugin_call') {
+    const destination = name === 'mail_send' ? (args.destination as { kind: string; id?: string } | undefined) : undefined
+    await logOutbound($, app, agentId, names => callNote(name, args, result.json, names), {
+      people: destination === undefined ? [] : directTo(destination),
+      ...(destination?.kind === 'channel' && destination.id !== undefined ? { channel: destination.id } : {}),
+    })
+  }
   return { result: clean(app, frameData(`orchard_call ${name}`, withoutJoiningPrompt(result.json ?? null), newNonce())) }
 }
 
-async function answerTool($: EngineInterface, app: App, name: string, input: unknown): Promise<ToolAnswer> {
+async function answerTool($: EngineInterface, app: App, name: string, input: unknown, agentId: string | undefined): Promise<ToolAnswer> {
+  // A disconnected session is out of the workspace: nothing the model asks reaches it.
+  if (app.ls.isDisconnected) return denied('this session is disconnected from Orchard; /orchard connect puts it back')
   try {
     switch (name) {
       case 'orchard_send':
-        return await answerSend($, app, input)
+        return await answerSend($, app, input, agentId)
       case 'orchard_reply':
-        return await answerReply($, app, input)
+        return await answerReply($, app, input, agentId)
       case 'orchard_ack':
-        return await answerAck($, app, input)
+        return await answerAck($, app, input, agentId)
       case 'orchard_history':
         return await answerHistory($, app, input)
       default:
-        return await answerCall($, app, input)
+        return await answerCall($, app, input, agentId)
     }
   } catch {
     return denied('the request could not be completed')
@@ -1847,6 +1888,8 @@ async function answerTool($: EngineInterface, app: App, name: string, input: unk
  */
 async function ensureListening($: EngineInterface, app: App) {
   const { rt, ls } = app
+  // The person disconnected this session: only Connect (or a new session) listens again.
+  if (ls.isDisconnected) return
   if (!ls.isStarted) {
     ls.isStarted = true
     let cwd: string
@@ -1871,8 +1914,8 @@ async function registerSurface($: EngineInterface) {
   try {
     await $.command.register({
       name: 'orchard',
-      description: 'Open the Orchard pane; /orchard notify to set notification levels; /orchard reconnect',
-      argumentHint: '[notify … | reconnect]',
+      description: 'Open the Orchard pane; /orchard notify to set notification levels; /orchard disconnect, connect or reconnect',
+      argumentHint: '[notify … | disconnect | connect | reconnect]',
     })
   } catch {
     // The listener works without the command.
@@ -1916,6 +1959,8 @@ export const register: Register = (on, options) => {
     if (!isPersonsPrompt(e.origin)) return next(e)
 
     const { ls } = app
+    // A disconnected session delivers nothing and acknowledges nothing; what is queued waits for Connect.
+    if (ls.isDisconnected) return next(e)
     const pending = await readQueue($, app)
     const batch = takeBatch(pending, await blockedIds($, app, pending), wakeOf(ls))
     if (batch.length === 0) return next(e)
@@ -1938,14 +1983,32 @@ export const register: Register = (on, options) => {
     }
   }).catch(($, e, next) => next(e)) // a hook that fails never costs the person their prompt
 
-  // The running main-loop turn, for "interrupt". A subagent's run raises no turn.start.
+  // Subagents: their descriptions arrive with the spawn. The hook only watches: it never denies or changes one.
+  on('agent.spawn', async ($, e, next) => {
+    const result = await next(e)
+    if (result.agentId !== undefined) {
+      const { agentId } = result
+      try {
+        const now = await $.clock.now()
+        await putAgents($, held => withSpawned(held, { agentId, description: e.description, type: e.subagentType }, now))
+        await armAgents($, app)
+      } catch {
+        // The table is a courtesy; the subagent started.
+      }
+    }
+    return result
+  })
+
+  // A subagent's run raises no turn.start: this one is the main loop's.
   on('turn.start', async ($, e, next) => {
-    app.ls.turnId = e.turnId
+    detach(setMainStatus($, app, 'running'))
     return next(e)
   }).catch(($, e, next) => next(e))
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined && app.ls.turnId === e.turnId) app.ls.turnId = undefined
+    // A turn that ends in a subagent's loop: look at the list now, in case it was the agent's last.
+    if (e.agentId === undefined) detach(setMainStatus($, app, 'idle'))
+    else detach(lookAtAgents($, app, true))
     detach(ensureListening($, app))
     return next(e)
   })
@@ -1956,20 +2019,29 @@ export const register: Register = (on, options) => {
       detach(start($, app, await $.session.cwd()))
       return { text: 'Reconnecting to Orchard…' }
     }
+    if (word === 'disconnect') {
+      if (app.ls.isDisconnected) return { text: 'Orchard is already disconnected. /orchard connect listens again.' }
+      await disconnect($, app)
+      return { text: 'Disconnected from Orchard: not listening, nothing wakes this session. /orchard connect puts it back.' }
+    }
+    if (word === 'connect') {
+      return { text: (await connect($, app)) ? 'Connecting to Orchard…' : 'Orchard is already connected (/orchard reconnect starts over).' }
+    }
     if (word === 'notify') return { text: await runNotify($, app, rest.join(' ')) }
-    if (word !== '') return { text: 'Usage: /orchard [notify … | reconnect]' }
+    if (word !== '') return { text: 'Usage: /orchard [notify … | disconnect | connect | reconnect]' }
 
-    detach(loadPane($, app))
+    // The tasks and plugins are read as the pane opens, so it does not draw what was true a while ago.
+    detach(refreshWorkspace($, app))
     const opened = await $.ui.open({ id: PANE, title: 'Orchard', focus: true })
     await paneOpened($, app)
     return { text: opened.isPlaced ? 'Orchard pane opened.' : 'Orchard pane: widen the terminal to see it.' }
   })
 
-  on('tool.call', { tool: 'mcp__orchard__orchard_send' }, ($, e) => answerTool($, app, 'orchard_send', e))
-  on('tool.call', { tool: 'mcp__orchard__orchard_reply' }, ($, e) => answerTool($, app, 'orchard_reply', e))
-  on('tool.call', { tool: 'mcp__orchard__orchard_ack' }, ($, e) => answerTool($, app, 'orchard_ack', e))
-  on('tool.call', { tool: 'mcp__orchard__orchard_history' }, ($, e) => answerTool($, app, 'orchard_history', e))
-  on('tool.call', { tool: 'mcp__orchard__orchard_call' }, ($, e) => answerTool($, app, 'orchard_call', e))
+  on('tool.call', { tool: 'mcp__orchard__orchard_send' }, ($, e) => answerTool($, app, 'orchard_send', e, e.agentId))
+  on('tool.call', { tool: 'mcp__orchard__orchard_reply' }, ($, e) => answerTool($, app, 'orchard_reply', e, e.agentId))
+  on('tool.call', { tool: 'mcp__orchard__orchard_ack' }, ($, e) => answerTool($, app, 'orchard_ack', e, e.agentId))
+  on('tool.call', { tool: 'mcp__orchard__orchard_history' }, ($, e) => answerTool($, app, 'orchard_history', e, e.agentId))
+  on('tool.call', { tool: 'mcp__orchard__orchard_call' }, ($, e) => answerTool($, app, 'orchard_call', e, e.agentId))
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     paneClosed(app)
@@ -1977,7 +2049,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    // Drawn means open: from here the pane's tasks and decisions are kept fresh (memory only; a draw may not write state).
+    // Drawn means open: from here the tasks and plugins are kept fresh (memory only; a draw may not write state).
     if (!app.ls.isPaneOpen) {
       app.ls.isPaneOpen = true
       armSafety($, app)
@@ -1989,28 +2061,26 @@ export const register: Register = (on, options) => {
       Button: t.Button,
       // The terminal draws no Svg: it gets the same structure as Text.
       Svg: e.surface !== 'terminal' && 'Svg' in t ? t.Svg : undefined,
-      // The mobile app draws no field (its table answers a stub): there the settings are text.
-      Input: e.surface !== 'mobile' && 'Input' in t ? t.Input : undefined,
-      Select: e.surface !== 'mobile' && 'Select' in t ? t.Select : undefined,
     }
     const held = await readQueue($, app)
+    const pending: PendingLine[] = held.items.slice(0, 5).map(a => ({ sender: a.senderName ?? a.senderId, snippet: snippetOf(a.body) }))
     return renderPane(
       table,
       {
         participantId: app.rt.current?.identity.participantId ?? '',
         workspaceName: (await read($, workspace))?.name ?? '',
         workspaceHref: app.rt.current === undefined ? null : workspaceHref(app.rt.current.conn.endpoint),
-        pane: await read($, pane),
-        settings: await read($, settings),
         status: await read($, status),
         counts: await read($, counts),
+        pending,
+        plugins: await read($, plugins),
+        agents: await read($, agents),
+        activity: await read($, activity),
         // Read (the atom, to be drawn again when it moves) and shown from memory, which is never behind it.
         lastPollAt: app.ls.lastPollAt ?? (await read($, heartbeat)).lastPollAt,
         nowMs: await $.clock.now(),
         columns: typeof e.props.bodyColumns === 'number' ? e.props.bodyColumns : undefined,
         surface: e.surface,
-        pendingIds: new Set(held.items.map(a => a.id)),
-        nextIds: new Set(held.items.filter(isMarkedNext).map(a => a.id)),
       },
       paneHandlers($, app),
     )
