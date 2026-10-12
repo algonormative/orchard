@@ -187,6 +187,8 @@ const KEYS: Partial<Record<Verb, (id: string) => string>> = {
   reply: id => `detail-${id}`,
   'open-thread': id => `detail-${id}`,
 }
-export function act(ui: { press: (target: { key: string; link: { href: string } }) => Promise<unknown> }, verb: Verb, id = '-') {
+export async function act(ui: { press: (target: any) => Promise<unknown>; find: (q: any) => Promise<unknown> }, verb: Verb, id = '-') {
+  // On a surface with a pointer the row verbs are glyph Buttons over the card; elsewhere, links in the dim line.
+  if (await ui.find({ type: 'Button', key: `btn-${verb}-${id}` })) return ui.press({ key: `btn-${verb}-${id}` })
   return ui.press({ key: (KEYS[verb] ?? ((x: string) => `actions-${x}`))(id), link: { href: actionHref(verb, id) } })
 }

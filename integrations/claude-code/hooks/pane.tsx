@@ -7,8 +7,8 @@
 import type { Elements } from 'claude-code'
 
 import type { OrchardCounts, OrchardPane, OrchardPaneThread, OrchardSettings, OrchardStatus } from '../types'
-import { answerLink, detailActions, headerActions, rowActions, snoozedLine } from './actions'
-import type { ActionLine } from './actions'
+import { actionHref, answerLink, detailActions, headerActions, rowActions, snoozedLine } from './actions'
+import type { ActionLine, Verb } from './actions'
 import { LEVELS } from './classify'
 import { describeSettings } from './notify'
 import { relativeTime } from './threads'
@@ -73,6 +73,9 @@ function openButton(ui: Table, id: string, href: string, on: PaneHandlers, label
   return <Button key={`open-${id}`} label={label} onPress={() => on.open(href)} />
 }
 
+/** The overlay covers the time the card draws; no theme token is the card's green, 'subtle' is the closest neutral. */
+const OVERLAY_BG = 'subtle'
+
 const CHIP_TOKEN = { listening: 'success', waiting: 'warning', offline: 'error', error: 'error', shared: undefined, connecting: undefined } as const
 
 export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
@@ -86,8 +89,10 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   const snoozed = snoozedLine(pane?.snoozed ?? [])
   const pendingIds = view.pendingIds ?? new Set<string>()
   const nextIds = view.nextIds ?? new Set<string>()
-  // Only a surface with a pointer can hover; the terminal shows the line dimmed, the phone always.
+  // Only a surface with a pointer can hover; the terminal and the phone show the dim line below the card, always.
   const isHoverSurface = view.surface === 'desktop' || view.surface === 'vscode'
+  // The overlay needs both a pointer and a drawn card to sit on.
+  const isOverlay = isHoverSurface && Svg !== undefined
   const isOlderShown = pane?.isOlderShown === true
   const expanded = new Set(pane?.expanded ?? [])
   const shown = isOlderShown ? threads : threads.slice(0, VISIBLE_THREADS)
@@ -134,23 +139,57 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   )
 
   /**
-   * The row's quick actions. On a surface with a pointer the line is drawn `display: none` and
-   * revealed while the pointer is over the row (the row's Box is the hover scope); it stays up
-   * while the row asks "remove?" or is open, or the question would vanish with the pointer.
+   * The row's quick actions as the dim Markdown line below the card: the terminal and the phone, which
+   * have no pointer to hover (the phone has no absolute overlay worth trusting either), so it is simply there.
    */
-  const actionsOf = (thread: OrchardPaneThread, isOpen: boolean) => {
+  const actionLine = (thread: OrchardPaneThread, isOpen: boolean) => {
     const key = thread.replyToId
     const confirm = pane?.confirm?.id === key ? pane.confirm.verb : null
-    const line = links(
-      `actions-${key}`,
-      rowActions({ id: key, isPending: pendingIds.has(key), isNext: nextIds.has(key), isOpen, confirm }),
-      confirm === null,
+    return (
+      <Box>
+        {links(`actions-${key}`, rowActions({ id: key, isPending: pendingIds.has(key), isNext: nextIds.has(key), isOpen, confirm }), confirm === null)}
+      </Box>
     )
-    if (!isHoverSurface || isOpen || confirm !== null) return <Box>{line}</Box>
+  }
+
+  /** One single-glyph control of the overlay: a plain Button, answered by the same `act` the links use. */
+  const glyph = (verb: Verb, id: string, label: string) => (
+    <Button key={`btn-${verb}-${id}`} plain label={label} onPress={() => on.act(actionHref(verb, id))} />
+  )
+
+  /**
+   * The row's quick actions on a surface with a pointer: a compact group of glyph Buttons laid over the
+   * card's top-right corner, where the relative time is drawn, so nothing in the flow moves. Drawn
+   * `display: none` and revealed while the pointer is over the row (the row's keyed Box is the hover scope).
+   * While the row asks "remove?" / "interrupt?" it is not hover-gated, or the question would vanish with the pointer.
+   */
+  const overlayOf = (thread: OrchardPaneThread, isOpen: boolean) => {
+    const id = thread.replyToId
+    const confirm = pane?.confirm?.id === id ? pane.confirm.verb : null
+    const isPending = pendingIds.has(id)
+    const common = { position: 'absolute', top: 0, right: 1, backgroundColor: OVERLAY_BG, flexDirection: 'row' } as const
+    if (confirm !== null) {
+      return (
+        <Box {...common}>
+          <Text>{confirm === 'remove' ? 'remove? ' : 'interrupt? '}</Text>
+          {glyph(confirm === 'remove' ? 'remove-yes' : 'interrupt-yes', id, '✓')}
+          <Text> </Text>
+          {glyph('cancel', id, '✗')}
+        </Box>
+      )
+    }
     // No key on this Box: a keyed Box is its own hover scope, and a Box that is not drawn cannot be hovered.
     return (
-      <Box display="none" hover={{ display: 'flex' }}>
-        {line}
+      <Box {...common} display="none" hover={{ display: 'flex' }}>
+        {glyph('remove', id, '✕')}
+        {isPending ? <Text> </Text> : null}
+        {isPending ? glyph('snooze', id, '◷') : null}
+        {isPending ? <Text> </Text> : null}
+        {isPending ? (nextIds.has(id) ? <Text>⇡✓</Text> : glyph('next', id, '⇡')) : null}
+        {isPending ? <Text> </Text> : null}
+        {isPending ? glyph('interrupt', id, '⚡') : null}
+        <Text> </Text>
+        {glyph('more', id, isOpen ? '▴' : '▾')}
       </Box>
     )
   }
@@ -160,20 +199,29 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
     const isOpen = expanded.has(key)
     const { last } = thread
     const age = relativeTime(last.sentAt, nowMs) + (thread.size > 1 ? ` · ${thread.size}` : '')
+    const card =
+      Svg === undefined ? (
+        <Box flexDirection="column">
+          <Text dimColor={!thread.isUnread} bold={thread.isUnread}>
+            {thread.isUnread ? '● ' : '  '}
+            {last.senderName} [{thread.reason}] · {age}
+          </Text>
+          <Text dimColor>{'  '}{cut(last.snippet, 80)}</Text>
+        </Box>
+      ) : (
+        picture(`thread-svg-${key}`, rowSvg(w, thread, nowMs), `${last.senderName}, ${thread.reason}${thread.isUnread ? ', new' : ''}: ${last.snippet}`, rowHeight(thread))
+      )
     return (
       <Box key={`thread-${key}`} flexDirection="column">
-        {Svg === undefined ? (
-          <Box flexDirection="column">
-            <Text dimColor={!thread.isUnread} bold={thread.isUnread}>
-              {thread.isUnread ? '● ' : '  '}
-              {last.senderName} [{thread.reason}] · {age}
-            </Text>
-            <Text dimColor>{'  '}{cut(last.snippet, 80)}</Text>
+        {isOverlay ? (
+          <Box position="relative">
+            {card}
+            {overlayOf(thread, isOpen)}
           </Box>
         ) : (
-          picture(`thread-svg-${key}`, rowSvg(w, thread, nowMs), `${last.senderName}, ${thread.reason}${thread.isUnread ? ', new' : ''}: ${last.snippet}`, rowHeight(thread))
+          card
         )}
-        {actionsOf(thread, isOpen)}
+        {isOverlay ? null : actionLine(thread, isOpen)}
         {isOpen ? (
           <Box flexDirection="column">
             <Text>{last.snippet}</Text>

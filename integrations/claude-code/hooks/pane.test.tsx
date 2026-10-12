@@ -98,8 +98,14 @@ test('/orchard opens the pane and lists the inbox, what waits on the owner and t
     for (const id of ['m1', 'm3', 'd1']) expect(readable.some(t => t.includes(id))).toBe(false)
 
     // each thread has its action line, and the header its own
-    expect(String((await ui.find({ type: 'Markdown', key: 'actions-m1' }))?.props.text)).toContain('remove')
-    expect(await ui.find({ type: 'Markdown', key: 'actions-m3' })).toBeDefined()
+    // (the dim Markdown line, or on a surface with a pointer the glyph buttons over the card)
+    if (surface === 'desktop' || surface === 'vscode') {
+      expect((await ui.find({ type: 'Button', key: 'btn-remove-m1' }))?.props.label).toBe('✕')
+      expect(await ui.find({ type: 'Button', key: 'btn-remove-m3' })).toBeDefined()
+    } else {
+      expect(String((await ui.find({ type: 'Markdown', key: 'actions-m1' }))?.props.text)).toContain('remove')
+      expect(await ui.find({ type: 'Markdown', key: 'actions-m3' })).toBeDefined()
+    }
     // one "Open in Orchard" for the whole pane, in the header; a Markdown link answered by the mod, never a
     // Link (the surfaces draw one only for https and http://localhost, and Orchard turns the latter away)
     expect(await ui.findAll({ type: 'Link' })).toEqual([])
@@ -425,7 +431,7 @@ test('the newest five threads show; the rest fold behind a button that opens the
 
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
-    const replies = async () => (await ui.findAll({ type: 'Markdown' })).filter(m => String(m.key).startsWith('actions-'))
+    const replies = async () => [...(await ui.findAll({ type: 'Markdown' })).filter(m => String(m.key).startsWith('actions-')), ...(await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('btn-remove-'))]
     expect(await replies(), surface).toHaveLength(5)
     expect((await ui.find({ type: 'Button', key: 'older-threads' }))?.props.label).toBe('▸ 2 older threads')
     expect((await drawnText(ui)).join('\n')).not.toContain('Peer message number 1')
