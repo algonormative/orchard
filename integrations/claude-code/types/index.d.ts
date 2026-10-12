@@ -122,7 +122,7 @@ export type OrchardActivityEntry = {
   /** The participant id the entry belongs to: who acted (out) or who was written to (in). */
   handle: string
   direction: 'in' | 'out'
-  /** `send`, `reply`, `ack`, `task`, `role`, `state`, `call` for what the agent did; the alert's own kind (`message`, `decision`, ...) for what it was told. */
+  /** `send`, `reply`, `ack`, `task`, `role`, `state`, `call` for what the agent did; `handle` for the mod's note that a subagent shares the session's participant; the alert's own kind (`message`, `decision`, ...) for what it was told. */
   kind: string
   text: string
   /** Where it opens in the browser UI. */
@@ -140,8 +140,15 @@ export type OrchardAgent = {
   status: OrchardAgentStatus
   startedAt: number
   endedAt?: number
-  /** The participant it acts as in Orchard. The main loop's is the session's; a subagent has one once it uses Orchard. */
+  /**
+   * The participant it acts as in Orchard. The main loop's is the session's; a subagent has a pooled one
+   * (`<session's id>.sub1` ...) once it uses Orchard, and keeps showing it after it ends.
+   */
   handle?: string
+  /** The handle is one the agent joined as itself, through the Orchard CLI. The mod registered nothing for it and its tool calls do not act as it. */
+  observed?: true
+  /** The agent acts as the session's own participant: no pooled handle was free, or setting one up failed. */
+  sharesBase?: true
   /** What it last did in Orchard, as the activity feed words it. */
   lastAction?: string
 }

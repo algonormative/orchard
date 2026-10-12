@@ -59,6 +59,8 @@ export type Fake = {
   opened: string[]
   /** Whether the participant is registered: `resume` fails with not-found until a `join`. */
   isKnown: boolean
+  /** The other participants a `join` registered (a subagent's handle); `resume` of any id not here, and not the participant itself, fails with not-found. */
+  registered: Set<string>
   workspaceName: string
   ownerId: string
   /** Every message in the workspace, oldest first. `push` adds to it. */
@@ -92,10 +94,10 @@ export type Fake = {
 
 const json = (value: unknown): Reply => ({ exitCode: 0, stdout: JSON.stringify(value, null, 2) })
 
-const NOT_REGISTERED: Reply = {
+const notRegistered = (id: string): Reply => ({
   exitCode: 4,
-  stderr: `Orchard agent: MCP tool "mail_resume" returned an error: {"error":"not found: registered participant ${ME}"}\n`,
-}
+  stderr: `Orchard agent: MCP tool "mail_resume" returned an error: {"error":"not found: registered participant ${id}"}\n`,
+})
 
 function flag(argv: readonly string[], name: string): string | undefined {
   const at = argv.indexOf(name)
@@ -126,11 +128,17 @@ function alertsPage(fake: Fake, argv: readonly string[]): { exitCode: 0; stdout:
 async function answer(fake: Fake, call: Call, sleep: (ms: number) => Promise<void>, signal: () => Promise<void>): Promise<Reply> {
   const argv = call.argv
   if (call.cmd === 'resume') {
-    return fake.isKnown ? json({ participant: { id: ME, registered: true } }) : NOT_REGISTERED
+    const id = flag(argv, '--participant-id') ?? ME
+    return (id === ME ? fake.isKnown : fake.registered.has(id)) ? json({ participant: { id, registered: true } }) : notRegistered(id)
   }
   if (call.cmd === 'join') {
-    fake.isKnown = true
-    return json({ participant: { id: ME, registered: true } })
+    const id = flag(argv, '--participant-id') ?? ME
+    if (id === ME) fake.isKnown = true
+    else {
+      fake.registered.add(id)
+      fake.participants.push({ id, name: flag(argv, '--name') ?? id })
+    }
+    return json({ participant: { id, registered: true } })
   }
   if (call.cmd === 'alerts') {
     const wait = Number(flag(argv, '--wait') ?? 0)
@@ -261,6 +269,7 @@ export function fakeOrchard(on: On, now: () => number, sleep: (ms: number) => Pr
     calls: [],
     opened: [],
     isKnown: true,
+    registered: new Set(),
     workspaceName: 'Fruit Stand',
     ownerId: 'owner',
     messages: [],
@@ -354,16 +363,22 @@ export function stubFiles(on: On, files: Record<string, string>): { reads: strin
 }
 
 /** The plugin's `$.store` in memory, readable and writable by the test; `writes` records every set. */
-export function stubStore(on: On, entries: Record<string, unknown> = {}): { data: Map<string, unknown>; writes: { key: string; value: unknown }[]; fail: { set: boolean } } {
+export function stubStore(
+  on: On,
+  entries: Record<string, unknown> = {},
+): { data: Map<string, unknown>; writes: { key: string; value: unknown }[]; fail: { set: boolean }; after: { set: ((key: string) => void) | undefined } } {
   const data = new Map<string, unknown>(Object.entries(entries))
   const writes: { key: string; value: unknown }[] = []
   const clone = (value: unknown) => (value === undefined ? undefined : (JSON.parse(JSON.stringify(value)) as unknown))
   on('store.get', async (_$, e) => ({ value: clone(data.get(e.key)) }) as never)
   const fail = { set: false }
+  // Runs right after a write lands: another session writing in the same moment.
+  const after: { set: ((key: string) => void) | undefined } = { set: undefined }
   on('store.set', async (_$, e) => {
     if (fail.set) throw new Error('the store is full')
     data.set(e.key, clone(e.value))
     writes.push({ key: e.key, value: clone(e.value) })
+    after.set?.(e.key)
     return { value: undefined } as never
   })
   on('store.delete', async (_$, e) => {
@@ -371,7 +386,7 @@ export function stubStore(on: On, entries: Record<string, unknown> = {}): { data
     return { value: undefined } as never
   })
   on('store.keys', async () => ({ value: [...data.keys()] }) as never)
-  return { data, writes, fail }
+  return { data, writes, fail, after }
 }
 
 /** How `$.ui.notify` answers in a test: sent by a channel, or refused for the reason named (`denied`: it rejects). */

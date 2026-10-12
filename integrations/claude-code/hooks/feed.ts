@@ -211,6 +211,8 @@ export function withSpawned(held: OrchardAgents, spawn: { agentId: string; descr
       status: 'running',
       startedAt: have?.startedAt ?? now,
       ...(have?.handle === undefined ? {} : { handle: have.handle }),
+      ...(have?.observed === undefined ? {} : { observed: have.observed }),
+      ...(have?.sharesBase === undefined ? {} : { sharesBase: have.sharesBase }),
       ...(have?.lastAction === undefined ? {} : { lastAction: have.lastAction }),
     },
   }
@@ -259,6 +261,14 @@ export function reconciled(held: OrchardAgents, listed: readonly ListedAgent[], 
 export function withLastAction(held: OrchardAgents, agentId: string, text: string): OrchardAgents {
   const agent = held[agentId]
   return agent === undefined ? held : { ...held, [agentId]: { ...agent, lastAction: text } }
+}
+
+/** The table with `as` as the participant `agentId` acts as (flags it did not get are cleared); unchanged when the table does not know the agent. */
+export function withHandle(held: OrchardAgents, agentId: string, as: { handle: string; observed?: true; sharesBase?: true }): OrchardAgents {
+  const agent = held[agentId]
+  if (agent === undefined) return held
+  const { observed: _observed, sharesBase: _sharesBase, ...rest } = agent
+  return { ...held, [agentId]: { ...rest, handle: as.handle, ...(as.observed === undefined ? {} : { observed: true as const }), ...(as.sharesBase === undefined ? {} : { sharesBase: true as const }) } }
 }
 
 /** Some subagent is in a state that changes by itself. */

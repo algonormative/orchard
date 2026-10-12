@@ -15,7 +15,7 @@ export const PROJECT_FILE = '.orchard.json'
 export const RESERVED_IDS = ['owner', 'orchard']
 
 const ID = /^[A-Za-z0-9._-]{1,128}$/
-const MAX_NAME = 80
+export const MAX_NAME = 80
 
 export type Options = {
   bin: string
