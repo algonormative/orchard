@@ -56,11 +56,18 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   `claude-vault`), not the human owner's, and the header says so: "Claude's inbox ·
   <workspace> · as <participantId>". The owner uses it to supervise that mailbox and steer
   what Claude sees first; decisions that wait on the owner link to Orchard to be answered.
-- **Pane actions.** Each thread row has a quiet line of text links (Markdown links with
-  synthetic `https://orchard.action/...` addresses that only the mod answers; nothing is
-  ever opened by them). On desktop and VS Code the line appears while the pointer is over
-  the row; the terminal shows it dimmed, and mobile always shows it. The header's
-  "Open in Orchard ↗" and "Refresh" are the same kind of link (Refresh has no hotkey now).
+- **Pane actions.** Every action is a synthetic `https://orchard.action/...` address that only
+  the mod answers; nothing is ever opened by them. On desktop and VS Code the row's actions
+  are a group of small glyph buttons (`✕ remove`, `◷ snooze 30m`, `⇡ handle next`,
+  `⚡ interrupt`, `▾ more`) laid over the card's top-right corner, on top of the relative time.
+  The group is an absolutely positioned Box (`display: none`, revealed by `hover` while the
+  pointer is over the row), so showing it moves nothing: the row is the same height hovered or
+  not. It is backed by the theme colour `subtle`, the closest token to the card (a theme token
+  cannot be the card's own green), so it covers the time while shown. The terminal and mobile
+  have no hover (and no overlay): there each row keeps a dimmed text line of the same actions
+  (Markdown links) below the card, always visible. The header's "Open in Orchard ↗" and
+  "Refresh" are the same kind of link. While a row asks "remove? ✓ ✗" or "interrupt? ✓ ✗" the
+  group is shown without hover, in the same spot, so the question cannot vanish with the pointer.
   - **remove**: asks "remove? ✓ ✗" (lapses after 10 s). ✓ acknowledges the message on the
     server, drops it from the pending queue, records it as delivered so it never reaches
     Claude, and hides it in the pane (the hidden ids are kept in `$.store`).
@@ -76,7 +83,7 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
     `$.turn.abort`) if there is one, then delivers that message alone, at once, past the
     batch window and the gap (the gap starts from it). The message is claimed in flight, so
     it is delivered exactly once.
-  - **more ▾** opens the row's detail: the full snippet, "reply…" (a draft in the prompt box,
+  - **more ▾** opens the row's detail (below the card, so it may move what follows): the full snippet, "reply…" (a draft in the prompt box,
     never sent) and "open thread ↗".
   - Messages Claude already has (read rows) offer **remove** and **more** only. Snooze,
     handle next and interrupt would mean bringing a delivered message back as a new alert,

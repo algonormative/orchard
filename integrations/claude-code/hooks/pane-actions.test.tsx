@@ -500,7 +500,7 @@ test('every action link is ours, listed, and pressing one opens nothing; unknown
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await openPane($, w, surface)
     const all = await ui.findAll({ type: 'Markdown' })
-    expect(all.length).toBeGreaterThanOrEqual(3)
+    expect(all.length).toBeGreaterThanOrEqual(surface === 'desktop' || surface === 'vscode' ? 1 : 3)
     for (const m of all) {
       const written = [...String(m.props.text).matchAll(/\]\(([^)]+)\)/g)].map(x => x[1])
       expect(written.length).toBeGreaterThan(0)
@@ -508,8 +508,10 @@ test('every action link is ours, listed, and pressing one opens nothing; unknown
       for (const href of written) expect(href!.startsWith(`${ACTION_ORIGIN}/`)).toBe(true)
     }
     // a link that is not one of ours, or names no action, is nothing
-    await ui.press({ key: 'actions-d1', link: { href: 'https://example.com/remove/d1' } })
-    await ui.press({ key: 'actions-d1', link: { href: `${ACTION_ORIGIN}/format-disk/d1` } })
+    // (the header's line is on every surface; the rows' lines only where there is no overlay)
+    const key = surface === 'desktop' || surface === 'vscode' ? 'header-actions' : 'actions-d1'
+    await ui.press({ key, link: { href: 'https://example.com/remove/d1' } })
+    await ui.press({ key, link: { href: `${ACTION_ORIGIN}/format-disk/d1` } })
     await w.clock.settle()
     expect(queuedIds(w).sort(), surface).toEqual(['b1', 'd1'])
     expect(w.fake.acks).toEqual([])
@@ -526,37 +528,86 @@ test('every action link is ours, listed, and pressing one opens nothing; unknown
   expect(w.fake.calls.some(c => c.argv[0] === 'open')).toBe(false)
 })
 
-test('on a surface with a pointer the action line is revealed by hovering the row; elsewhere it is simply there', { options: OPTIONS }, async ($, on) => {
+test('on a surface with a pointer the row actions are glyph buttons in a hover-revealed overlay; elsewhere the dim line is simply there', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   await begin($, w)
   dm(w, 'd1')
   await w.clock.settle()
 
-  const hidden = async (surface: 'terminal' | 'desktop' | 'vscode' | 'mobile') => {
+  const probe = async (surface: 'terminal' | 'desktop' | 'vscode' | 'mobile') => {
     const ui = await openPane($, w, surface)
     const boxes = await ui.findAll({ type: 'Box' })
     const reveal = boxes.filter(b => b.props.display === 'none')
+    const glyphs = (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('btn-')).map(b => b.props.label)
     const dim = (await ui.find({ type: 'Markdown', key: 'actions-d1' }))?.props.dimColor
-    const result = { reveal, dim, keyed: reveal.some(b => b.key !== undefined && b.key !== '') }
+    const result = { reveal, glyphs, dim, keyed: reveal.some(b => b.key !== undefined && b.key !== '') }
     await ui.unmount()
     return result
   }
 
   for (const surface of ['desktop', 'vscode'] as const) {
-    const r = await hidden(surface)
+    const r = await probe(surface)
     expect(r.reveal, surface).toHaveLength(1)
     // the revealed Box is not keyed (a keyed Box is its own scope, and one that is not drawn cannot be hovered)
     expect(r.keyed).toBe(false)
+    // remove, snooze, handle next, interrupt, more; and no Markdown line below the card
+    expect(r.glyphs).toEqual(['✕', '◷', '⇡', '⚡', '▾'])
+    expect(r.dim).toBeUndefined()
   }
-  // the terminal has no hover: the line is always there, dimmed
-  const terminal = await hidden('terminal')
-  expect(terminal.reveal).toEqual([])
-  expect(terminal.dim).toBe(true)
-  // so has a phone no hover: always there
-  expect((await hidden('mobile')).reveal).toEqual([])
+  // the terminal and a phone have no hover and no overlay: the dim line is always there
+  for (const surface of ['terminal', 'mobile'] as const) {
+    const r = await probe(surface)
+    expect(r.reveal).toEqual([])
+    expect(r.glyphs).toEqual([])
+    expect(r.dim).toBe(true)
+  }
 })
 
-test('while a question is on a row the line is not hover-only, so it cannot vanish with the pointer', { options: OPTIONS }, async ($, on) => {
+test('the glyph buttons route to their own actions', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  await begin($, w)
+  dm(w, 'd1')
+  dm(w, 'd2')
+  dm(w, 'd3')
+  await w.clock.settle()
+  const ui = await openPane($, w, 'desktop')
+
+  // snooze: the alert leaves the queue
+  await ui.press({ key: 'btn-snooze-d1' })
+  await w.clock.settle()
+  expect(queuedIds(w).sort()).toEqual(['d2', 'd3'])
+
+  // handle next marks d3; the button gives way to "⇡✓"
+  await ui.press({ key: 'btn-next-d3' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Button', key: 'btn-next-d3' })).toBeUndefined()
+
+  // ▾ opens the detail below the card and the glyph turns to ▴
+  await ui.press({ key: 'btn-more-d2' })
+  await w.clock.settle()
+  expect((await ui.find({ type: 'Button', key: 'btn-more-d2' }))?.props.label).toBe('▴')
+  expect(await ui.find({ type: 'Markdown', key: 'detail-d2' })).toBeDefined()
+
+  // ✕ asks; ✗ cancels; ✕ then ✓ removes
+  await ui.press({ key: 'btn-remove-d2' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Button', key: 'btn-remove-yes-d2' })).toBeDefined()
+  await ui.press({ key: 'btn-cancel-d2' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Button', key: 'btn-remove-d2' })).toBeDefined()
+  expect(queuedIds(w).sort()).toEqual(['d2', 'd3'])
+  await ui.press({ key: 'btn-remove-d2' })
+  await ui.press({ key: 'btn-remove-yes-d2' })
+  await w.clock.settle()
+  expect(queuedIds(w)).toEqual(['d3'])
+
+  // ⚡ asks too; ✓ delivers d3 alone
+  await ui.press({ key: 'btn-interrupt-d3' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Button', key: 'btn-interrupt-yes-d3' })).toBeDefined()
+})
+
+test('while a question is on a row the overlay is not hover-only, so it cannot vanish with the pointer', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   await begin($, w)
   dm(w, 'd1')
@@ -567,9 +618,14 @@ test('while a question is on a row the line is not hover-only, so it cannot vani
   await act(ui, 'remove', 'd1')
   await w.clock.settle()
   expect(await reveals()).toBe(0)
+  expect((await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('btn-')).map(b => b.props.label)).toEqual(['✓', '✗'])
   await act(ui, 'cancel', 'd1')
   await w.clock.settle()
   expect(await reveals()).toBe(1)
+  await act(ui, 'interrupt', 'd1')
+  await w.clock.settle()
+  expect(await reveals()).toBe(0)
+  expect(await ui.find({ type: 'Button', key: 'btn-interrupt-yes-d1' })).toBeDefined()
 })
 
 test('the header says whose inbox it is', { options: OPTIONS }, async ($, on) => {
@@ -586,11 +642,10 @@ test('the header says whose inbox it is', { options: OPTIONS }, async ($, on) =>
   expect(String(header?.props.source)).toContain(`as ${ME}`)
 })
 
-test('the revealed Box carries `hover: { display: "flex" }` and no key (read off the pane as drawn, since a mount does not report hover)', () => {
+test('the overlay is absolutely positioned inside a relative Box, so the row is the same tree hovered or not', () => {
   type Node = { type: unknown; props: Record<string, unknown>; hover?: unknown; children?: unknown }
-  const Box = 'Box'
   const plain = (name: string) => name as never
-  const table = { Box: Box as never, Text: plain('Text'), Button: plain('Button'), Markdown: plain('Markdown') }
+  const table = { Box: 'Box' as never, Text: plain('Text'), Button: plain('Button'), Markdown: plain('Markdown'), Svg: plain('Svg') }
   const view = {
     participantId: ME,
     workspaceName: 'Fruit Stand',
@@ -610,21 +665,45 @@ test('the revealed Box carries `hover: { display: "flex" }` and no key (read off
     } as never,
   }
   const handlers = { act: () => undefined, open: () => undefined, setLevel: () => undefined, setRate: () => undefined, toggleOlder: () => undefined }
-  const found = (surface: 'desktop' | 'terminal') => {
-    const out: Node[] = []
-    const walk = (node: unknown) => {
-      if (Array.isArray(node)) return node.forEach(walk)
-      if (node === null || typeof node !== 'object') return
-      const n = node as Node
-      if (n.type === Box && n.props?.display === 'none') out.push(n)
-      walk(n.children)
+  const all = (node: unknown, out: Node[] = []): Node[] => {
+    if (Array.isArray(node)) node.forEach(n => all(n, out))
+    else if (node !== null && typeof node === 'object') {
+      out.push(node as Node)
+      all((node as Node).children, out)
     }
-    walk(renderPane(table, { ...view, surface }, handlers))
     return out
   }
-  const reveal = found('desktop')
+  const draw = (surface: 'desktop' | 'terminal', confirm?: { id: string; verb: 'remove' }) =>
+    all(renderPane(table, { ...view, surface, pane: { ...view.pane, confirm } as never }, handlers))
+  const boxes = (nodes: Node[]) => nodes.filter(n => n.type === 'Box')
+
+  const idle = draw('desktop')
+  const reveal = boxes(idle).filter(n => n.props?.display === 'none')
   expect(reveal).toHaveLength(1)
   expect(reveal[0]?.hover).toEqual({ display: 'flex' })
   expect(reveal[0]?.props.key).toBeUndefined()
-  expect(found('terminal')).toEqual([])
+  expect(reveal[0]?.props.position).toBe('absolute')
+  expect(reveal[0]?.props.top).toBeDefined()
+  expect(reveal[0]?.props.right).toBeDefined()
+  expect(reveal[0]?.props.backgroundColor).toBeDefined()
+  // it sits with the card in a relative Box, and nothing but absolute Boxes holds the buttons
+  const relative = boxes(idle).filter(n => n.props?.position === 'relative')
+  expect(relative).toHaveLength(1)
+  const inside = all(relative[0]?.children)
+  expect(inside.some(n => n.type === 'Svg')).toBe(true)
+  expect(inside).toContain(reveal[0])
+  // no action line in the flow below the card
+  expect(idle.some(n => n.type === 'Markdown' && String(n.props.key).startsWith('actions-'))).toBe(false)
+
+  // the same overlay is there, unhidden, while a question is asked: hovered or not, an absolute Box, no extra row in the flow
+  const asking = draw('desktop', { id: 'd1', verb: 'remove' })
+  const shown = boxes(asking).filter(n => n.props?.position === 'absolute')
+  expect(shown).toHaveLength(1)
+  expect(shown[0]?.props.display).toBeUndefined()
+  expect(boxes(asking).filter(n => n.props?.position === 'relative')).toHaveLength(1)
+  const flowShape = (nodes: Node[]) => nodes.filter(n => n.props?.position !== 'absolute' && !all(reveal[0]).includes(n) && !all(shown[0]).includes(n)).map(n => n.type)
+  expect(flowShape(asking)).toEqual(flowShape(idle))
+
+  // the terminal has no overlay at all
+  expect(boxes(draw('terminal')).filter(n => n.props?.position !== undefined)).toEqual([])
 })
