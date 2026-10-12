@@ -31,8 +31,16 @@ export type OrchardCounts = {
   needsYou: number
   /** The pending wake is held back by a draft in the prompt box (the band says it sends when the box is empty). */
   isHeld?: boolean
-  /** Clock time the alert loop last heard back from the workspace; the pane's footer shows its age. */
-  lastPollAt?: number | null
+}
+
+/** Clock time the alert loop last heard back from the workspace (the pane's footer shows its age). Kept apart from the counts: it moves every poll and the band must not redraw for it. */
+export type OrchardHeartbeat = { lastPollAt: number | null }
+
+/** What the band says, exactly: written only when the line itself changes, so the band redraws only then. */
+export type OrchardBand = {
+  text: string
+  segments: { text: string; tone: 'mark' | 'plain' | 'dim' | 'ok' | 'warn' | 'err' }[]
+  tone: 'quiet' | 'warning' | 'error'
 }
 
 /** One alert the listener fetched and has not yet delivered to the model. */
@@ -160,6 +168,9 @@ declare module 'claude-code' {
       queue: OrchardQueue
       settings: OrchardSettings
       pane: OrchardPane | null
+      /** The band's line, derived by the mod from status, workspace and counts. null: no band. */
+      band: OrchardBand | null
+      heartbeat: OrchardHeartbeat
     }
   }
 }

@@ -3,7 +3,8 @@
 // hidden records kept in `$.store`. No `$` here; register.tsx performs the actions.
 //
 // The addresses are `https://orchard.action/<verb>/<id>`. Buttons press them through `act`; the one
-// Markdown link left (a decision's "answer in Orchard") is listed in `pressableLinks`. Nothing opens them.
+// Markdown links (a decision's "answer in Orchard", and each thread row's words: `select`) are listed in
+// `pressableLinks`. Nothing opens them.
 import type { OrchardAlert, OrchardPaneThread } from '../types'
 
 export const ACTION_ORIGIN = 'https://orchard.action'
@@ -32,6 +33,7 @@ export const VERBS = [
   'refresh',
   'select-prev',
   'select-next',
+  'select',
 ] as const
 export type Verb = (typeof VERBS)[number]
 

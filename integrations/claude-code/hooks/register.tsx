@@ -4,7 +4,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { OrchardAlert, OrchardPane, OrchardPaneThread, OrchardQueue, OrchardSettings, OrchardStatus } from '../types'
+import type { OrchardAlert, OrchardBand, OrchardCounts, OrchardHeartbeat, OrchardPane, OrchardPaneThread, OrchardQueue, OrchardSettings, OrchardStatus, OrchardWorkspace } from '../types'
 import {
   CONFIRM_MS,
   SNOOZE_MS,
@@ -54,7 +54,7 @@ import { backoffDelay, connectOnce, createRuntime, track } from './connect'
 import type { Runtime } from './connect'
 import { frameData, frameMessages, newNonce } from './frame'
 import type { FrameMessage } from './frame'
-import { HISTORY_WINDOW, openDecisions, parseHistory, parentsOf, participationFrom, rootOf } from './history'
+import { HISTORY_WINDOW, openDecisions, parseHistory, parseHistoryMessage, parentsOf, participationFrom, rootOf } from './history'
 import type { HistoryMessage } from './history'
 import { RETRY_ID_TTL_MS, createListenerState, deliveryNote, heldNotice, heldStatusLine, stopLoop, toFrameMessage } from './listener'
 import type { ListenerState, Loop } from './listener'
@@ -63,7 +63,8 @@ import { EXIT_CONNECTION, EXIT_OK, runOrchard, workspaceIdOf } from './orchard-c
 import type { CliInit, CliResult, Run } from './orchard-cli'
 import { renderPane } from './pane'
 import type { PaneHandlers, Table } from './pane'
-import { buildThreads, messageHref, snippetOf, taskHref, workspaceHref } from './threads'
+import { same } from './same'
+import { buildThreads, isDecisionRelated, isReceipt, mergeAlerts, messageHref, snippetOf, taskHref, workspaceHref } from './threads'
 import {
   RETRY_ADVICE,
   RETRY_OWN_ID,
@@ -95,6 +96,11 @@ const queue = atom({ plugin: 'orchard', key: 'queue' } as const, EMPTY_QUEUE)
 // The notification settings (kept in $.store too) and what the /orchard pane draws.
 const settings = atom({ plugin: 'orchard', key: 'settings' } as const, DEFAULT_SETTINGS)
 const pane = atom({ plugin: 'orchard', key: 'pane' } as const, null)
+// What the band draws, and the only thing it reads: written when the line itself changes, so the
+// band redraws only then. The heartbeat is the poll clock, which moves on every poll and is
+// read only by the pane's footer.
+const band = atom({ plugin: 'orchard', key: 'band' } as const, null)
+const heartbeat = atom({ plugin: 'orchard', key: 'heartbeat' } as const, { lastPollAt: null })
 
 const PANE = 'orchard'
 
@@ -106,6 +112,12 @@ const BACKPRESSURE_RECHECK_MS = 5_000
 
 /** How often a wake held back by a draft in the prompt box looks at the box again. */
 const HELD_RECHECK_MS = 15_000
+
+/** A receipt waits this long for a burst of them (one task action writes two) before the pane reads tasks again. */
+const WORK_DEBOUNCE_MS = 1_000
+
+/** While the pane is open, claimed tasks and open decisions are read again this often, whatever the alerts said. */
+const SAFETY_REFRESH_MS = 60_000
 
 /** What every function below shares: the connection, the listener and the options. */
 type App = { rt: Runtime; ls: ListenerState; options: Options }
@@ -133,8 +145,72 @@ function tool($: EngineInterface, rt: Runtime, name: string, args: Record<string
   return cli($, rt, ['call', name, 'stdin'], { ...init, stdin: JSON.stringify(args) })
 }
 
-async function setStatus($: EngineInterface, next: OrchardStatus) {
-  await update($, status, () => next)
+/*
+ * Each state write is its own function with a literal atom (the validator follows `read` and `update`
+ * only to atoms it can see by name). Every one writes unless the value is already there, compared by
+ * structure: a write redraws whatever read the atom, and an unchanged value is not news. True: it wrote.
+ */
+async function putStatus($: EngineInterface, change: (current: OrchardStatus | null) => OrchardStatus | null): Promise<boolean> {
+  const current = await read($, status)
+  if (same(current, change(current))) return false
+  await update($, status, change)
+  return true
+}
+
+async function putWorkspace($: EngineInterface, change: (current: OrchardWorkspace | null) => OrchardWorkspace | null): Promise<boolean> {
+  const current = await read($, workspace)
+  if (same(current, change(current))) return false
+  await update($, workspace, change)
+  return true
+}
+
+async function putCounts($: EngineInterface, change: (current: OrchardCounts) => OrchardCounts): Promise<boolean> {
+  const current = await read($, counts)
+  if (same(current, change(current))) return false
+  await update($, counts, change)
+  return true
+}
+
+async function putPane($: EngineInterface, change: (current: OrchardPane | null) => OrchardPane | null): Promise<boolean> {
+  const current = await read($, pane)
+  if (same(current, change(current))) return false
+  await update($, pane, change)
+  return true
+}
+
+async function putBand($: EngineInterface, change: (current: OrchardBand | null) => OrchardBand | null): Promise<boolean> {
+  const current = await read($, band)
+  if (same(current, change(current))) return false
+  await update($, band, change)
+  return true
+}
+
+async function putHeartbeat($: EngineInterface, change: (current: OrchardHeartbeat) => OrchardHeartbeat): Promise<boolean> {
+  const current = await read($, heartbeat)
+  if (same(current, change(current))) return false
+  await update($, heartbeat, change)
+  return true
+}
+
+/** Derives the band's line from status, workspace and counts and writes it if the line differs. */
+async function refreshBand($: EngineInterface, app: App) {
+  const line = bandLine(await read($, status), await read($, workspace), await read($, counts), app.rt.current?.identity.participantId ?? '')
+  await putBand($, () => line)
+}
+
+/** The band's sources: after a write that changed one, the band follows (and writes only if its line changed). */
+async function putStatusShown($: EngineInterface, app: App, change: (current: OrchardStatus | null) => OrchardStatus | null) {
+  if (await putStatus($, change)) await refreshBand($, app)
+}
+async function putWorkspaceShown($: EngineInterface, app: App, change: (current: OrchardWorkspace | null) => OrchardWorkspace | null) {
+  if (await putWorkspace($, change)) await refreshBand($, app)
+}
+async function putCountsShown($: EngineInterface, app: App, change: (current: OrchardCounts) => OrchardCounts) {
+  if (await putCounts($, change)) await refreshBand($, app)
+}
+
+async function setStatus($: EngineInterface, app: App, next: OrchardStatus) {
+  await putStatusShown($, app, () => next)
 }
 
 /** What the queue is stamped with: a digest of this connection's (endpoint, participant). */
@@ -168,7 +244,7 @@ export async function markOffline($: EngineInterface, app: App) {
   rt.timer = $.clock.after(backoffDelay(rt.failures), () => {
     detach(reconnect($, app))
   })
-  await setStatus($, { kind: 'offline', failures: rt.failures })
+  await setStatus($, app, { kind: 'offline', failures: rt.failures })
 }
 
 /** One attempt: resume or join, then learn the workspace. A call during an attempt is ignored. */
@@ -182,16 +258,16 @@ export async function reconnect($: EngineInterface, app: App) {
   try {
     const outcome = await connectOnce(runner($), rt, here)
     if (outcome.kind === 'connected') {
-      await update($, workspace, () => outcome.workspace)
-      await setStatus($, connectedStatus(app.ls))
+      await putWorkspaceShown($, app, () => outcome.workspace)
+      await setStatus($, app, connectedStatus(app.ls))
       detach(startListener($, app))
     } else if (outcome.kind === 'offline') {
       await markOffline($, app)
     } else {
-      await setStatus($, { kind: 'error', message: outcome.message })
+      await setStatus($, app, { kind: 'error', message: outcome.message })
     }
   } catch {
-    await setStatus($, { kind: 'error', message: 'the Orchard connection failed unexpectedly' })
+    await setStatus($, app, { kind: 'error', message: 'the Orchard connection failed unexpectedly' })
   } finally {
     rt.isAttempting = false
   }
@@ -219,22 +295,23 @@ async function start($: EngineInterface, app: App, cwd: string) {
   ls.leaseTimer?.cancel()
   ls.leaseTimer = undefined
   stopLoop(ls, 'superseded')
-  await setStatus($, { kind: 'connecting' })
+  await setStatus($, app, { kind: 'connecting' })
 
   const conn = checkConn(options)
-  if (!conn.ok) return setStatus($, { kind: 'error', message: conn.message })
+  if (!conn.ok) return setStatus($, app, { kind: 'error', message: conn.message })
 
   const project = await readProject($, cwd)
-  if (!project.ok) return setStatus($, { kind: 'error', message: project.message })
+  if (!project.ok) return setStatus($, app, { kind: 'error', message: project.message })
   if (project.value.isIdIgnored && !ls.isIdToastShown) {
     ls.isIdToastShown = true
     $.ui.toast('Orchard: the participantId in .orchard.json must start with "claude-", so it was ignored')
   }
 
   const identity = resolveIdentity(options, cwd, project.value)
-  if (!identity.ok) return setStatus($, { kind: 'error', message: identity.message })
+  if (!identity.ok) return setStatus($, app, { kind: 'error', message: identity.message })
 
   rt.current = { conn: conn.value, identity: identity.value }
+  await refreshBand($, app)
   await reconnect($, app)
 }
 
@@ -256,8 +333,18 @@ async function isLive($: EngineInterface, ls: ListenerState, loop: Loop): Promis
 }
 
 async function syncCounts($: EngineInterface, app: App, needsYou?: number) {
-  const pending = countsOf(await readQueue($, app), wakeOf(app.ls))
-  await update($, counts, prev => ({ ...prev, ...pending, ...(needsYou === undefined ? {} : { needsYou }) }))
+  const held = await readQueue($, app)
+  const pending = countsOf(held, wakeOf(app.ls))
+  await putCountsShown($, app, prev => ({ ...prev, ...pending, ...(needsYou === undefined ? {} : { needsYou }) }))
+  await syncUnread($, held)
+}
+
+/** The pane's unread marks follow the queue: a thread is unread while an alert for it waits. */
+async function syncUnread($: EngineInterface, held: OrchardQueue) {
+  const waiting = new Set(held.items.map(a => a.id))
+  const current = await read($, pane)
+  if (current === null || current.state !== 'ready') return
+  await putPane($, p => (p === null ? p : { ...p, threads: p.threads.map(t => (t.isUnread === waiting.has(t.replyToId) ? t : { ...t, isUnread: waiting.has(t.replyToId) })) }))
 }
 
 async function storeGet($: EngineInterface, key: string): Promise<unknown> {
@@ -281,7 +368,7 @@ async function storeSet($: EngineInterface, app: App, key: string, value: unknow
   const { ls } = app
   if (isFailing === ls.isStoreFailing) return
   ls.isStoreFailing = isFailing
-  await update($, status, current => (current?.kind === 'connected' ? connectedStatus(ls) : current))
+  await putStatusShown($, app, current => (current?.kind === 'connected' ? connectedStatus(ls) : current))
 }
 
 /** Reads the lease of this connection. */
@@ -330,7 +417,7 @@ async function standDown($: EngineInterface, app: App, loop: Loop) {
   loop.timer = undefined
   ls.watchdog?.cancel()
   ls.watchdog = undefined
-  await setStatus($, { kind: 'shared' })
+  await setStatus($, app, { kind: 'shared' })
   ls.leaseTimer?.cancel()
   ls.leaseTimer = $.clock.after(LEASE_RECHECK_MS, () => {
     detach(recheckLease($, app))
@@ -350,7 +437,7 @@ async function recheckLease($: EngineInterface, app: App) {
     })
     return
   }
-  await setStatus($, connectedStatus(ls))
+  await setStatus($, app, connectedStatus(ls))
   detach(startListener($, app))
 }
 
@@ -502,16 +589,30 @@ async function applyWindow($: EngineInterface, app: App, messages: readonly Hist
   ls.decisionsAt = await $.clock.now()
 }
 
-/** Re-reads the open decisions: not more than every 15 s, one read at a time. */
-async function refreshDecisions($: EngineInterface, app: App) {
-  const { ls } = app
+/**
+ * Re-reads how many decisions wait on the owner: not more than every 15 s, one read at a time. The
+ * host's own count (`workspace_decisions`) is one small call; a host without it is counted from a
+ * window of history, which is read only when `isForced` (a decision or an owner's reply arrived),
+ * never for every alert.
+ */
+async function refreshDecisions($: EngineInterface, app: App, isForced = false) {
+  const { ls, rt } = app
   if (ls.isReadingDecisions) return
   const now = await $.clock.now()
   if (ls.decisionsAt !== undefined && now - ls.decisionsAt < 15_000) return
+  const here = rt.current
+  if (here === undefined) return
   ls.isReadingDecisions = true
   try {
-    const window = await readWindow($, app)
-    if (window.kind === 'ok') await applyWindow($, app, window.messages)
+    const me = here.identity.participantId
+    const counted = await countOpenDecisions($, app, me)
+    if (counted !== undefined) {
+      await syncCounts($, app, counted)
+      ls.decisionsAt = await $.clock.now()
+    } else if (isForced) {
+      const window = await readWindow($, app)
+      if (window.kind === 'ok') await applyWindow($, app, window.messages)
+    }
   } catch {
     // Counting decisions is a convenience; it must not stop the listener.
   } finally {
@@ -654,7 +755,7 @@ async function prepare($: EngineInterface, app: App, loop: Loop): Promise<boolea
     if (stored === undefined) {
       loop.isStopped = true
       loop.stopReason = 'error'
-      await setStatus($, { kind: 'error', message: window.message })
+      await setStatus($, app, { kind: 'error', message: window.message })
       return false
     }
   } else {
@@ -720,13 +821,14 @@ async function tick($: EngineInterface, app: App, loop: Loop) {
     if (result.exitCode !== EXIT_OK) {
       loop.isStopped = true
       loop.stopReason = 'error'
-      await setStatus($, { kind: 'error', message: result.message ?? 'the Orchard CLI failed' })
+      await setStatus($, app, { kind: 'error', message: result.message ?? 'the Orchard CLI failed' })
       return
     }
     const delay = await absorb($, app, loop, result, isWaiting, elapsed)
     ls.crashes = 0
-    const polledAt = await $.clock.now()
-    await update($, counts, prev => ({ ...prev, lastPollAt: polledAt }))
+    ls.lastPollAt = await $.clock.now()
+    // Only the pane's footer shows the poll clock, so it is written only while the pane is open.
+    if (ls.isPaneOpen) await putHeartbeat($, () => ({ lastPollAt: ls.lastPollAt }))
     if (await isLive($, ls, loop)) await schedule($, app, loop, delay)
   } catch {
     await loopDied($, app, loop, 'crashed')
@@ -775,7 +877,13 @@ async function absorb($: EngineInterface, app: App, loop: Loop, result: CliResul
     await syncCounts($, app)
     await armFlush($, app)
   }
-  if (page.alerts.length > 0) detach(refreshDecisions($, app))
+  if (page.alerts.length > 0) {
+    const owner = (await read($, workspace))?.ownerId ?? null
+    detach(refreshDecisions($, app, page.alerts.some(a => isDecisionRelated(a, owner))))
+    // The pane takes the page as it came: no history call, and the claims are read once after a receipt.
+    await foldIntoPane($, app, page.alerts, owner)
+    if (page.alerts.some(a => isReceipt(a) || isDecisionRelated(a, owner))) scheduleWork($, app)
+  }
 
   if (page.alerts.length > 0 && !isAdvanced) return 5_000
   // An empty wait that came back early means the server's waiter cap is full: sleep out the rest.
@@ -922,8 +1030,9 @@ function showHeld($: EngineInterface, ls: ListenerState, waiting: number) {
 }
 
 /** The hold is over (a delivery took the queue, the box emptied, nothing is left to wake for): its timer and status line go. */
-function endHold($: EngineInterface, ls: ListenerState) {
-  if (ls.isHeld) detach(update($, counts, prev => ({ ...prev, isHeld: false })))
+function endHold($: EngineInterface, app: App) {
+  const { ls } = app
+  if (ls.isHeld) detach(putCountsShown($, app, prev => ({ ...prev, isHeld: false })))
   ls.isHeld = false
   ls.holdTimer?.cancel()
   ls.holdTimer = undefined
@@ -951,7 +1060,7 @@ function armHoldRecheck($: EngineInterface, app: App) {
 async function holdWake($: EngineInterface, app: App, pending: { unread: number; forYou: number }) {
   const { ls } = app
   ls.isHeld = true
-  detach(update($, counts, prev => ({ ...prev, isHeld: true })))
+  detach(putCountsShown($, app, prev => ({ ...prev, isHeld: true })))
   showHeld($, ls, pending.unread)
   armHoldRecheck($, app)
   const text = heldNotice(pending.unread, pending.forYou)
@@ -998,7 +1107,7 @@ async function recheckHold($: EngineInterface, app: App) {
     showHeld($, ls, pending.unread)
     return armHoldRecheck($, app)
   }
-  endHold($, ls)
+  endHold($, app)
   if (pending.forYou > 0) await flush($, app)
 }
 
@@ -1017,7 +1126,7 @@ async function finishDelivery($: EngineInterface, app: App, batch: readonly Orch
   const waiting = cur.items.reduce((min, a) => Math.min(min, a.sequence), Number.POSITIVE_INFINITY)
   const cover = waiting === Number.POSITIVE_INFINITY ? cur.cursor : Math.min(cur.cursor, waiting - 1)
   ls.record = recordDelivery(ls.record, ids, cover)
-  endHold($, ls)
+  endHold($, app)
   if (here !== undefined) await storeSet($, app, storeKey(here.conn.endpoint, here.identity.participantId), ls.record)
   await syncCounts($, app)
   detach(sendAck($, app, { ids, requestId: `orchard-ack-${crypto.randomUUID()}` }))
@@ -1085,6 +1194,146 @@ async function runNotify($: EngineInterface, app: App, rest: string): Promise<st
   return describeSettings(ls.settings, ls.channels)
 }
 
+// ---- the pane, kept current ----
+
+/** Folds a page of alerts into the pane's threads. Nothing is written when the threads come out as they were. */
+async function foldIntoPane($: EngineInterface, app: App, alerts: readonly OrchardAlert[], ownerId: string | null) {
+  const here = app.rt.current
+  const current = await read($, pane)
+  if (here === undefined || current === null || current.state !== 'ready') return
+  const queued = new Set((await readQueue($, app)).items.map(a => a.id))
+  const live = { me: here.identity.participantId, ownerId, endpoint: here.conn.endpoint, queued }
+  await putPane($, p => (p === null ? p : { ...p, threads: mergeAlerts(p.threads, alerts, live) }))
+}
+
+/** Asks for one refresh of claimed tasks and open decisions a moment from now; more asks in that moment are the same one. */
+function scheduleWork($: EngineInterface, app: App) {
+  const { ls } = app
+  if (!ls.isPaneOpen) return
+  ls.workTimer?.cancel()
+  ls.workTimer = $.clock.after(WORK_DEBOUNCE_MS, () => {
+    ls.workTimer = undefined
+    detach(refreshWork($, app))
+  })
+}
+
+/** The slow refresh that catches what no alert announced. It runs only while the pane is open and re-arms itself. */
+function armSafety($: EngineInterface, app: App) {
+  const { ls } = app
+  ls.safetyTimer?.cancel()
+  ls.safetyTimer = undefined
+  if (!ls.isPaneOpen) return
+  ls.safetyTimer = $.clock.after(SAFETY_REFRESH_MS, () => {
+    ls.safetyTimer = undefined
+    detach(refreshWork($, app).finally(() => armSafety($, app)))
+  })
+}
+
+/** The pane opened (or was drawn): keep it fresh from now on. */
+async function paneOpened($: EngineInterface, app: App) {
+  const { ls } = app
+  if (!ls.isPaneOpen) {
+    ls.isPaneOpen = true
+    armSafety($, app)
+  }
+  await putHeartbeat($, () => ({ lastPollAt: ls.lastPollAt }))
+}
+
+/** The pane closed: no timer of its own runs on. */
+function paneClosed(app: App) {
+  const { ls } = app
+  ls.isPaneOpen = false
+  ls.workTimer?.cancel()
+  ls.workTimer = undefined
+  ls.safetyTimer?.cancel()
+  ls.safetyTimer = undefined
+}
+
+/** In-progress tasks assigned to this participant, in each attached task store. Undefined when the workspace could not say. */
+async function readClaims($: EngineInterface, app: App, storeIds: readonly string[]): Promise<OrchardPane['tasks'] | undefined> {
+  const here = app.rt.current
+  if (here === undefined) return undefined
+  const me = here.identity.participantId
+  const tasks: OrchardPane['tasks'] = []
+  for (const storeId of storeIds.slice(0, 4)) {
+    const listed = await tool($, app.rt, 'tasks_list', { store_id: storeId, status: 'in_progress' })
+    if (listed.exitCode !== EXIT_OK) return undefined
+    const rows = (listed.json as { tasks?: unknown } | undefined)?.tasks
+    for (const row of (Array.isArray(rows) ? rows : []) as Record<string, unknown>[]) {
+      if (row.assignee !== me || typeof row.id !== 'string') continue
+      tasks.push({
+        id: row.id,
+        title: snippetOf(typeof row.title === 'string' ? row.title : row.id),
+        status: (typeof row.status === 'string' ? row.status : 'in_progress').replace(/_/g, ' '),
+        href: taskHref(here.conn.endpoint, storeId, row.id),
+      })
+    }
+  }
+  return tasks
+}
+
+/** The decisions this participant raised that the owner has not answered, as the pane lists them. Undefined when the workspace could not say. */
+async function readOpenDecisions($: EngineInterface, app: App): Promise<OrchardPane['decisions'] | undefined> {
+  const { ls } = app
+  const here = app.rt.current
+  if (here === undefined) return undefined
+  const me = here.identity.participantId
+  const asRow = (m: { id: string; body: string; sentAt: string }) => ({ id: m.id, snippet: snippetOf(m.body), sentAt: m.sentAt, href: messageHref(here.conn.endpoint, m.id) })
+  if (ls.decisionsTool !== 'missing') {
+    const result = await tool($, app.rt, 'workspace_decisions', { sender_id: me })
+    const listed = result.exitCode === EXIT_OK ? (result.json as { decisions?: unknown } | undefined)?.decisions : undefined
+    if (Array.isArray(listed)) {
+      ls.decisionsTool = 'available'
+      const parsed = listed.map(parseHistoryMessage).filter((m): m is NonNullable<typeof m> => m !== undefined)
+      if (parsed.length === listed.length) return parsed.map(asRow)
+    } else if (result.exitCode !== EXIT_CONNECTION) {
+      ls.decisionsTool = 'missing'
+    }
+  }
+  const window = await readWindow($, app)
+  if (window.kind !== 'ok') return undefined
+  return openDecisions(window.messages, me, (await read($, workspace))?.ownerId ?? 'owner').map(asRow)
+}
+
+/**
+ * Reads the pane's claimed tasks and waiting-on-you decisions again, and the band's needs-you count
+ * with them. One at a time; a request that comes in meanwhile runs once more when this one ends.
+ */
+async function refreshWork($: EngineInterface, app: App) {
+  const { ls } = app
+  if (ls.isRefreshingWork) {
+    ls.isWorkDirty = true
+    return
+  }
+  ls.isRefreshingWork = true
+  try {
+    if ((await read($, pane))?.state !== 'ready') return
+    let storeIds = ls.storeIds
+    if (storeIds === undefined) {
+      const info = await tool($, app.rt, 'workspace_info', {})
+      storeIds = storeIdsOf(info)
+      ls.storeIds = storeIds
+    }
+    const tasks = await readClaims($, app, storeIds)
+    const decisions = await readOpenDecisions($, app)
+    await putPane($, p => (p === null ? p : { ...p, ...(tasks === undefined ? {} : { tasks }), ...(decisions === undefined ? {} : { decisions }) }))
+    if (decisions !== undefined) await syncCounts($, app, decisions.length)
+  } catch {
+    // The next receipt, refresh or the slow timer tries again.
+  } finally {
+    ls.isRefreshingWork = false
+    if (ls.isWorkDirty) {
+      ls.isWorkDirty = false
+      scheduleWork($, app)
+    }
+  }
+}
+
+function storeIdsOf(info: CliResult): string[] {
+  const stores = (info.json as { workspace?: { task_stores?: unknown } } | undefined)?.workspace?.task_stores
+  return (Array.isArray(stores) ? (stores as { id?: unknown }[]) : []).flatMap(s => (typeof s.id === 'string' ? [s.id] : []))
+}
+
 // ---- the pane ----
 
 const EMPTY_PANE: OrchardPane = {
@@ -1105,7 +1354,7 @@ const EMPTY_PANE: OrchardPane = {
 async function loadPane($: EngineInterface, app: App) {
   const { rt, ls } = app
   const here = rt.current
-  const show = (change: Partial<OrchardPane>) => update($, pane, p => ({ ...(p ?? EMPTY_PANE), ...change }))
+  const show = (change: Partial<OrchardPane>) => putPane($, p => ({ ...(p ?? EMPTY_PANE), ...change }))
   if (here === undefined) return show({ state: 'failed', error: 'Orchard is not connected' })
   await show({ state: 'loading', error: null })
 
@@ -1139,22 +1388,8 @@ async function loadPane($: EngineInterface, app: App) {
   }))
 
   // Claimed tasks: in progress and assigned to this participant, in each attached task store.
-  const stores = ((info.json as { workspace?: { task_stores?: unknown } } | undefined)?.workspace?.task_stores ?? []) as unknown
-  const tasks: OrchardPane['tasks'] = []
-  for (const store of (Array.isArray(stores) ? stores : []).slice(0, 4) as { id?: unknown }[]) {
-    if (typeof store.id !== 'string') continue
-    const listed = await tool($, rt, 'tasks_list', { store_id: store.id, status: 'in_progress' })
-    const rows = listed.exitCode === EXIT_OK ? (listed.json as { tasks?: unknown } | undefined)?.tasks : undefined
-    for (const row of (Array.isArray(rows) ? rows : []) as Record<string, unknown>[]) {
-      if (row.assignee !== me || typeof row.id !== 'string') continue
-      tasks.push({
-        id: row.id,
-        title: snippetOf(typeof row.title === 'string' ? row.title : row.id),
-        status: (typeof row.status === 'string' ? row.status : 'in_progress').replace(/_/g, ' '),
-        href: taskHref(endpoint, store.id, row.id),
-      })
-    }
-  }
+  ls.storeIds = storeIdsOf(info)
+  const tasks = (await readClaims($, app, ls.storeIds)) ?? []
   await show({ state: 'ready', error: null, threads, decisions, tasks, channels })
 }
 
@@ -1323,6 +1558,13 @@ async function selectNeighbour($: EngineInterface, shown: readonly OrchardPaneTh
   if (to !== null) await update($, pane, p => ({ ...(p ?? EMPTY_PANE), selected: to }))
 }
 
+function toggleMore($: EngineInterface, id: string) {
+  return update($, pane, p => {
+    const open = p?.expanded ?? []
+    return { ...(p ?? EMPTY_PANE), expanded: open.includes(id) ? open.filter(x => x !== id) : [...open, id] }
+  })
+}
+
 /** A press on one of the pane's actions. Anything that is not one of ours, or names nothing known, does nothing. */
 async function paneAct($: EngineInterface, app: App, href: string) {
   const action = parseActionHref(href)
@@ -1352,6 +1594,13 @@ async function paneAct($: EngineInterface, app: App, href: string) {
       const to = shown[Math.max(0, Math.min(shown.length - 1, at + (verb === 'select-next' ? 1 : -1)))]
       if (to === undefined) return
       await update($, pane, p => ({ ...(p ?? EMPTY_PANE), selected: to.replyToId }))
+      return
+    }
+    case 'select': {
+      // A press on a row selects it; a second press on the row already selected opens or closes its detail.
+      if (!shown.some(t => t.replyToId === id)) return
+      if (current?.selected === id) return toggleMore($, id)
+      await update($, pane, p => ({ ...(p ?? EMPTY_PANE), selected: id }))
       return
     }
     case 'more':
@@ -1712,6 +1961,7 @@ export const register: Register = (on, options) => {
 
     detach(loadPane($, app))
     const opened = await $.ui.open({ id: PANE, title: 'Orchard', focus: true })
+    await paneOpened($, app)
     return { text: opened.isPlaced ? 'Orchard pane opened.' : 'Orchard pane: widen the terminal to see it.' }
   })
 
@@ -1721,7 +1971,17 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__orchard__orchard_history' }, ($, e) => answerTool($, app, 'orchard_history', e))
   on('tool.call', { tool: 'mcp__orchard__orchard_call' }, ($, e) => answerTool($, app, 'orchard_call', e))
 
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    paneClosed(app)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    // Drawn means open: from here the pane's tasks and decisions are kept fresh (memory only; a draw may not write state).
+    if (!app.ls.isPaneOpen) {
+      app.ls.isPaneOpen = true
+      armSafety($, app)
+    }
     const t = $.ui.resolve(e)
     const table: Table = {
       Box: t.Box,
@@ -1745,6 +2005,8 @@ export const register: Register = (on, options) => {
         settings: await read($, settings),
         status: await read($, status),
         counts: await read($, counts),
+        // Read (the atom, to be drawn again when it moves) and shown from memory, which is never behind it.
+        lastPollAt: app.ls.lastPollAt ?? (await read($, heartbeat)).lastPollAt,
         nowMs: await $.clock.now(),
         columns: typeof e.props.bodyColumns === 'number' ? e.props.bodyColumns : undefined,
         surface: e.surface,
@@ -1758,7 +2020,8 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
 
-    const line = bandLine(await read($, status), await read($, workspace), await read($, counts))
+    // The band reads one atom: the line itself, written only when its text changes.
+    const line = await read($, band)
     if (line === null) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)

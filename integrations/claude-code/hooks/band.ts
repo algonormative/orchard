@@ -20,12 +20,14 @@ export type BandLine = {
 const count = (n: number) => (Number.isFinite(n) && n > 0 ? Math.floor(n) : 0)
 const SHORT_NAME = 24
 
-const line = (segments: BandSegment[], tone: BandLine['tone']): BandLine => ({ text: segments.map(s => s.text).join(''), segments, tone })
-const head: BandSegment[] = [
-  { text: '◆ ', tone: 'mark' },
-  { text: 'orchard', tone: 'plain' },
-]
 const dim = (text: string): BandSegment => ({ text, tone: 'dim' })
+const line = (segments: BandSegment[], tone: BandLine['tone']): BandLine => ({ text: segments.map(s => s.text).join(''), segments, tone })
+/** `◆ <participant> in <workspace>`: whose line this is. Before the identity is known: `◆ orchard`. */
+const headOf = (me: string, name: string): BandSegment[] => [
+  { text: '◆ ', tone: 'mark' },
+  { text: me === '' ? 'orchard' : me, tone: 'plain' },
+  ...(me !== '' && name !== '' ? [dim(' in '), { text: name, tone: 'plain' as const }] : []),
+]
 
 /** The workspace name cut to fit a band; empty when it has none. */
 export function shortName(workspace: OrchardWorkspace | null): string {
@@ -37,8 +39,12 @@ export function bandLine(
   status: OrchardStatus | null,
   workspace: OrchardWorkspace | null,
   counts: OrchardCounts,
+  /** The participant this session is: the band is that Claude's line, not the owner's. */
+  me = '',
 ): BandLine | null {
   if (status === null) return null
+  const name = shortName(workspace)
+  const head = headOf(me, name)
 
   switch (status.kind) {
     case 'connecting':
@@ -54,18 +60,14 @@ export function bandLine(
       const forYou = count(counts.forYou)
       const needsYou = count(counts.needsYou)
       const isStoreFailing = status.isStoreFailing === true
-      const name = shortName(workspace)
       const segments: BandSegment[] = [...head]
       if (unread === 0 && forYou === 0 && needsYou === 0 && !isStoreFailing) {
-        if (name !== '') segments.push(dim(` · ${name}`))
         segments.push(dim(' · '), { text: '● listening', tone: 'ok' })
         return line(segments, 'quiet')
       }
       if (unread > 0) {
         segments.push(dim(' · '), { text: `${unread} new`, tone: 'plain' })
         if (forYou > 0) segments.push(dim(' · '), { text: `${forYou} for you`, tone: 'plain' })
-      } else if (name !== '') {
-        segments.push(dim(` · ${name}`))
       }
       if (needsYou > 0) segments.push(dim(' · '), { text: `needs you ${needsYou}`, tone: 'warn' })
       if (counts.isHeld === true && unread > 0) segments.push(dim(' · sends when box is empty'))

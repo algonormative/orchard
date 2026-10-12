@@ -110,6 +110,19 @@ export type ListenerState = {
   hidden: string[]
   /** Lapses the pane's "remove? ✓ ✗" question. */
   confirmTimer: Cancelable | undefined
+  /** The /orchard pane is open: only then are the pane's tasks and decisions kept fresh. */
+  isPaneOpen: boolean
+  /** The one debounced refresh of claimed tasks and open decisions a receipt asked for. */
+  workTimer: Cancelable | undefined
+  /** The slow safety refresh, armed only while the pane is open. */
+  safetyTimer: Cancelable | undefined
+  isRefreshingWork: boolean
+  /** Another refresh was asked for while one ran. */
+  isWorkDirty: boolean
+  /** The task stores the pane last listed claims from (so a refresh does not ask the workspace for them again). */
+  storeIds: string[] | undefined
+  /** Clock time the alert loop last heard back; the heartbeat atom mirrors it while the pane is open. */
+  lastPollAt: number | null
 }
 
 export function createListenerState(): ListenerState {
@@ -153,6 +166,13 @@ export function createListenerState(): ListenerState {
     snoozeTimer: undefined,
     hidden: [],
     confirmTimer: undefined,
+    isPaneOpen: false,
+    workTimer: undefined,
+    safetyTimer: undefined,
+    isRefreshingWork: false,
+    isWorkDirty: false,
+    storeIds: undefined,
+    lastPollAt: null,
   }
 }
 

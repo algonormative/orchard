@@ -1,8 +1,10 @@
 // The /orchard pane as a pure function of its data. register.tsx resolves the element
 // table (`$.ui.resolve`) and builds the handlers (they are the `$` calls), so nothing here
-// touches `$`. Drawn parts (header, thread rows, section labels, footer) are Svg strings from
-// svg.ts on the surfaces that draw an Svg; the terminal has none and gets the same structure
-// as Text. Everything clickable is a Box/Text/Button/Select, as an Svg cannot hold a control.
+// touches `$`. Drawn parts (header, a thread row's avatar mark, section labels, footer) are Svg
+// strings from svg.ts on the surfaces that draw an Svg; the terminal has none and gets the same
+// structure as Text. An Svg cannot take a press, so everything clickable is a Markdown link
+// (a thread row's words), a Button or a Select. The pane is one Claude session's view of the
+// workspace, and its labels say so.
 // The mobile app draws no Input or Select: there the notification settings are text.
 import type { Elements } from 'claude-code'
 
@@ -12,7 +14,7 @@ import type { ActionLine, Verb } from './actions'
 import { LEVELS } from './classify'
 import { describeSettings } from './notify'
 import { relativeTime } from './threads'
-import { FOOTER_HEIGHT, chipOf, cut, footerSvg, footerText, headerSvg, rowHeight, rowSvg, sectionSvg, widthOf } from './svg'
+import { FOOTER_HEIGHT, MARK_WIDTH, PANE_TITLE, chipOf, cut, footerSvg, footerText, headerSvg, rowHeight, rowLinkText, rowMarkSvg, sectionSvg, sublineOf, widthOf } from './svg'
 
 export type Table = Pick<Elements['mobile'], 'Box' | 'Text' | 'Button' | 'Markdown'> & {
   /** Absent on the terminal; the caller also leaves it out where a surface should not draw one. */
@@ -31,6 +33,8 @@ export type PaneView = {
   settings: OrchardSettings
   status: OrchardStatus | null
   counts: OrchardCounts | null
+  /** Clock time the alert loop last heard back; the footer shows its age. */
+  lastPollAt?: number | null
   /** The clock, for relative times and the footer. */
   nowMs: number
   /** Cells across the pane body, for sizing the drawings. */
@@ -93,8 +97,8 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   const unreadCount = threads.filter(t => t.isUnread).length
   const pill = unreadCount > 0 ? `${unreadCount} NEW` : undefined
 
-  const picture = (key: string, source: string, alt: string, height: number, isInteractive = false) =>
-    Svg === undefined ? null : <Svg key={key} source={source} alt={alt} width={w} height={height} isInteractive={isInteractive} />
+  const picture = (key: string, source: string, alt: string, height: number, isInteractive = false, width = w) =>
+    Svg === undefined ? null : <Svg key={key} source={source} alt={alt} width={width} height={height} isInteractive={isInteractive} />
 
   /** A section label: the drawn rule and caps on Svg surfaces, a Text line elsewhere. */
   const section = (key: string, label: string, withPill?: string) =>
@@ -111,16 +115,16 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
     Svg === undefined ? (
       <Box key="header" flexDirection="column">
         <Box>
-          <Text bold>◆ Claude's inbox · {view.workspaceName || 'workspace'}</Text>
-          <Text dimColor> · as {view.participantId}</Text>
+          <Text bold>◆ {PANE_TITLE}</Text>
         </Box>
+        <Text dimColor>{sublineOf(view.participantId, view.workspaceName)}</Text>
         <Text color={CHIP_TOKEN[chip.kind]} dimColor={CHIP_TOKEN[chip.kind] === undefined}>● {chip.label}</Text>
       </Box>
     ) : (
       picture(
         'header',
         headerSvg(w, { workspaceName: view.workspaceName, participantId: view.participantId, chip }),
-        `Claude's inbox, workspace ${view.workspaceName || ''}, ${chip.label}`.replace(/\s+,/, ','),
+        `${PANE_TITLE}, workspace ${view.workspaceName || ''}, ${chip.label}`.replace(/\s+,/, ','),
         90,
         true,
       )
@@ -169,23 +173,29 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
     const key = thread.replyToId
     const isSelected = key === selectedKey
     const { last } = thread
-    const age = relativeTime(last.sentAt, nowMs) + (thread.size > 1 ? ` · ${thread.size}` : '')
+    const href = actionHref('select', key)
+    // The row is one link: a press selects it, a second press on the selected row opens its detail.
+    const mark = Svg === undefined ? (isSelected ? '▶ ' : thread.isUnread ? '● ' : '· ') : isSelected ? '▶ ' : ''
+    const words = (
+      <Markdown key={`row-${key}`} text={rowLinkText(thread, nowMs, href, mark)} dimColor={!thread.isUnread} pressableLinks={[href]} onLinkPress={link => on.act(link.href)} />
+    )
     const card =
       Svg === undefined ? (
-        <Box flexDirection="column">
-          <Text dimColor={!thread.isUnread} bold={thread.isUnread}>
-            {isSelected ? '▶ ' : thread.isUnread ? '● ' : '  '}
-            {last.senderName} [{thread.reason}] · {age}
-          </Text>
-          <Text dimColor>{'  '}{cut(last.snippet, 80)}</Text>
-        </Box>
+        words
       ) : (
-        picture(
-          `thread-svg-${key}`,
-          rowSvg(w, thread, nowMs, isSelected),
-          `${last.senderName}, ${thread.reason}${thread.isUnread ? ', new' : ''}${isSelected ? ', selected' : ''}: ${last.snippet}`,
-          rowHeight(thread),
-        )
+        <Box flexDirection="row" columnGap={1} alignItems="center">
+          {picture(
+            `thread-mark-${key}`,
+            rowMarkSvg(thread, isSelected),
+            `${last.senderName}, ${thread.reason}${thread.isUnread ? ', new' : ''}${isSelected ? ', selected' : ''}`,
+            rowHeight(thread),
+            false,
+            MARK_WIDTH,
+          )}
+          <Box flexGrow={1} flexShrink={1}>
+            {words}
+          </Box>
+        </Box>
       )
     return (
       <Box key={`thread-${key}`} flexDirection="column">
@@ -214,7 +224,7 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
         <Button key="refresh" label="Refresh" hotkey="r" onPress={() => on.act(actionHref('refresh'))} />
       </Box>
 
-      {section('section-inbox', 'INBOX', pill)}
+      {section('section-inbox', "CLAUDE'S INBOX", pill)}
       {pane === null || pane.state === 'loading' ? <Text dimColor>Loading…</Text> : null}
       {pane?.state === 'failed' ? <Text color="error">{pane.error ?? 'could not read the workspace'}</Text> : null}
       {snoozed === null ? null : <Text dimColor>{snoozed}</Text>}
@@ -224,8 +234,8 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
       {older > 0 ? <Button key="older-threads" label={`▸ ${older} older thread${older === 1 ? '' : 's'}`} onPress={on.toggleOlder} /> : null}
       {isOlderShown && threads.length > VISIBLE_THREADS ? <Button key="older-threads" label="▾ hide older threads" onPress={on.toggleOlder} /> : null}
 
-      {section('section-needs', 'NEEDS YOU')}
-      {pane?.state === 'ready' && pane.decisions.length === 0 ? <Text color="success">✓ no open decisions</Text> : null}
+      {section('section-needs', 'CLAUDE IS WAITING ON YOU')}
+      {pane?.state === 'ready' && pane.decisions.length === 0 ? <Text color="success">✓ Claude is not waiting on you</Text> : null}
       {(pane?.decisions ?? []).map(decision => (
         <Box key={`decision-${decision.id}`}>
           <Text color="warning">◆ {decision.snippet}</Text>
@@ -234,7 +244,7 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
         </Box>
       ))}
 
-      {section('section-tasks', 'CLAIMED TASKS')}
+      {section('section-tasks', "CLAUDE'S TASKS")}
       {pane?.state === 'ready' && pane.tasks.length === 0 ? <Text dimColor>none — the grove is quiet</Text> : null}
       {(pane?.tasks ?? []).map(task => (
         <Box key={`task-${task.id}`}>
@@ -265,9 +275,9 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
       )}
       <Text dimColor>A wake starts a turn in an idle session. Quiet items wait for your next prompt.</Text>
       {Svg === undefined ? (
-        <Text dimColor>{footerText(view.counts?.lastPollAt, nowMs)}</Text>
+        <Text dimColor>{footerText(view.lastPollAt, nowMs)}</Text>
       ) : (
-        picture('footer', footerSvg(w, footerText(view.counts?.lastPollAt, nowMs)), 'Tending the grove', FOOTER_HEIGHT)
+        picture('footer', footerSvg(w, footerText(view.lastPollAt, nowMs)), 'Tending the grove', FOOTER_HEIGHT)
       )}
     </Box>
   )

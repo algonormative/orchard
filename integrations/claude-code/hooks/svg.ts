@@ -20,7 +20,7 @@ export function widthOf(columns: number | undefined): number {
   return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Math.floor(columns) * PX_PER_COLUMN - 8))
 }
 
-const STYLE = `:root{--bg:#f8faef;--card:#e5ecca;--text:#070b08;--dim:#465349;--accent:#3f4a00;--leaf:#1d5c27;--leafbg:#cfe6cb;--rule:#b4c194;--chip:#ebf1d4;--chipline:#a9b88a;--grain:#dde5c3;--badge:#e6ff68;--onbadge:#0d140f;--peach:#ffcfad;--dot:#8aa000;--err:#8f1d1d;--errbg:#f6d3cf;--warn:#7a4a00;--warnbg:#f7e2b0}@media (prefers-color-scheme: dark){:root{--bg:#070c0a;--card:#18251d;--text:#f6fae8;--dim:#a5b5a7;--accent:#ecff7a;--leaf:#93f09b;--leafbg:#2c4a32;--rule:#3f5548;--chip:#1b281f;--chipline:#46604f;--grain:#1f2e25;--badge:#e6ff68;--onbadge:#090f0d;--peach:#ffcfad;--dot:#e6ff68;--err:#ff9d94;--errbg:#4a2220;--warn:#ffd37a;--warnbg:#4a3a14}}.mono{font-family:ui-monospace,'SF Mono',Menlo,monospace}.bg{fill:var(--bg)}.card{fill:var(--card)}.text{fill:var(--text)}.dim{fill:var(--dim)}.accent{fill:var(--accent)}.leaf{fill:var(--leaf)}.leafbg{fill:var(--leafbg)}.rule{fill:var(--rule)}.grain{fill:var(--grain)}.badge{fill:var(--badge)}.onbadge{fill:var(--onbadge)}.peach{fill:var(--peach)}.dot{fill:var(--dot)}.err{fill:var(--err)}.errbg{fill:var(--errbg)}.warn{fill:var(--warn)}.warnbg{fill:var(--warnbg)}.chip{fill:var(--chip);stroke:var(--chipline)}.outline{fill:none;stroke:var(--dim)}.sel{fill:none;stroke:var(--dot);stroke-width:2}`
+const STYLE = `:root{--bg:#f8faef;--card:#e5ecca;--text:#070b08;--dim:#465349;--accent:#3f4a00;--leaf:#1d5c27;--leafbg:#cfe6cb;--rule:#b4c194;--chip:#ebf1d4;--chipline:#a9b88a;--grain:#dde5c3;--badge:#e6ff68;--onbadge:#0d140f;--peach:#ffcfad;--dot:#8aa000;--err:#8f1d1d;--errbg:#f6d3cf;--warn:#7a4a00;--warnbg:#f7e2b0}@media (prefers-color-scheme: dark){:root{--bg:#070c0a;--card:#18251d;--text:#f6fae8;--dim:#a5b5a7;--accent:#ecff7a;--leaf:#93f09b;--leafbg:#2c4a32;--rule:#3f5548;--chip:#1b281f;--chipline:#46604f;--grain:#1f2e25;--badge:#e6ff68;--onbadge:#090f0d;--peach:#ffcfad;--dot:#e6ff68;--err:#ff9d94;--errbg:#4a2220;--warn:#ffd37a;--warnbg:#4a3a14}}.mono{font-family:ui-monospace,'SF Mono',Menlo,monospace}.bg{fill:var(--bg)}.card{fill:var(--card)}.text{fill:var(--text)}.dim{fill:var(--dim)}.accent{fill:var(--accent)}.leaf{fill:var(--leaf)}.leafbg{fill:var(--leafbg)}.rule{fill:var(--rule)}.grain{fill:var(--grain)}.badge{fill:var(--badge)}.onbadge{fill:var(--onbadge)}.peach{fill:var(--peach)}.dot{fill:var(--dot)}.err{fill:var(--err)}.errbg{fill:var(--errbg)}.warn{fill:var(--warn)}.warnbg{fill:var(--warnbg)}.chip{fill:var(--chip);stroke:var(--chipline)}.outline{fill:none;stroke:var(--dim)}.sel{fill:none;stroke:var(--dot);stroke-width:2}.bar{fill:var(--dot)}`
 
 /** Escapes text for XML after dropping control characters. */
 export function esc(value: string): string {
@@ -81,13 +81,17 @@ const CHIP_CLASS: Record<ChipKind, { bg: string; fg: string }> = {
 
 export const HEADER_HEIGHT = 90
 
+/** The pane is one Claude session's view of the workspace: its title says so, its subline says which session and where. */
+export const PANE_TITLE = "Claude's view of Orchard"
+export const sublineOf = (participantId: string, workspaceName: string) => `this session · as ${participantId} · ${workspaceName || 'workspace'}`
+
 export function headerSvg(w: number, args: { workspaceName: string; participantId: string; chip: Chip }): string {
   const { bg, fg } = CHIP_CLASS[args.chip.kind]
   const label = esc(args.chip.label)
   const chipW = Math.ceil(args.chip.label.length * 6.4 + 36)
   const chipX = Math.max(18, w - 18 - chipW)
   const nameMax = Math.max(8, Math.floor((w - 56 - 18) / 8.6))
-  const idMax = Math.max(6, Math.floor((chipX - 56 - 8) / 6.2))
+  const idMax = Math.max(6, Math.floor((w - 56 - 18) / 6.2))
   const pulse = args.chip.kind === 'listening' ? '<animate attributeName="opacity" values="1;.35;1" dur="2.4s" repeatCount="indefinite"/>' : ''
   const body =
     `<rect width="${w}" height="${HEADER_HEIGHT}" class="bg"/>` +
@@ -97,8 +101,8 @@ export function headerSvg(w: number, args: { workspaceName: string; participantI
     `<ellipse cx="18" cy="5" rx="5" ry="3" fill="#81e78a" transform="rotate(-30 18 5)"/>` +
     `<text x="9" y="19" class="mono onbadge" font-size="12" font-weight="700">◕‿◕</text>` +
     `<text x="38" y="11" class="mono accent" font-size="10" letter-spacing="1.5">ORCHARD //</text>` +
-    `<text x="38" y="27" class="text" font-size="15" font-weight="700">${esc(cut(`Claude's inbox · ${args.workspaceName || 'workspace'}`, nameMax))}</text></g>` +
-    `<text x="56" y="66" class="mono dim" font-size="10">as ${esc(cut(args.participantId, idMax))}</text>` +
+    `<text x="38" y="27" class="text" font-size="15" font-weight="700">${esc(cut(PANE_TITLE, nameMax))}</text></g>` +
+    `<text x="56" y="82" class="mono dim" font-size="10">${esc(cut(sublineOf(args.participantId, args.workspaceName), idMax))}</text>` +
     `<g transform="translate(${chipX},52)"><rect width="${chipW}" height="22" rx="11" class="${bg}"/>` +
     `<circle cx="14" cy="11" r="4" class="${fg}">${pulse}</circle>` +
     `<text x="25" y="15" class="mono ${fg}" font-size="10.5">${label}</text></g>`
@@ -149,41 +153,39 @@ export function rowHeight(thread: OrchardPaneThread): number {
   return thread.isUnread ? UNREAD_ROW_HEIGHT : READ_ROW_HEIGHT
 }
 
-/** One compact thread (a citron outline when `selected`): avatar, sender, reason badge, one-line preview, age and size. Unread: card, edge bar, dot. Read: 80%. */
-export function rowSvg(w: number, thread: OrchardPaneThread, nowMs: number, selected = false): string {
-  const { last } = thread
-  const cardW = w - 20
-  const age = relativeTime(last.sentAt, nowMs) + (thread.size > 1 ? ` · ${thread.size}` : '')
-  const name = cut(last.senderName, 22)
-  const avatar = last.isOwner ? 'badge' : 'peach'
+/** How wide the drawn mark of a row is: an edge bar and the avatar. The words beside it are a Markdown link. */
+export const MARK_WIDTH = 52
 
-  if (thread.isUnread) {
-    const previewMax = Math.max(8, Math.floor((cardW - 54 - 30) / 6.3))
-    const body =
-      `<g transform="translate(10,0)"><rect width="${cardW}" height="${UNREAD_ROW_HEIGHT - 4}" rx="10" class="card"/>` +
-      `<rect x="0" y="10" width="3" height="38" rx="1.5" class="dot"/>` +
-      `<circle cx="30" cy="29" r="15" class="${avatar}"/><text x="30" y="34" class="mono onbadge" font-size="12" font-weight="700" text-anchor="middle">${esc(initialsOf(last.senderName))}</text>` +
-      `<text x="54" y="23" class="text" font-size="13" font-weight="700">${esc(name)}</text>` +
-      badge(thread.reason, 54 + name.length * 7.6 + 8, 12) +
-      `<text x="${cardW - 16}" y="23" class="mono dim" font-size="10" text-anchor="end">${esc(age)}</text>` +
-      `<circle cx="${cardW - 10}" cy="40" r="3.5" class="dot"/>` +
-      `<text x="54" y="43" class="text" font-size="12">${esc(cut(last.snippet, previewMax))}</text>` +
-      (selected ? `<rect x="1" y="1" width="${cardW - 2}" height="${UNREAD_ROW_HEIGHT - 6}" rx="9" class="sel"/>` : '') +
-      '</g>'
-    return svg(w, UNREAD_ROW_HEIGHT, body)
-  }
-
-  const previewMax = Math.max(8, Math.floor((cardW - 52 - 20) / 6))
+/**
+ * The small drawing at the left of a thread row: an avatar, a citron edge bar when the thread is
+ * unread, and a thicker outlined bar plus ring when it is selected. Svg cannot take a press, so the
+ * words of the row (sender, badge, age, preview) are a Markdown link beside it (pane.tsx).
+ */
+export function rowMarkSvg(thread: OrchardPaneThread, selected = false): string {
+  const h = rowHeight(thread)
+  const mid = (h - 4) / 2
+  const avatar = thread.last.isOwner ? 'badge' : 'peach'
+  const r = thread.isUnread ? 15 : 13
   const body =
-    `<g transform="translate(10,0)" opacity=".8">` +
-    `<circle cx="30" cy="22" r="13" class="${avatar}"/><text x="30" y="26.5" class="mono onbadge" font-size="11" font-weight="700" text-anchor="middle">${esc(initialsOf(last.senderName))}</text>` +
-    `<text x="52" y="19" class="text" font-size="12.5" font-weight="600">${esc(name)}</text>` +
-    badge(thread.reason, 52 + name.length * 7.2 + 8, 8) +
-    `<text x="${cardW - 16}" y="19" class="mono dim" font-size="10" text-anchor="end">${esc(age)}</text>` +
-    `<text x="52" y="37" class="text" font-size="11.5">${esc(cut(last.snippet, previewMax))}</text>` +
-    (selected ? `<rect x="1" y="1" width="${cardW - 2}" height="${READ_ROW_HEIGHT - 6}" rx="9" class="sel"/>` : '') +
+    `<g${thread.isUnread ? '' : ' opacity=".8"'}>` +
+    (thread.isUnread ? `<rect x="2" y="8" width="3" height="${h - 20}" rx="1.5" class="dot"/>` : '') +
+    (selected ? `<rect x="0" y="4" width="5" height="${h - 12}" rx="2.5" class="bar"/><circle cx="30" cy="${mid}" r="${r + 3}" class="sel"/>` : '') +
+    `<circle cx="30" cy="${mid}" r="${r}" class="${avatar}"/>` +
+    `<text x="30" y="${mid + 4.5}" class="mono onbadge" font-size="${thread.isUnread ? 12 : 11}" font-weight="700" text-anchor="middle">${esc(initialsOf(thread.last.senderName))}</text>` +
     '</g>'
-  return svg(w, READ_ROW_HEIGHT, body)
+  return svg(MARK_WIDTH, h, body)
+}
+
+/** Backslash-escapes what Markdown would read as markup, so a name or a preview stays plain text inside a link. */
+export function mdEscape(value: string): string {
+  return value.replace(/[\\`*_{}\[\]()<>#+!|~&]/g, ch => `\\${ch}`)
+}
+
+/** The row's words as one Markdown link: `[**Sender** · DM · 2m — preview](href)`. `mark` leads it where no drawing does. */
+export function rowLinkText(thread: OrchardPaneThread, nowMs: number, href: string, mark = ''): string {
+  const { last } = thread
+  const age = relativeTime(last.sentAt, nowMs) + (thread.size > 1 ? ` · ${thread.size}` : '')
+  return `[${mark}**${mdEscape(cut(last.senderName, 22))}** · ${thread.reason} · ${age} — ${mdEscape(cut(last.snippet, 80))}](${href})`
 }
 
 // ---- footer ----

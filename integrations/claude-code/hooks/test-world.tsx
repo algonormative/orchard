@@ -22,6 +22,8 @@ export const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 10, bod
  */
 export function tapState(on: On) {
   const latest: Record<string, unknown> = {}
+  /** How many times each key was written: an idle session must write none. */
+  const writes: Record<string, number> = {}
   const override: Record<string, unknown> = {}
   const seed: Record<string, unknown> = {}
   const refuse: { key: string | undefined } = { key: undefined }
@@ -32,7 +34,10 @@ export function tapState(on: On) {
       refuse.key = undefined
       return { deny: 'the host refused the write' }
     }
-    if (e.plugin === 'orchard') latest[e.key] = e.value
+    if (e.plugin === 'orchard') {
+      latest[e.key] = e.value
+      writes[e.key] = (writes[e.key] ?? 0) + 1
+    }
     return next(e as never)
   })
   loose('state.get', async (_$, e, next) => {
@@ -43,7 +48,7 @@ export function tapState(on: On) {
     }
     return e.plugin === 'orchard' && e.key in override ? { value: { value: override[e.key], version: 1 } } : next(e as never)
   })
-  return { latest, override, seed, refuse }
+  return { latest, writes, override, seed, refuse }
 }
 
 export type Submit = {

@@ -52,17 +52,35 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   bookkeeping, and the stored cursor already prevents a repeat delivery).
 - **`/orchard`** opens a pane with the participant's inbox, open decisions, claimed tasks
   and notification settings. `/orchard notify` reads and sets levels from the prompt.
-- **Whose inbox it is.** The pane shows the *session participant's* mailbox (for example
-  `claude-vault`), not the human owner's, and the header says so: "Claude's inbox ·
-  <workspace> · as <participantId>". The owner uses it to supervise that mailbox and steer
-  what Claude sees first; decisions that wait on the owner link to Orchard to be answered.
-- **Pane actions (one toolbar, one selection).** Rows carry no controls on any surface: a row
-  is just its card (an Svg on desktop, VS Code and mobile; a text row on the terminal), so
-  nothing hovers, overlays or changes a row's height. One thread is *selected* (kept in
+- **Whose view it is.** The pane and the band show what *this Claude session* sees and does
+  in the workspace, not the human owner's own inbox. The pane's title is "Claude's view of
+  Orchard" with the subline "this session · as <participantId> · <workspace>"; its sections
+  are CLAUDE'S INBOX (the session participant's mailbox, for example `claude-vault`),
+  CLAUDE'S TASKS (tasks that participant has claimed) and CLAUDE IS WAITING ON YOU (decisions
+  it raised that the owner has not answered; each links to Orchard to be answered). The owner
+  uses it to supervise that mailbox and steer what Claude sees first.
+- **Live.** The alert listener already long-polls `alerts --channels --wait 60`, which
+  returns the moment mail arrives, so the pane is fed from it: every page is folded into the
+  inbox at once (new thread, or a reply extending its thread; unread until delivered) with no
+  history call. Orchard posts task intents and outcomes to the `task-receipts` channel, which
+  arrive through the same poll; a receipt, a decision, or an owner's reply in a thread
+  schedules ONE debounced (1 s) refresh of claimed tasks and open decisions (and the band's
+  needs-you count), however many arrive together. While the pane is open it also refreshes
+  them every 60 s; while it is closed nothing runs. **Refresh** still re-reads everything.
+  Idle polls change nothing: a state value is written only when it differs from what is
+  there, the poll clock lives in its own atom that only the pane's footer reads (and only
+  while the pane is open), and the band reads one atom holding its finished line, so it
+  redraws only when its text changes.
+- **Pane actions (one toolbar, one selection).** Rows carry no buttons on any surface, so
+  nothing hovers, overlays or changes a row's height. A row is a small drawn mark (an Svg
+  avatar with an unread edge bar, on desktop, VS Code and mobile) beside its words, which are
+  one Markdown link: `**sender** · badge · age — preview`. An Svg cannot take a press, so the
+  link is what you click: a press **selects** the row, and a second press on the selected row
+  toggles its detail (More). On the terminal the row is the same link as text. One thread is *selected* (kept in
   `$.state`, so it survives redraws; it defaults to the newest unread thread, else the newest,
   and falls back to that when the pick is removed, snoozed or folded away; removing or
-  snoozing the selected thread hands the selection to its neighbour). The selected card is
-  drawn with a citron outline (`▶ ` before the sender on the terminal). Above the list sits
+  snoozing the selected thread hands the selection to its neighbour). The selected row is
+  marked `▶ ` and its mark is drawn with a citron bar and ring. Above the list sits
   one row of standard Buttons that act on the selected thread; each has a hotkey (one
   lowercase letter, live while the pane holds focus; `/orchard` opens the pane focused):
   `▲` k and `▼` j move the selection, **Remove** x, **Snooze** s, **Handle next** n,
@@ -95,20 +113,22 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
     which the mod does not do; use Orchard to resend it.
 - **Look.** The pane and band use the Orchard x LEMON palette (ink, neon citron, leaf,
   cream; monospace labels, small ASCII motifs) and follow Claude's light or dark theme.
-  The pane has a drawn header (lemon mark, workspace, identity, and a status chip: green
-  "listening", amber "waiting for you", red "offline", grey "another session is
-  listening"), an INBOX with an "N NEW" pill, and compact thread rows (avatar, sender,
+  The pane has a drawn header (lemon mark, "Claude's view of Orchard", this session's
+  identity and workspace, and a status chip: green "listening", amber "waiting for you",
+  red "offline", grey "another session is listening"), a CLAUDE'S INBOX with an "N NEW"
+  pill, and compact thread rows (avatar, sender,
   reason badge DM / MENTION / REPLY / BROADCAST / OWNER, one-line preview, age, message
   count; unread rows carry an edge bar and dot, read rows are dimmed). The newest five
-  threads show and the rest fold behind "N older threads". Then NEEDS YOU (each decision
-  has an "answer in Orchard ↗" link) and CLAIMED TASKS as short status lines,
+  threads show and the rest fold behind "N older threads". Then CLAUDE IS WAITING ON YOU (each decision
+  has an "answer in Orchard ↗" link) and CLAUDE'S TASKS as short status lines,
   NOTIFY as dropdowns (default, each channel) plus batch and gap, and a footer with the
   last poll's age. The drawn parts are SVG sized from the pane width; the terminal draws
   the same structure as text, and mobile shows the notification settings as text. The
-  band is one line and is always there while connected: `◆ orchard · <workspace> ●
-  listening` when quiet, `◆ orchard · N new · K for you` with news (plus `· sends when
-  box is empty` while a draft holds a wake), and its own wording when offline, in error
-  or when another session is the listener.
+  band is one line and is always there while connected, and it names this session:
+  `◆ <participantId> in <workspace> · ● listening` when quiet, `◆ <participantId> in
+  <workspace> · N new · K for you` with news (plus `· sends when box is empty` while a draft
+  holds a wake), and its own wording when offline, in error or when another session is the
+  listener (before the identity is known it reads `◆ orchard`).
 
 The credential never enters the model's context. The mod passes the credential file's
 **path** to the CLI in its environment and never reads the file. Output shown to the

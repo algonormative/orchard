@@ -115,26 +115,30 @@ test('the project file is read for participantId and name and nothing else', () 
   expect(parseProjectFile('{"participantId":"a/b"}').ok).toBe(false)
 })
 
-test('the band says the workspace name, offline, or a sanitized error, and never an id', () => {
+test('the band is the session\'s own line: its participant in the workspace, offline, or a sanitized error, and never a request id', () => {
   const quiet = { unread: 0, forYou: 0, needsYou: 0 }
   const ws = { name: 'Fruit Stand', ownerId: 'owner' }
-  expect(bandLine(null, null, quiet)).toBeNull()
+  const me = 'claude-fruit-stand'
+  const line = (status: Parameters<typeof bandLine>[0], workspace: Parameters<typeof bandLine>[1], counts: typeof quiet & { isHeld?: boolean }) => bandLine(status, workspace, counts, me)
+  expect(bandLine(null, null, quiet, me)).toBeNull()
+  expect(line({ kind: 'connecting' }, null, quiet)?.text).toBe('◆ claude-fruit-stand · connecting…')
+  // Before the identity is known there is only the mod's name.
   expect(bandLine({ kind: 'connecting' }, null, quiet)?.text).toBe('◆ orchard · connecting…')
   // Connected and quiet still draws the standing sign that it is alive; any count above zero replaces it.
-  expect(bandLine({ kind: 'connected' }, ws, quiet)?.text).toBe('◆ orchard · Fruit Stand · ● listening')
-  expect(bandLine({ kind: 'connected' }, { name: null, ownerId: null }, quiet)?.text).toBe('◆ orchard · ● listening')
-  expect(bandLine({ kind: 'connected' }, { name: null, ownerId: null }, { unread: 1, forYou: 0, needsYou: 0 })?.text).toBe('◆ orchard · 1 new')
-  expect(bandLine({ kind: 'offline', failures: 3 }, ws, quiet)).toMatchObject({ text: '◆ orchard · ○ offline', tone: 'warning' })
-  expect(bandLine({ kind: 'error', message: 'nope' }, ws, quiet)).toMatchObject({ text: '◆ orchard · error: nope', tone: 'error' })
-  expect(bandLine({ kind: 'connected' }, ws, { unread: 3, forYou: 0, needsYou: 0 })?.text).toBe('◆ orchard · 3 new')
-  expect(bandLine({ kind: 'connected' }, ws, { unread: 2, forYou: 1, needsYou: 1 })?.text).toBe('◆ orchard · 2 new · 1 for you · needs you 1')
-  expect(bandLine({ kind: 'connected' }, ws, { unread: 2, forYou: 1, needsYou: 0, isHeld: true })?.text).toBe('◆ orchard · 2 new · 1 for you · sends when box is empty')
-  expect(bandLine({ kind: 'connected' }, ws, { unread: 0, forYou: 0, needsYou: 2 })?.text).toBe('◆ orchard · Fruit Stand · needs you 2')
-  expect(bandLine({ kind: 'connected' }, ws, { unread: -1, forYou: Number.NaN, needsYou: 0 })?.text).toBe('◆ orchard · Fruit Stand · ● listening')
-  expect(bandLine({ kind: 'connected', isStoreFailing: true }, ws, quiet)).toMatchObject({ tone: 'warning' })
-  expect(bandLine({ kind: 'connected' }, { name: 'Line one\nline two', ownerId: null }, { unread: 1, forYou: 0, needsYou: 0 })?.text).toBe('◆ orchard · 1 new')
-  expect(bandLine({ kind: 'connected' }, { name: 'Line one\nline two', ownerId: null }, quiet)?.text).toBe('◆ orchard · Line one line two · ● listening')
-  expect(bandLine({ kind: 'shared' }, ws, quiet)?.text).toBe('◆ orchard · another session is listening')
+  expect(line({ kind: 'connected' }, ws, quiet)?.text).toBe('◆ claude-fruit-stand in Fruit Stand · ● listening')
+  expect(line({ kind: 'connected' }, { name: null, ownerId: null }, quiet)?.text).toBe('◆ claude-fruit-stand · ● listening')
+  expect(line({ kind: 'connected' }, { name: null, ownerId: null }, { unread: 1, forYou: 0, needsYou: 0 })?.text).toBe('◆ claude-fruit-stand · 1 new')
+  expect(line({ kind: 'offline', failures: 3 }, ws, quiet)).toMatchObject({ text: '◆ claude-fruit-stand in Fruit Stand · ○ offline', tone: 'warning' })
+  expect(line({ kind: 'error', message: 'nope' }, ws, quiet)).toMatchObject({ text: '◆ claude-fruit-stand in Fruit Stand · error: nope', tone: 'error' })
+  expect(line({ kind: 'connected' }, ws, { unread: 3, forYou: 0, needsYou: 0 })?.text).toBe('◆ claude-fruit-stand in Fruit Stand · 3 new')
+  expect(line({ kind: 'connected' }, ws, { unread: 2, forYou: 1, needsYou: 1 })?.text).toBe('◆ claude-fruit-stand in Fruit Stand · 2 new · 1 for you · needs you 1')
+  expect(line({ kind: 'connected' }, ws, { unread: 2, forYou: 1, needsYou: 0, isHeld: true })?.text).toBe('◆ claude-fruit-stand in Fruit Stand · 2 new · 1 for you · sends when box is empty')
+  expect(line({ kind: 'connected' }, ws, { unread: 0, forYou: 0, needsYou: 2 })?.text).toBe('◆ claude-fruit-stand in Fruit Stand · needs you 2')
+  expect(line({ kind: 'connected' }, ws, { unread: -1, forYou: Number.NaN, needsYou: 0 })?.text).toBe('◆ claude-fruit-stand in Fruit Stand · ● listening')
+  expect(line({ kind: 'connected', isStoreFailing: true }, ws, quiet)).toMatchObject({ tone: 'warning' })
+  expect(line({ kind: 'connected' }, { name: 'Line one\nline two', ownerId: null }, { unread: 1, forYou: 0, needsYou: 0 })?.text).toBe('◆ claude-fruit-stand in Line one line two · 1 new')
+  expect(line({ kind: 'connected' }, { name: 'Line one\nline two', ownerId: null }, quiet)?.text).toBe('◆ claude-fruit-stand in Line one line two · ● listening')
+  expect(line({ kind: 'shared' }, ws, quiet)?.text).toBe('◆ claude-fruit-stand in Fruit Stand · another session is listening')
 })
 
 test('workspace_info gives a name and an owner; missing pieces stay null', () => {
