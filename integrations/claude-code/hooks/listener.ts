@@ -7,6 +7,8 @@ import type { Settings } from './classify'
 import { EMPTY_QUEUE, droppedNotice } from './alerts'
 import type { StoreRecord } from './alerts'
 import type { FrameMessage } from './frame'
+import { createBook } from './handles'
+import type { HandleBook } from './handles'
 
 /** A pending timer from `$.clock.after`; anything with a `cancel()`. */
 export type Cancelable = { cancel: () => void }
@@ -125,6 +127,12 @@ export type ListenerState = {
   decayTimer: Cancelable | undefined
   /** The one timer that looks at the session's agents again: every 2 s while one is live, else when a finished one is due to go. */
   agentTimer: Cancelable | undefined
+  /** The participants this session's subagents act as: who holds which slot of the pool. */
+  subs: HandleBook
+  /** Handle claims in flight, by agent: a second call of the same agent waits for the first's. */
+  subClaims: Map<string, Promise<void>>
+  /** Beats the held subagent leases and lets go of the handles of agents that ended. One at most, armed while any handle is held. */
+  subTimer: Cancelable | undefined
 }
 
 export function createListenerState(): ListenerState {
@@ -177,6 +185,9 @@ export function createListenerState(): ListenerState {
     lastOtherAt: undefined,
     decayTimer: undefined,
     agentTimer: undefined,
+    subs: createBook(),
+    subClaims: new Map(),
+    subTimer: undefined,
   }
 }
 
