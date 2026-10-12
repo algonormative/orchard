@@ -6,6 +6,7 @@ import { DEFAULT_SETTINGS } from './classify'
 import type { Settings } from './classify'
 import { EMPTY_QUEUE, droppedNotice } from './alerts'
 import type { StoreRecord } from './alerts'
+import type { Snooze } from './actions'
 import type { FrameMessage } from './frame'
 
 /** A pending timer from `$.clock.after`; anything with a `cancel()`. */
@@ -100,6 +101,15 @@ export type ListenerState = {
    * `missing` after a tool error (a host older than the tool) so it is not asked again.
    */
   decisionsTool: 'unknown' | 'available' | 'missing'
+  /** The running main-loop turn (`turn.start` to `turn.complete`); "interrupt" aborts it. */
+  turnId: string | undefined
+  /** Alerts the person snoozed (kept in `$.store`), and the timer for the earliest. */
+  snoozes: Snooze[]
+  snoozeTimer: Cancelable | undefined
+  /** Message ids the person removed from the pane (kept in `$.store`). */
+  hidden: string[]
+  /** Lapses the pane's "remove? ✓ ✗" question. */
+  confirmTimer: Cancelable | undefined
 }
 
 export function createListenerState(): ListenerState {
@@ -138,6 +148,11 @@ export function createListenerState(): ListenerState {
     leaseTimer: undefined,
     isStoreFailing: false,
     decisionsTool: 'unknown',
+    turnId: undefined,
+    snoozes: [],
+    snoozeTimer: undefined,
+    hidden: [],
+    confirmTimer: undefined,
   }
 }
 

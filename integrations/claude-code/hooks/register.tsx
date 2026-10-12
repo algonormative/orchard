@@ -6,13 +6,29 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { OrchardAlert, OrchardPane, OrchardPaneThread, OrchardQueue, OrchardSettings, OrchardStatus } from '../types'
 import {
+  CONFIRM_MS,
+  SNOOZE_MS,
+  addHidden,
+  addSnooze,
+  hiddenKey,
+  nextDue,
+  parseActionHref,
+  parseHidden,
+  parseSnoozes,
+  revive,
+  snoozeKey,
+  splitDue,
+} from './actions'
+import {
   ALERTS_TIMEOUT_MS,
   EMPTY_QUEUE,
   SHORT_WAIT_MS,
   WAIT_SECONDS,
   addToQueue,
   countsOf,
+  isMarkedNext,
   isQueueFull,
+  markNext,
   parseAlertsPage,
   parseStoreRecord,
   queueScope,
@@ -221,7 +237,8 @@ async function start($: EngineInterface, app: App, cwd: string) {
 
 // ---- the alert listener ----
 
-const wakeOf = (ls: ListenerState) => (alert: OrchardAlert) => classify(alert, ls.settings, ls.participationSet) === 'wake'
+/** An alert marked "handle next" wakes whatever its classification says (the person asked for it). */
+const wakeOf = (ls: ListenerState) => (alert: OrchardAlert) => isMarkedNext(alert) || classify(alert, ls.settings, ls.participationSet) === 'wake'
 
 /** The loop is the current one: not stopped, not replaced, and no other start took the generation. */
 async function isLive($: EngineInterface, ls: ListenerState, loop: Loop): Promise<boolean> {
@@ -609,6 +626,9 @@ async function prepare($: EngineInterface, app: App, loop: Loop): Promise<boolea
   ls.participation = parseParticipation(await storeGet($, participationKey(endpoint, me)))
   ls.participationSet = new Set(ls.participation)
   if (stored !== undefined) ls.record = stored
+  ls.snoozes = parseSnoozes(await storeGet($, snoozeKey(endpoint, me)))
+  ls.hidden = parseHidden(await storeGet($, hiddenKey(endpoint, me)))
+  await syncAway($, app)
   // A queue left by another connection (a reload that changed the workspace or participant) is
   // not this one's: start empty, so none of its alerts is delivered or acknowledged here and
   // its cursor cannot become this connection's fetch cursor.
@@ -644,6 +664,7 @@ async function prepare($: EngineInterface, app: App, loop: Loop): Promise<boolea
     await applyWindow($, app, window.messages)
   }
   await syncCounts($, app)
+  await releaseDueSnoozes($, app)
   return true
 }
 
@@ -671,6 +692,7 @@ async function tick($: EngineInterface, app: App, loop: Loop) {
       return
     }
     await retryAcks($, app)
+    await releaseDueSnoozes($, app)
     // A queue full of alerts that all wake a session has nowhere to put more: leave them on the
     // server (the cursor does not move) and look again once a delivery has made room.
     if (isQueueFull(await readQueue($, app), wakeOf(ls))) {
@@ -744,7 +766,9 @@ async function absorb($: EngineInterface, app: App, loop: Loop, result: CliResul
   ls.fetchCursor = cursor
   ls.hasMore = page.hasMore && isAdvanced
   if (kept.length > 0) {
-    await updateQueue($, app, q => addToQueue(q, kept, cursor, ls.record.delivered, wakeOf(ls)))
+    // A snoozed alert is not delivered yet but is not for the queue either: it comes back when its time does.
+    const known = [...ls.record.delivered, ...ls.snoozes.map(s => s.id)]
+    await updateQueue($, app, q => addToQueue(q, kept, cursor, known, wakeOf(ls)))
     await syncCounts($, app)
     await armFlush($, app)
   }
@@ -839,6 +863,19 @@ async function wake($: EngineInterface, app: App): Promise<boolean> {
     }
     return false
   }
+  await deliver($, app, batch, q, now)
+  return true
+}
+
+/**
+ * Hands `batch` to the prompt queue as a wake, claimed so it is delivered once: the ids are in
+ * flight (this instance) and claimed in the store (another instance) from before the submit until
+ * it resolves. `lastWakeAt` is set before the submit, so the gap runs from the attempt. A wake
+ * (`wake`) and an interruption (`interruptWith`) both deliver through here. No await comes
+ * between a caller choosing the batch and the ids being marked in flight.
+ */
+async function deliver($: EngineInterface, app: App, batch: readonly OrchardAlert[], q: OrchardQueue, now: number): Promise<boolean> {
+  const { ls } = app
   for (const alert of batch) ls.inFlight.add(alert.id)
   let isDelivered = false
   let isClaimed = false
@@ -861,7 +898,7 @@ async function wake($: EngineInterface, app: App): Promise<boolean> {
     for (const alert of batch) ls.inFlight.delete(alert.id)
     if (isClaimed) await setClaim($, app, batch.map(a => a.id), false)
   }
-  return true
+  return isDelivered
 }
 
 /** Pins this plugin's status line, or with undefined unpins it. A host that refuses leaves the other signs of a hold. */
@@ -1019,7 +1056,7 @@ async function saveSettings($: EngineInterface, app: App, next: OrchardSettings)
   await update($, settings, () => next)
   // What is already pending was classified under the old settings: what the new ones would drop
   // goes (as it would have at the door), what changes between wake and quiet is counted afresh.
-  await updateQueue($, app, held => retainInQueue(held, alert => classify(alert, next, ls.participationSet) !== 'drop'))
+  await updateQueue($, app, held => retainInQueue(held, alert => isMarkedNext(alert) || classify(alert, next, ls.participationSet) !== 'drop'))
   await syncCounts($, app)
   await armFlush($, app)
 }
@@ -1047,7 +1084,19 @@ async function runNotify($: EngineInterface, app: App, rest: string): Promise<st
 
 // ---- the pane ----
 
-const EMPTY_PANE: OrchardPane = { state: 'loading', error: null, threads: [], decisions: [], tasks: [], channels: [], isOlderShown: false, expanded: [] }
+const EMPTY_PANE: OrchardPane = {
+  state: 'loading',
+  error: null,
+  threads: [],
+  decisions: [],
+  tasks: [],
+  channels: [],
+  isOlderShown: false,
+  expanded: [],
+  hidden: [],
+  snoozed: [],
+  confirm: null,
+}
 
 /** Reads everything the pane lists. The band's counts and the participation set are refreshed from the same window. */
 async function loadPane($: EngineInterface, app: App) {
@@ -1130,19 +1179,192 @@ async function openInOrchard($: EngineInterface, href: string) {
   }
 }
 
+// ---- the pane's quick actions ----
+
+/** What the pane hides: the removed and the snoozed ids, mirrored from memory (and `$.store`) into `$.state`. */
+async function syncAway($: EngineInterface, app: App) {
+  const { ls } = app
+  const snoozed = ls.snoozes.map(s => ({ id: s.id, until: s.until }))
+  await update($, pane, p => ({ ...(p ?? EMPTY_PANE), hidden: ls.hidden, snoozed }))
+}
+
+/** Asks "remove? ✓ ✗" (or "interrupt Claude?") of one row, or with null stops asking. It lapses after CONFIRM_MS. */
+async function setConfirm($: EngineInterface, app: App, confirm: OrchardPane['confirm']) {
+  const { ls } = app
+  ls.confirmTimer?.cancel()
+  ls.confirmTimer = undefined
+  if (confirm !== null && confirm !== undefined) {
+    ls.confirmTimer = $.clock.after(CONFIRM_MS, () => {
+      ls.confirmTimer = undefined
+      detach(update($, pane, p => (p?.confirm?.id === confirm.id && p.confirm.verb === confirm.verb ? { ...p, confirm: null } : (p ?? EMPTY_PANE))))
+    })
+  }
+  await update($, pane, p => ({ ...(p ?? EMPTY_PANE), confirm: confirm ?? null }))
+}
+
+/**
+ * Remove: acknowledge the message on the server, take it out of the pending queue and note it in the
+ * delivered record (so it is never delivered, whatever the server sends again), and hide it in the pane.
+ */
+async function removeMessage($: EngineInterface, app: App, id: string) {
+  const { rt, ls } = app
+  const here = rt.current
+  if (here === undefined) return
+  if (ls.inFlight.has(id)) return
+  await updateQueue($, app, q => removeFromQueue(q, [id], 0))
+  ls.record = recordDelivery(ls.record, [id], ls.record.cursor)
+  ls.hidden = addHidden(ls.hidden, id)
+  const { endpoint } = here.conn
+  const me = here.identity.participantId
+  await storeSet($, app, storeKey(endpoint, me), ls.record)
+  await storeSet($, app, hiddenKey(endpoint, me), ls.hidden)
+  await syncAway($, app)
+  await syncCounts($, app)
+  detach(sendAck($, app, { ids: [id], requestId: `orchard-ack-${crypto.randomUUID()}` }))
+  await armFlush($, app)
+}
+
+async function saveSnoozes($: EngineInterface, app: App) {
+  const here = app.rt.current
+  if (here !== undefined) await storeSet($, app, snoozeKey(here.conn.endpoint, here.identity.participantId), app.ls.snoozes)
+  await syncAway($, app)
+  await armSnoozeTimer($, app)
+}
+
+/** Snooze: out of the queue and the pane for SNOOZE_MS; the alert is kept in `$.store` and comes back as a new one. */
+async function snoozeMessage($: EngineInterface, app: App, id: string) {
+  const { ls } = app
+  if (ls.inFlight.has(id)) return
+  const alert = (await readQueue($, app)).items.find(a => a.id === id)
+  if (alert === undefined) return
+  const until = (await $.clock.now()) + SNOOZE_MS
+  ls.snoozes = addSnooze(ls.snoozes, alert, until)
+  await updateQueue($, app, q => removeFromQueue(q, [id], 0))
+  await saveSnoozes($, app)
+  await syncCounts($, app)
+}
+
+/** Arms the one timer that brings the earliest snoozed alert back; replaces any earlier. */
+async function armSnoozeTimer($: EngineInterface, app: App) {
+  const { ls } = app
+  ls.snoozeTimer?.cancel()
+  ls.snoozeTimer = undefined
+  const due = nextDue(ls.snoozes)
+  if (due === null) return
+  const now = await $.clock.now()
+  ls.snoozeTimer = $.clock.after(Math.max(0, due - now), () => {
+    ls.snoozeTimer = undefined
+    detach(releaseDueSnoozes($, app))
+  })
+}
+
+/**
+ * Snoozed alerts whose time has come go back into the queue as new ones (their batch window runs
+ * from now) and are classified again under the settings in force: one that no longer passes is let go.
+ */
+async function releaseDueSnoozes($: EngineInterface, app: App) {
+  const { ls } = app
+  if (ls.snoozes.length === 0) return
+  const now = await $.clock.now()
+  const { due, rest } = splitDue(ls.snoozes, now)
+  if (due.length === 0) return armSnoozeTimer($, app)
+  ls.snoozes = rest
+  const back = due.map(s => revive(s, now)).filter(a => classify(a, ls.settings, ls.participationSet) !== 'drop')
+  if (back.length > 0) await updateQueue($, app, q => addToQueue(q, back, q.cursor, ls.record.delivered, wakeOf(ls)))
+  await saveSnoozes($, app)
+  await syncCounts($, app)
+  await armFlush($, app)
+}
+
+/** Handle next: first in the queue and a wake even if it was quiet. It still waits for the batch window and the minimum gap. */
+async function handleNext($: EngineInterface, app: App, id: string) {
+  const now = await $.clock.now()
+  await updateQueue($, app, q => markNext(q, id, now))
+  await syncCounts($, app)
+  await armFlush($, app)
+}
+
+/**
+ * Interrupt: abort the running turn (as Esc does), if there is one, then deliver this message at
+ * once as its own wake, past the batch window and the minimum gap (`lastWakeAt` is set as for any
+ * wake). The id is in flight from the first step, so a wake that fires meanwhile cannot take it too.
+ */
+async function interruptWith($: EngineInterface, app: App, id: string) {
+  const { ls } = app
+  const pending = await readQueue($, app)
+  if (!pending.items.some(a => a.id === id) || (await blockedIds($, app, pending)).has(id)) return
+  ls.inFlight.add(id)
+  try {
+    if (ls.turnId !== undefined) {
+      const turnId = ls.turnId
+      try {
+        await $.turn.abort({ turnId })
+      } catch {
+        // The turn ended on its own meanwhile; the message goes the same way.
+      }
+    }
+    const q = await readQueue($, app)
+    const alert = q.items.find(a => a.id === id)
+    if (alert === undefined) return
+    await deliver($, app, [alert], q, await $.clock.now())
+  } finally {
+    ls.inFlight.delete(id)
+  }
+}
+
+/** A press on one of the pane's action links. Anything that is not one of ours, or names nothing known, does nothing. */
+async function paneAct($: EngineInterface, app: App, href: string) {
+  const action = parseActionHref(href)
+  if (action === undefined) return
+  const { verb, id } = action
+  const current = await read($, pane)
+  const thread = current?.threads.find(t => t.replyToId === id)
+  const isPending = (await readQueue($, app)).items.some(a => a.id === id)
+  switch (verb) {
+    case 'refresh':
+      return loadPane($, app)
+    case 'open-workspace': {
+      const here = app.rt.current
+      return here === undefined ? undefined : openInOrchard($, workspaceHref(here.conn.endpoint) ?? '')
+    }
+    case 'answer':
+      return openInOrchard($, current?.decisions.find(d => d.id === id)?.href ?? '')
+    case 'open-thread':
+      return openInOrchard($, thread?.href ?? '')
+    case 'reply':
+      return thread === undefined ? undefined : fillReply($, thread)
+    case 'more':
+      await update($, pane, p => {
+        const open = p?.expanded ?? []
+        return { ...(p ?? EMPTY_PANE), expanded: open.includes(id) ? open.filter(x => x !== id) : [...open, id] }
+      })
+      return
+    case 'remove':
+      return setConfirm($, app, { verb: 'remove', id })
+    case 'interrupt':
+      return isPending ? setConfirm($, app, { verb: 'interrupt', id }) : undefined
+    case 'cancel':
+      return setConfirm($, app, null)
+    case 'remove-yes':
+    case 'interrupt-yes': {
+      // A yes counts only as the answer to the question that is on screen.
+      const asked = verb === 'remove-yes' ? 'remove' : 'interrupt'
+      if (current?.confirm?.id !== id || current.confirm.verb !== asked) return
+      await setConfirm($, app, null)
+      return asked === 'remove' ? removeMessage($, app, id) : interruptWith($, app, id)
+    }
+    case 'snooze':
+      return snoozeMessage($, app, id)
+    case 'next':
+      return handleNext($, app, id)
+  }
+}
+
 function paneHandlers($: EngineInterface, app: App): PaneHandlers {
   return {
-    refresh: () => detach(loadPane($, app)),
+    act: href => detach(paneAct($, app, href)),
     toggleOlder: () => detach(update($, pane, p => ({ ...(p ?? EMPTY_PANE), isOlderShown: p?.isOlderShown !== true }))),
-    toggleThread: replyToId =>
-      detach(
-        update($, pane, p => {
-          const open = p?.expanded ?? []
-          return { ...(p ?? EMPTY_PANE), expanded: open.includes(replyToId) ? open.filter(id => id !== replyToId) : [...open, replyToId] }
-        }),
-      ),
     open: href => detach(openInOrchard($, href)),
-    reply: thread => detach(fillReply($, thread)),
     setLevel: (channelId, level) => {
       if (level !== 'inherit' && !isLevel(level)) return
       const channel = channelId === null ? null : (app.ls.channels.find(c => c.id === channelId) ?? { id: channelId, name: channelId })
@@ -1444,7 +1666,14 @@ export const register: Register = (on, options) => {
     }
   }).catch(($, e, next) => next(e)) // a hook that fails never costs the person their prompt
 
+  // The running main-loop turn, for "interrupt". A subagent's run raises no turn.start.
+  on('turn.start', async ($, e, next) => {
+    app.ls.turnId = e.turnId
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined && app.ls.turnId === e.turnId) app.ls.turnId = undefined
     detach(ensureListening($, app))
     return next(e)
   })
@@ -1475,12 +1704,14 @@ export const register: Register = (on, options) => {
       Box: t.Box,
       Text: t.Text,
       Button: t.Button,
+      Markdown: t.Markdown,
       // The terminal draws no Svg: it gets the same structure as Text.
       Svg: e.surface !== 'terminal' && 'Svg' in t ? t.Svg : undefined,
       // The mobile app draws no field (its table answers a stub): there the settings are text.
       Input: e.surface !== 'mobile' && 'Input' in t ? t.Input : undefined,
       Select: e.surface !== 'mobile' && 'Select' in t ? t.Select : undefined,
     }
+    const held = await readQueue($, app)
     return renderPane(
       table,
       {
@@ -1493,6 +1724,9 @@ export const register: Register = (on, options) => {
         counts: await read($, counts),
         nowMs: await $.clock.now(),
         columns: typeof e.props.bodyColumns === 'number' ? e.props.bodyColumns : undefined,
+        surface: e.surface,
+        pendingIds: new Set(held.items.map(a => a.id)),
+        nextIds: new Set(held.items.filter(isMarkedNext).map(a => a.id)),
       },
       paneHandlers($, app),
     )

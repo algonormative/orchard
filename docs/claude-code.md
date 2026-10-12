@@ -52,6 +52,35 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   bookkeeping, and the stored cursor already prevents a repeat delivery).
 - **`/orchard`** opens a pane with the participant's inbox, open decisions, claimed tasks
   and notification settings. `/orchard notify` reads and sets levels from the prompt.
+- **Whose inbox it is.** The pane shows the *session participant's* mailbox (for example
+  `claude-vault`), not the human owner's, and the header says so: "Claude's inbox ·
+  <workspace> · as <participantId>". The owner uses it to supervise that mailbox and steer
+  what Claude sees first; decisions that wait on the owner link to Orchard to be answered.
+- **Pane actions.** Each thread row has a quiet line of text links (Markdown links with
+  synthetic `https://orchard.action/...` addresses that only the mod answers; nothing is
+  ever opened by them). On desktop and VS Code the line appears while the pointer is over
+  the row; the terminal shows it dimmed, and mobile always shows it. The header's
+  "Open in Orchard ↗" and "Refresh" are the same kind of link (Refresh has no hotkey now).
+  - **remove**: asks "remove? ✓ ✗" (lapses after 10 s). ✓ acknowledges the message on the
+    server, drops it from the pending queue, records it as delivered so it never reaches
+    Claude, and hides it in the pane (the hidden ids are kept in `$.store`).
+  - **snooze 30m**: one click. The alert leaves the queue and the pane and is kept, with
+    its time, in `$.store`; at the time it re-enters the queue as a new alert (its batch
+    window runs from then, and the notification settings classify it again, so one they
+    would now drop is let go). The inbox shows "N snoozed · back 14:32". Survives a reload.
+  - **handle next**: marks the alert so it goes first in the queue and wakes the session
+    even if it was quiet (a broadcast). It still waits for the batch window and the minimum
+    gap, goes first in its delivery, and the stored cursor never passes anything still
+    waiting.
+  - **interrupt**: asks "interrupt Claude? ✓ ✗". ✓ aborts the running turn (as Esc does;
+    `$.turn.abort`) if there is one, then delivers that message alone, at once, past the
+    batch window and the gap (the gap starts from it). The message is claimed in flight, so
+    it is delivered exactly once.
+  - **more ▾** opens the row's detail: the full snippet, "reply…" (a draft in the prompt box,
+    never sent) and "open thread ↗".
+  - Messages Claude already has (read rows) offer **remove** and **more** only. Snooze,
+    handle next and interrupt would mean bringing a delivered message back as a new alert,
+    which the mod does not do; use Orchard to resend it.
 - **Look.** The pane and band use the Orchard x LEMON palette (ink, neon citron, leaf,
   cream; monospace labels, small ASCII motifs) and follow Claude's light or dark theme.
   The pane has a drawn header (lemon mark, workspace, identity, and a status chip: green
@@ -59,9 +88,8 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   listening"), an INBOX with an "N NEW" pill, and compact thread rows (avatar, sender,
   reason badge DM / MENTION / REPLY / BROADCAST / OWNER, one-line preview, age, message
   count; unread rows carry an edge bar and dot, read rows are dimmed). The newest five
-  threads show and the rest fold behind "N older threads". Each row has Reply… and a
-  more/less toggle (the detail holds that thread's Open thread button); the header has the
-  one Open in Orchard button. Then NEEDS YOU and CLAIMED TASKS as short status lines,
+  threads show and the rest fold behind "N older threads". Then NEEDS YOU (each decision
+  has an "answer in Orchard ↗" link) and CLAIMED TASKS as short status lines,
   NOTIFY as dropdowns (default, each channel) plus batch and gap, and a footer with the
   last poll's age. The drawn parts are SVG sized from the pane width; the terminal draws
   the same structure as text, and mobile shows the notification settings as text. The

@@ -7,12 +7,14 @@
 import type { Elements } from 'claude-code'
 
 import type { OrchardCounts, OrchardPane, OrchardPaneThread, OrchardSettings, OrchardStatus } from '../types'
+import { answerLink, detailActions, headerActions, rowActions, snoozedLine } from './actions'
+import type { ActionLine } from './actions'
 import { LEVELS } from './classify'
 import { describeSettings } from './notify'
 import { relativeTime } from './threads'
 import { FOOTER_HEIGHT, chipOf, cut, footerSvg, footerText, headerSvg, rowHeight, rowSvg, sectionSvg, widthOf } from './svg'
 
-export type Table = Pick<Elements['mobile'], 'Box' | 'Text' | 'Button'> & {
+export type Table = Pick<Elements['mobile'], 'Box' | 'Text' | 'Button' | 'Markdown'> & {
   /** Absent on the terminal; the caller also leaves it out where a surface should not draw one. */
   Svg?: Elements['desktop']['Svg']
   Input?: Elements['terminal']['Input']
@@ -33,21 +35,23 @@ export type PaneView = {
   nowMs: number
   /** Cells across the pane body, for sizing the drawings. */
   columns?: number
+  /** The surface drawing the pane: the row actions show on hover only where there is a pointer to hover. */
+  surface?: 'terminal' | 'desktop' | 'vscode' | 'mobile'
+  /** Message ids with an alert waiting in the queue, and those marked "handle next". */
+  pendingIds?: ReadonlySet<string>
+  nextIds?: ReadonlySet<string>
 }
 
 export type PaneHandlers = {
-  refresh: () => void
+  /** A press on one of the synthetic action links (actions.ts): remove, snooze, refresh, ... */
+  act: (href: string) => void
   /** Opens an address of the browser UI in the person's browser. */
   open: (href: string) => void
-  /** Fills the prompt with a reply draft. Never submits. */
-  reply: (thread: OrchardPaneThread) => void
   /** `channelId` null is the default level; `level` may be 'inherit' for a channel. */
   setLevel: (channelId: string | null, level: string) => void
   setRate: (which: 'batch' | 'gap', text: string) => void
   /** Opens or closes the fold of older threads. */
   toggleOlder: () => void
-  /** Opens or closes one thread's detail (by its reply id). */
-  toggleThread: (replyToId: string) => void
 }
 
 /** How many of the newest threads show before the rest fold away. */
@@ -72,11 +76,18 @@ function openButton(ui: Table, id: string, href: string, on: PaneHandlers, label
 const CHIP_TOKEN = { listening: 'success', waiting: 'warning', offline: 'error', error: 'error', shared: undefined, connecting: undefined } as const
 
 export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
-  const { Box, Text, Button, Input, Select, Svg } = ui
+  const { Box, Text, Button, Markdown, Input, Select, Svg } = ui
   const { pane, settings, nowMs } = view
   const w = widthOf(view.columns)
   const chip = chipOf(view.status, view.counts)
-  const threads = pane?.threads ?? []
+  // Removed and snoozed messages are out of the inbox; the window is read again on Refresh, so the pane hides them itself.
+  const away = new Set([...(pane?.hidden ?? []), ...(pane?.snoozed ?? []).map(s => s.id)])
+  const threads = (pane?.threads ?? []).filter(t => !away.has(t.replyToId))
+  const snoozed = snoozedLine(pane?.snoozed ?? [])
+  const pendingIds = view.pendingIds ?? new Set<string>()
+  const nextIds = view.nextIds ?? new Set<string>()
+  // Only a surface with a pointer can hover; the terminal shows the line dimmed, the phone always.
+  const isHoverSurface = view.surface === 'desktop' || view.surface === 'vscode'
   const isOlderShown = pane?.isOlderShown === true
   const expanded = new Set(pane?.expanded ?? [])
   const shown = isOlderShown ? threads : threads.slice(0, VISIBLE_THREADS)
@@ -102,7 +113,7 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
     Svg === undefined ? (
       <Box key="header" flexDirection="column">
         <Box>
-          <Text bold>◆ Orchard · {view.workspaceName || 'workspace'}</Text>
+          <Text bold>◆ Claude's inbox · {view.workspaceName || 'workspace'}</Text>
           <Text dimColor> · as {view.participantId}</Text>
         </Box>
         <Text color={CHIP_TOKEN[chip.kind]} dimColor={CHIP_TOKEN[chip.kind] === undefined}>● {chip.label}</Text>
@@ -111,11 +122,38 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
       picture(
         'header',
         headerSvg(w, { workspaceName: view.workspaceName, participantId: view.participantId, chip }),
-        `Orchard workspace ${view.workspaceName || ''}, ${chip.label}`.replace(/\s+,/, ','),
+        `Claude's inbox, workspace ${view.workspaceName || ''}, ${chip.label}`.replace(/\s+,/, ','),
         90,
         true,
       )
     )
+
+  /** One line of text links: a Markdown whose links are answered by `on.act` and nothing else. */
+  const links = (key: string, action: ActionLine, isDim = true) => (
+    <Markdown key={key} text={action.text} dimColor={isDim} pressableLinks={action.links} onLinkPress={link => on.act(link.href)} />
+  )
+
+  /**
+   * The row's quick actions. On a surface with a pointer the line is drawn `display: none` and
+   * revealed while the pointer is over the row (the row's Box is the hover scope); it stays up
+   * while the row asks "remove?" or is open, or the question would vanish with the pointer.
+   */
+  const actionsOf = (thread: OrchardPaneThread, isOpen: boolean) => {
+    const key = thread.replyToId
+    const confirm = pane?.confirm?.id === key ? pane.confirm.verb : null
+    const line = links(
+      `actions-${key}`,
+      rowActions({ id: key, isPending: pendingIds.has(key), isNext: nextIds.has(key), isOpen, confirm }),
+      confirm === null,
+    )
+    if (!isHoverSurface || isOpen || confirm !== null) return <Box>{line}</Box>
+    // No key on this Box: a keyed Box is its own hover scope, and a Box that is not drawn cannot be hovered.
+    return (
+      <Box display="none" hover={{ display: 'flex' }}>
+        {line}
+      </Box>
+    )
+  }
 
   const row = (thread: OrchardPaneThread) => {
     const key = thread.replyToId
@@ -135,17 +173,14 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
         ) : (
           picture(`thread-svg-${key}`, rowSvg(w, thread, nowMs), `${last.senderName}, ${thread.reason}${thread.isUnread ? ', new' : ''}: ${last.snippet}`, rowHeight(thread))
         )}
-        <Box>
-          <Button key={`reply-${key}`} label="Reply…" onPress={() => on.reply(thread)} />
-          <Button key={`toggle-${key}`} label={isOpen ? '▾ less' : '▸ more'} onPress={() => on.toggleThread(key)} />
-        </Box>
+        {actionsOf(thread, isOpen)}
         {isOpen ? (
           <Box flexDirection="column">
             <Text>{last.snippet}</Text>
             <Text dimColor>
               {thread.size > 1 ? `${thread.size} messages` : '1 message'} · {relativeTime(last.sentAt, nowMs)} ago
             </Text>
-            {thread.href === null ? null : openButton(ui, `thread-${key}`, thread.href, on, 'Open thread')}
+            {links(`detail-${key}`, detailActions(key, thread.href !== null))}
           </Box>
         ) : null}
       </Box>
@@ -155,15 +190,13 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   return (
     <Box flexDirection="column">
       {header}
-      <Box>
-        <Button key="refresh" label="Refresh" hotkey="r" onPress={on.refresh} />
-        {view.workspaceHref === null ? null : openButton(ui, 'workspace', view.workspaceHref, on)}
-      </Box>
+      {links('header-actions', headerActions(view.workspaceHref !== null))}
 
       {section('section-inbox', 'INBOX', pill)}
       {pane === null || pane.state === 'loading' ? <Text dimColor>Loading…</Text> : null}
       {pane?.state === 'failed' ? <Text color="error">{pane.error ?? 'could not read the workspace'}</Text> : null}
-      {pane?.state === 'ready' && threads.length === 0 ? <Text dimColor>Nothing in your inbox.</Text> : null}
+      {snoozed === null ? null : <Text dimColor>{snoozed}</Text>}
+      {pane?.state === 'ready' && threads.length === 0 ? <Text dimColor>Nothing in Claude's inbox.</Text> : null}
       {shown.map(row)}
       {older > 0 ? <Button key="older-threads" label={`▸ ${older} older thread${older === 1 ? '' : 's'}`} onPress={on.toggleOlder} /> : null}
       {isOlderShown && threads.length > VISIBLE_THREADS ? <Button key="older-threads" label="▾ hide older threads" onPress={on.toggleOlder} /> : null}
@@ -174,7 +207,7 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
         <Box key={`decision-${decision.id}`}>
           <Text color="warning">◆ {decision.snippet}</Text>
           <Text dimColor> {relativeTime(decision.sentAt, nowMs)} </Text>
-          {decision.href === null ? null : openButton(ui, `decision-${decision.id}`, decision.href, on, 'Open')}
+          {decision.href === null ? null : links(`answer-${decision.id}`, answerLink(decision.id), false)}
         </Box>
       ))}
 

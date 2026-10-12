@@ -157,7 +157,7 @@ export function addToQueue(
     items.push(alert)
     byId.set(alert.id, alert)
   }
-  items.sort((a, b) => a.sequence - b.sequence)
+  items.sort(byQueueOrder)
   const bounded = boundQueue(items, isWake)
   return {
     ...queue,
@@ -165,6 +165,31 @@ export function addToQueue(
     cursor: Math.max(queue.cursor, cursor),
     dropped: (queue.dropped ?? 0) + bounded.discarded,
   }
+}
+
+/**
+ * The order of a queue: alerts the person marked "handle next" first (the latest marked first),
+ * then the rest by sequence. Sorting by sequence alone would put a marked alert back in its place.
+ */
+export function byQueueOrder(a: OrchardAlert, b: OrchardAlert): number {
+  const aNext = a.nextAt !== undefined
+  const bNext = b.nextAt !== undefined
+  if (aNext && bNext && a.nextAt !== b.nextAt) return (b.nextAt as number) - (a.nextAt as number)
+  if (aNext !== bNext) return aNext ? -1 : 1
+  return a.sequence - b.sequence
+}
+
+/** The alert was marked "handle next": it wakes the session whatever its classification said. */
+export const isMarkedNext = (alert: OrchardAlert): boolean => alert.nextAt !== undefined
+
+/**
+ * The queue with `id` marked "handle next" at `now` and moved to the front. An id that is not
+ * pending changes nothing. The mark makes it wake (see `wakeOf`), and `takeBatch` keeps it first.
+ */
+export function markNext(queue: OrchardQueue, id: string, now: number): OrchardQueue {
+  if (!queue.items.some(item => item.id === id)) return queue
+  const items = queue.items.map(item => (item.id === id ? { ...item, nextAt: now } : item)).sort(byQueueOrder)
+  return { ...queue, items }
 }
 
 /**
@@ -255,8 +280,9 @@ const costOf = (item: OrchardAlert) => Math.min(item.body.length, MAX_BODY) + 40
  * later alert ahead of an earlier one never moves it past anything undelivered.
  */
 export function takeBatch(queue: OrchardQueue, skip: ReadonlySet<string> = new Set(), isWake?: IsWake): OrchardAlert[] {
-  const candidates = queue.items.filter(item => !skip.has(item.id))
-  const reserved = isWake === undefined ? undefined : candidates.find(isWake)
+  // Marked alerts lead (the latest marked first), whatever order the queue was left in.
+  const candidates = queue.items.filter(item => !skip.has(item.id)).sort(byQueueOrder)
+  const reserved = candidates.find(isMarkedNext) ?? (isWake === undefined ? undefined : candidates.find(isWake))
   const chosen = new Set<string>()
   let chars = 0
   if (reserved !== undefined) {

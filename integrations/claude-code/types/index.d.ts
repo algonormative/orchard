@@ -58,6 +58,8 @@ export type OrchardAlert = {
   sentAt: string
   /** Mock-able clock time the listener received it. The coalescing window runs from here. */
   arrivedAt: number
+  /** Clock time the person marked it "handle next" in the pane: it wakes the session and leads the next delivery. */
+  nextAt?: number
 }
 
 /** Alerts waiting for a wake or for the person's next prompt. */
@@ -136,6 +138,12 @@ export type OrchardPane = {
   isOlderShown?: boolean
   /** Replies of the threads (by reply id) whose detail is open. */
   expanded?: string[]
+  /** Message ids the person removed: hidden from the inbox (kept in `$.store` too). */
+  hidden?: string[]
+  /** Message ids snoozed until a time (clock ms): hidden until then. The alerts themselves are kept in `$.store`. */
+  snoozed?: { id: string; until: number }[]
+  /** A two-step action waiting for the person's yes or no (it lapses after 10 s). */
+  confirm?: { verb: 'remove' | 'interrupt'; id: string } | null
 }
 
 declare module 'claude-code' {
