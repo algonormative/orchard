@@ -77,10 +77,10 @@ test('a successful Orchard tool call is an outbound entry in words, with no ids:
 
   const out = feed(w).filter(e => e.direction === 'out')
   expect(out.map(e => [e.kind, e.text])).toEqual([
-    ['send', 'Sent to Other Claude: Awning is fixed'],
-    ['send', 'Posted in #releases: Hello all'],
-    ['send', 'Broadcast: Standup now'],
-    ['reply', 'Replied to Other Claude: On it'],
+    ['send', 'Sent to Other Claude  Awning is fixed'],
+    ['send', 'Posted in #releases  Hello all'],
+    ['send', 'Broadcast  Standup now'],
+    ['reply', 'Replied to Other Claude  On it'],
     ['ack', 'Acknowledged 2 messages'],
     ['task', 'Claimed task “Fix the awning”'],
     ['role', 'Declared roles: builder, code review'],
@@ -115,12 +115,12 @@ test('an outbound entry belongs to the agent that made the call: main without an
   await w.clock.settle()
 
   expect(feed(w).map(e => [e.agentId, e.text])).toEqual([
-    ['main', 'Sent to Nick: from main'],
-    [agentId, 'Sent to Nick: from the subagent'],
+    ['main', 'Sent to Nick  from main'],
+    [agentId, 'Sent to Nick  from the subagent'],
     ['agent-unknown', 'Acknowledged 1 message'],
   ])
-  expect(table(w).main?.lastAction).toBe('Sent to Nick: from main')
-  expect(table(w)[agentId as string]?.lastAction).toBe('Sent to Nick: from the subagent')
+  expect(table(w).main?.lastAction).toBe('Sent to Nick  from main')
+  expect(table(w)[agentId as string]?.lastAction).toBe('Sent to Nick  from the subagent')
   // an agent the table has never heard of still has its entry; nothing is invented for it
   expect(table(w)['agent-unknown']).toBeUndefined()
 })
@@ -157,9 +157,9 @@ test('an alert that reaches the session is an inbound entry: who, how it came, t
 
   const inbound = feed(w).filter(e => e.direction === 'in')
   expect(inbound.map(e => [e.text, e.kind, e.href])).toEqual([
-    ['Other Claude (DM): Can you check the build?', 'message', `${BASE}/messages/d1`],
-    ['Other Claude (mention): Hey @you', 'message', `${BASE}/messages/g1`],
-    ['Nick (broadcast): Standup', 'message', `${BASE}/messages/b1`],
+    ['Other Claude · DM  Can you check the build?', 'message', `${BASE}/messages/d1`],
+    ['Other Claude · mention  Hey @you', 'message', `${BASE}/messages/g1`],
+    ['Nick · broadcast  Standup', 'message', `${BASE}/messages/b1`],
   ])
   for (const entry of inbound) expect(entry).toMatchObject({ agentId: 'main', handle: ME, direction: 'in' })
   // an alert the listener is handed again (a lagging cursor) is not logged or counted twice
@@ -309,15 +309,15 @@ test('the pane lists the agents with what each last did, and the activity feed, 
     // the subagent used the mod's tools, which act as the session's participant (the pane draws what the agents table holds)
     expect(all, surface).toContain(`shares ${ME}`)
     expect(all, surface).toContain('● running')
-    expect(all, surface).toContain('Sent to Nick: notes are up') // its last action, under its row
+    expect(all, surface).toContain('Sent to Nick  notes are up') // its last action, under its row
     expect(all, surface).toContain('ACTIVITY')
     // "this agent" lists the main loop's entries only; "+ subagents" adds the subagent's, newest first
-    expect(all, surface).toContain('Other Claude (DM): Thanks, one more thing')
+    expect(all, surface).toContain('Other Claude · DM  Thanks, one more thing')
     expect(await rows(), surface).toEqual(['activity-0-open'])
     await ui.press({ key: 'scope-all' })
     expect(await rows(), surface).toEqual(['activity-0-open', 'activity-1-open'])
     const both = await drawn()
-    expect(both.indexOf('Other Claude (DM)'), surface).toBeLessThan(both.lastIndexOf('Sent to Nick: notes are up'))
+    expect(both.indexOf('Other Claude · DM'), surface).toBeLessThan(both.lastIndexOf('sent to Nick  notes are up')) // the activity line reads lowercase after its arrow
     await ui.press({ key: 'scope-this' })
     expect(await rows(), surface).toEqual(['activity-0-open'])
     await ui.unmount()

@@ -81,6 +81,8 @@ const CHIP_CLASS: Record<ChipKind, { bg: string; fg: string }> = {
 }
 
 // ---- header ----
+// The drawings have no margin of their own: pane.tsx pads the whole body with one gutter, so the
+// mascot, the labels, the rules and the buttons around them all start at the same edge.
 
 /** With the handle line and the chip, or only the title (the quiet view and the disconnect question say the rest in Text). */
 export const HEADER_HEIGHT = 90
@@ -104,24 +106,24 @@ export const headerHeight = (args: Pick<HeaderArgs, 'chip'>) => (args.chip === u
 export function headerSvg(w: number, args: HeaderArgs): string {
   const isConfirm = args.mood === 'confirm'
   const height = headerHeight(args)
-  const nameMax = Math.max(8, Math.floor((w - 56 - 18) / 8.6))
-  const idMax = Math.max(6, Math.floor((w - 56 - 18) / 6.2))
+  const nameMax = Math.max(8, Math.floor((w - 38) / 8.6))
+  const idMax = Math.max(6, Math.floor((w - 38) / 6.2))
   const mascot = isConfirm
     ? `<circle cx="14" cy="14" r="13" class="red"/><text x="7" y="19" class="mono onred" font-size="12" font-weight="700">ᴗ﹏ᴗ</text>`
     : `<circle cx="14" cy="14" r="13" class="badge"/><ellipse cx="18" cy="5" rx="5" ry="3" fill="#81e78a" transform="rotate(-30 18 5)"/>` +
       `<text x="9" y="19" class="mono onbadge" font-size="12" font-weight="700">◕‿◕</text>`
   const label = isConfirm ? 'ORCHARD // DISCONNECT?' : "ORCHARD // CLAUDE'S VIEW"
   let body =
-    `<g transform="translate(18,${isConfirm ? 12 : 20})">${mascot}` +
+    `<g transform="translate(0,${isConfirm ? 12 : 20})">${mascot}` +
     `<text x="38" y="11" class="mono ${isConfirm ? 'red' : 'accent'}" font-size="10" letter-spacing="1.5">${esc(label)}</text>` +
     `<text x="38" y="27" class="text" font-size="15" font-weight="700">${esc(cut(args.workspaceName || 'Orchard', nameMax))}</text></g>`
   if (args.chip !== undefined) {
     const { bg, fg } = CHIP_CLASS[args.chip.kind]
     const chipW = Math.ceil(args.chip.label.length * 6.4 + 36)
-    const chipX = Math.max(18, w - 18 - chipW)
+    const chipX = Math.max(0, w - chipW)
     const pulse = args.chip.kind === 'listening' || args.chip.kind === 'working' ? '<animate attributeName="opacity" values="1;.35;1" dur="2.4s" repeatCount="indefinite"/>' : ''
     body +=
-      `<text x="56" y="82" class="mono dim" font-size="10">${esc(cut(sublineOf(args.participantId), idMax))}</text>` +
+      `<text x="38" y="82" class="mono dim" font-size="10">${esc(cut(sublineOf(args.participantId), idMax))}</text>` +
       `<g transform="translate(${chipX},52)"><rect width="${chipW}" height="22" rx="11" class="${bg}"/>` +
       `<circle cx="14" cy="11" r="4" class="${fg}">${pulse}</circle>` +
       `<text x="25" y="15" class="mono ${fg}" font-size="10.5">${esc(args.chip.label)}</text></g>`
@@ -136,10 +138,10 @@ export const SECTION_HEIGHT = 30
 /** A rule and a small caps label, with an optional "N NEW" pill. */
 export function sectionSvg(w: number, label: string, pill?: string): string {
   const pillW = pill === undefined ? 0 : Math.ceil(pill.length * 6 + 14)
-  const pillX = 18 + label.length * 8.4 + 8
+  const pillX = label.length * 8.4 + 8
   const body =
-    `<rect x="18" y="2" width="${w - 36}" height="1" class="rule"/>` +
-    `<text x="18" y="22" class="mono accent" font-size="10" letter-spacing="1.5">${esc(label)}</text>` +
+    `<rect x="0" y="2" width="${w}" height="1" class="rule"/>` +
+    `<text x="0" y="22" class="mono accent" font-size="10" letter-spacing="1.5">${esc(label)}</text>` +
     (pill === undefined
       ? ''
       : `<g transform="translate(${pillX.toFixed(0)},11)"><rect width="${pillW}" height="15" rx="7.5" class="badge"/>` +
