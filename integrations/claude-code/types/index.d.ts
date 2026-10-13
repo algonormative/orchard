@@ -188,6 +188,25 @@ export type OrchardPlugins = {
   tasks: OrchardPaneTask[]
 }
 
+/**
+ * The message(s) this session's main loop is handling this turn: set when a batch is delivered to it,
+ * cleared when its turn completes. `items` holds up to three; `total` is how many came in the batch.
+ */
+export type OrchardNow = {
+  /** Clock ms of the delivery. */
+  at: number
+  total: number
+  items: { sender: string; /** How it reached the session: `DM`, `mention`, `reply`, `broadcast`, `#channel`. */ how: string; snippet: string; href?: string }[]
+}
+
+/** What the person has toggled in the pane. Memory of the session only: nothing in it is kept across sessions. */
+export type OrchardView = {
+  /** The activity list also shows the subagents' entries. */
+  showSubagents: boolean
+  /** Disconnect was pressed and the pane asks again before it acts. */
+  isConfirming: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
     orchard: {
@@ -207,6 +226,9 @@ declare module 'claude-code' {
       agents: OrchardAgents
       workspaceActivity: OrchardWorkspaceActivity
       plugins: OrchardPlugins
+      /** The messages the main loop is handling this turn; null between turns. */
+      now: OrchardNow | null
+      view: OrchardView
     }
   }
 }

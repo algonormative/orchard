@@ -11,12 +11,14 @@ import type {
   OrchardBand,
   OrchardCounts,
   OrchardHeartbeat,
+  OrchardNow,
   OrchardPaneDecision,
   OrchardPaneTask,
   OrchardPlugins,
   OrchardQueue,
   OrchardSettings,
   OrchardStatus,
+  OrchardView,
   OrchardWorkspace,
   OrchardWorkspaceActivity,
 } from '../types'
@@ -41,6 +43,7 @@ import {
 } from './alerts'
 import type { AlertsPage } from './alerts'
 import { bandLine } from './band'
+import { statusLine } from './statusline'
 import type { BandTone } from './band'
 import { CLAIM_RECHECK_MS, LEASE_BEAT_MS, LEASE_RECHECK_MS, RECENT_KEY, inflightKey, isHeldByOther, leaseKey, liveClaims, parseClaims, parseLease, parseRecent, planEviction, withoutIds } from './lease'
 import { DEFAULT_SETTINGS, addParticipation, classify, parseParticipation, parseSettings, participationKey, settingsKey } from './classify'
@@ -62,6 +65,7 @@ import {
   inboundText,
   newlyEnded,
   nextAgentLook,
+  nowOf,
   pruned,
   pushActivity,
   reconciled,
@@ -69,6 +73,7 @@ import {
   replyNote,
   sendNote,
   stateMarkers,
+  subagentCounts,
   taskRows,
   taskStoreIds,
   touchesPlugins,
@@ -90,9 +95,9 @@ import { NOTIFY_USAGE, applyNotify, describeSettings, parseNotify } from './noti
 import { EXIT_CONNECTION, EXIT_OK, runOrchard, workspaceIdOf } from './orchard-cli'
 import type { CliInit, CliResult, Run } from './orchard-cli'
 import { renderPane } from './pane'
-import type { PaneHandlers, PendingLine, Table } from './pane'
+import type { PaneHandlers, Table } from './pane'
 import { same } from './same'
-import { alertHref, isDecisionRelated, isReceipt, messageHref, snippetOf, stateHref, taskHref, workspaceHref } from './threads'
+import { agentHref, alertHref, isDecisionRelated, isReceipt, messageHref, snippetOf, stateHref, taskHref, workspaceHref } from './threads'
 import {
   RETRY_ADVICE,
   RETRY_OWN_ID,
@@ -137,8 +142,16 @@ const agents = atom({ plugin: 'orchard', key: 'agents' } as const, {})
 const EMPTY_WORKSPACE_ACTIVITY: OrchardWorkspaceActivity = { recentFromOthers: 0, openTasks: null }
 const workspaceActivity = atom({ plugin: 'orchard', key: 'workspaceActivity' } as const, EMPTY_WORKSPACE_ACTIVITY)
 const plugins = atom({ plugin: 'orchard', key: 'plugins' } as const, EMPTY_PLUGINS)
+// The messages the main loop is handling this turn (set when a batch is delivered, cleared when the turn ends), and what the
+// person toggled in the pane. Both are the session's own: nothing in them is kept across sessions.
+const handling = atom({ plugin: 'orchard', key: 'now' } as const, null)
+const EMPTY_VIEW: OrchardView = { showSubagents: false, isConfirming: false }
+const view = atom({ plugin: 'orchard', key: 'view' } as const, EMPTY_VIEW)
 
 const PANE = 'orchard'
+
+/** The disconnect question lapses on its own after this long. */
+const CONFIRM_MS = 10_000
 
 /** How long past its due time a loop may be silent before the liveness guard calls it dead. */
 const GUARD_SLACK_MS = 120_000
@@ -216,15 +229,35 @@ async function putActivity($: EngineInterface, change: (current: OrchardActivity
 
 async function putAgents($: EngineInterface, change: (current: OrchardAgents) => OrchardAgents): Promise<boolean> {
   const current = await read($, agents)
-  if (same(current, change(current))) return false
+  const next = change(current)
+  if (same(current, next)) return false
   await update($, agents, change)
+  // The band says only how many subagents there are, run and stay signed on: the agents' other news is not its.
+  if (!same(subagentCounts(current), subagentCounts(next))) await refreshBand($)
   return true
 }
 
-async function putWorkspaceActivity($: EngineInterface, change: (current: OrchardWorkspaceActivity) => OrchardWorkspaceActivity): Promise<boolean> {
+async function putNow($: EngineInterface, change: (current: OrchardNow | null) => OrchardNow | null): Promise<boolean> {
+  const current = await read($, handling)
+  if (same(current, change(current))) return false
+  await update($, handling, change)
+  await refreshBand($)
+  return true
+}
+
+async function putView($: EngineInterface, change: (current: OrchardView) => OrchardView): Promise<boolean> {
+  const current = await read($, view)
+  if (same(current, change(current))) return false
+  await update($, view, change)
+  return true
+}
+
+/** The workspace's activity changed: the status line follows (and writes only if its text changed). */
+async function putWorkspaceActivity($: EngineInterface, app: App, change: (current: OrchardWorkspaceActivity) => OrchardWorkspaceActivity): Promise<boolean> {
   const current = await read($, workspaceActivity)
   if (same(current, change(current))) return false
   await update($, workspaceActivity, change)
+  await refreshStatusLine($, app)
   return true
 }
 
@@ -249,21 +282,44 @@ async function putHeartbeat($: EngineInterface, change: (current: OrchardHeartbe
   return true
 }
 
-/** Derives the band's line from status, workspace and counts and writes it if the line differs. */
-async function refreshBand($: EngineInterface, app: App) {
-  const line = bandLine(await read($, status), await read($, workspace), await read($, counts), app.rt.current?.identity.participantId ?? '')
+/** Derives the band's line from status, workspace, counts, what is being handled and the agents, and writes it if the line differs. */
+async function refreshBand($: EngineInterface) {
+  const line = bandLine({ status: await read($, status), workspace: await read($, workspace), counts: await read($, counts), now: await read($, handling), agents: await read($, agents) })
   await putBand($, () => line)
+}
+
+/**
+ * The status line follows the workspace around this session: its text is derived from the connection and the
+ * workspace's activity (a held wake's notice takes precedence) and pinned only when it differs from what is up.
+ * `undefined` text clears it. `ls.statusShown` is what this instance last pinned; a fresh instance has pinned
+ * nothing, so its first line also overwrites one an earlier instance left up.
+ */
+async function refreshStatusLine($: EngineInterface, app: App) {
+  const { ls } = app
+  const state = statusLine(await read($, status), await read($, workspace), await read($, workspaceActivity))
+  const text = ls.heldStatus ?? state
+  if ((text ?? null) === ls.statusShown) return
+  // Nothing to say and nothing pinned by this instance: leave the line alone.
+  if (text === undefined && ls.statusShown === undefined) return
+  ls.statusShown = text ?? null
+  pin($, text)
 }
 
 /** The band's sources: after a write that changed one, the band follows (and writes only if its line changed). */
 async function putStatusShown($: EngineInterface, app: App, change: (current: OrchardStatus | null) => OrchardStatus | null) {
-  if (await putStatus($, change)) await refreshBand($, app)
+  if (await putStatus($, change)) await refreshStatus($, app)
 }
 async function putWorkspaceShown($: EngineInterface, app: App, change: (current: OrchardWorkspace | null) => OrchardWorkspace | null) {
-  if (await putWorkspace($, change)) await refreshBand($, app)
+  if (await putWorkspace($, change)) await refreshStatus($, app)
 }
 async function putCountsShown($: EngineInterface, app: App, change: (current: OrchardCounts) => OrchardCounts) {
-  if (await putCounts($, change)) await refreshBand($, app)
+  if (await putCounts($, change)) await refreshBand($)
+}
+
+/** After the connection or the workspace changed: both the band and the status line follow. */
+async function refreshStatus($: EngineInterface, app: App) {
+  await refreshBand($)
+  await refreshStatusLine($, app)
 }
 
 async function setStatus($: EngineInterface, app: App, next: OrchardStatus) {
@@ -367,7 +423,7 @@ async function start($: EngineInterface, app: App, cwd: string) {
   ls.lastOtherAt = undefined
   ls.decayTimer?.cancel()
   ls.decayTimer = undefined
-  await putWorkspaceActivity($, () => EMPTY_WORKSPACE_ACTIVITY)
+  await putWorkspaceActivity($, app, () => EMPTY_WORKSPACE_ACTIVITY)
   await setStatus($, app, { kind: 'connecting' })
 
   const conn = checkConn(options)
@@ -389,7 +445,7 @@ async function start($: EngineInterface, app: App, cwd: string) {
   await putAgents($, held => withMain(held, { handle }, now))
   // After a reload the table may hold live agents nothing is watching any more.
   detach(armAgents($, app))
-  await refreshBand($, app)
+  await refreshStatus($, app)
   await reconnect($, app)
 }
 
@@ -775,12 +831,6 @@ async function prepare($: EngineInterface, app: App, loop: Loop): Promise<boolea
   const { rt, ls } = app
   const here = rt.current
   if (here === undefined) return false
-  // The status line outlives a reload: one an earlier instance pinned for a hold would stay up
-  // for good. The first listener of this instance unpins it (this instance is not holding yet).
-  if (!ls.isStatusSwept && !ls.isHeld) {
-    ls.isStatusSwept = true
-    pin($, undefined)
-  }
   const { endpoint } = here.conn
   const me = here.identity.participantId
   const scope = queueScope(endpoint, me)
@@ -1093,12 +1143,13 @@ function pin($: EngineInterface, text: string | undefined) {
   }
 }
 
-/** Pins the held status line for `waiting` alerts, unless it already says that. */
-function showHeld($: EngineInterface, ls: ListenerState, waiting: number) {
+/** Shows the held notice on the status line for `waiting` alerts, unless it already says that. */
+function showHeld($: EngineInterface, app: App, waiting: number) {
+  const { ls } = app
   const text = heldStatusLine(waiting)
   if (ls.heldStatus === text) return
   ls.heldStatus = text
-  pin($, text)
+  detach(refreshStatusLine($, app))
 }
 
 /** The hold is over (a delivery took the queue, the box emptied, nothing is left to wake for): its timer and status line go. */
@@ -1110,7 +1161,7 @@ function endHold($: EngineInterface, app: App) {
   ls.holdTimer = undefined
   if (ls.heldStatus !== undefined) {
     ls.heldStatus = undefined
-    pin($, undefined)
+    detach(refreshStatusLine($, app))
   }
 }
 
@@ -1133,7 +1184,7 @@ async function holdWake($: EngineInterface, app: App, pending: { unread: number;
   const { ls } = app
   ls.isHeld = true
   detach(putCountsShown($, app, prev => ({ ...prev, isHeld: true })))
-  showHeld($, ls, pending.unread)
+  showHeld($, app, pending.unread)
   armHoldRecheck($, app)
   const text = heldNotice(pending.unread, pending.forYou)
   let isSent = false
@@ -1176,7 +1227,7 @@ async function recheckHold($: EngineInterface, app: App) {
   }
   const pending = countsOf(queue, wakeOf(ls))
   if (pending.forYou > 0 && box.trim() !== '') {
-    showHeld($, ls, pending.unread)
+    showHeld($, app, pending.unread)
     return armHoldRecheck($, app)
   }
   endHold($, app)
@@ -1193,6 +1244,12 @@ async function finishDelivery($: EngineInterface, app: App, batch: readonly Orch
   const here = rt.current
   const ids = batch.map(a => a.id)
   const cur = await updateQueue($, app, q => removeFromQueue(q, ids, reported))
+  // The main loop is handling this batch until its turn ends.
+  if (here !== undefined) {
+    const at = await $.clock.now()
+    await putNow($, () => nowOf(batch, at, alert => alertHref(here.conn.endpoint, alert)))
+    detach(autoOpen($, app))
+  }
   // The cursor may only cover what is delivered: never past an alert still waiting. A batch that
   // took a later alert ahead of earlier ones leaves those pending, and the cover stops before them.
   const waiting = cur.items.reduce((min, a) => Math.min(min, a.sequence), Number.POSITIVE_INFINITY)
@@ -1383,7 +1440,7 @@ async function followOthers($: EngineInterface, app: App, arrivals: readonly num
   }
   const recentFromOthers = ls.othersAt.length
   const lastAt = ls.lastOtherAt
-  await putWorkspaceActivity($, current => ({ ...current, recentFromOthers, ...(lastAt === undefined ? {} : { lastAt }) }))
+  await putWorkspaceActivity($, app, current => ({ ...current, recentFromOthers, ...(lastAt === undefined ? {} : { lastAt }) }))
 }
 
 // ---- the agents of this session ----
@@ -1456,6 +1513,7 @@ async function noteObserved($: EngineInterface, app: App, agentId: string, comma
     for (const id of observedAs(command)) isNews = observe(app.ls.handles, agentId, id, base) || isNews
     if (!isNews) return
     await showHandles($, app)
+    detach(autoOpen($, app))
     // A participant new to the session: what it holds, and whether it is signed on, are read soon.
     detach(askRefresh($, app, 'soon'))
   } catch {
@@ -1466,7 +1524,10 @@ async function noteObserved($: EngineInterface, app: App, agentId: string, comma
 /** A subagent used the mod's tools, which act as the session's own participant: the table says it shares it. */
 async function noteSharing($: EngineInterface, app: App, agentId: string) {
   try {
-    if (useTools(app.ls.handles, agentId)) await showHandles($, app)
+    if (useTools(app.ls.handles, agentId)) {
+      await showHandles($, app)
+      detach(autoOpen($, app))
+    }
   } catch {
     // The table is a courtesy; the call has been answered.
   }
@@ -1537,6 +1598,24 @@ function paneClosed(app: App) {
   ls.isPaneOpen = false
   ls.safetyTimer?.cancel()
   ls.safetyTimer = undefined
+}
+
+/**
+ * First activity (a delivery, a claimed task, a subagent): the pane opens by itself, once. Not when the
+ * person closed it this session, not when it is already up (placed or waiting for room), not while
+ * disconnected. A window with no room for it answers `isPlaced: false` and that is all: it opens
+ * when the person asks or the window widens.
+ */
+async function autoOpen($: EngineInterface, app: App) {
+  const { ls } = app
+  if (ls.isPaneDeclined || ls.isDisconnected) return
+  try {
+    if ((await $.ui.panes()).some(pane => pane.id === PANE)) return
+    const opened = await $.ui.open({ id: PANE, title: 'Orchard' })
+    if (opened.isPlaced) await paneOpened($, app)
+  } catch {
+    // A pane that cannot open is no news; the band and the status line still say it.
+  }
 }
 
 const asTask = (endpoint: string, storeId: string, row: Record<string, unknown>): OrchardPaneTask | undefined =>
@@ -1629,7 +1708,7 @@ async function refreshWorkspace($: EngineInterface, app: App, known?: unknown) {
     const roles = attached.includes('roles') ? await readRoles($, app, handles) : []
     const claimedIds = new Set((claimed ?? []).map(t => t.id))
     const states = attached.includes('state') && claimed !== undefined ? await readStates($, app, handles, claimedIds) : attached.includes('state') ? undefined : []
-    await putWorkspaceActivity($, current => ({ ...current, ...(open === undefined ? {} : { openTasks: open }) }))
+    await putWorkspaceActivity($, app, current => ({ ...current, ...(open === undefined ? {} : { openTasks: open }) }))
     await putPlugins($, current => ({
       attached,
       roles: roles ?? current.roles,
@@ -1637,6 +1716,7 @@ async function refreshWorkspace($: EngineInterface, app: App, known?: unknown) {
       decisions: decisions ?? current.decisions,
       tasks: claimed ?? current.tasks,
     }))
+    if ((claimed ?? []).length > 0) detach(autoOpen($, app))
     if (decisions !== undefined) await syncCounts($, app, decisions.length)
   } catch {
     // The next receipt, refresh or the slow timer tries again.
@@ -1670,8 +1750,10 @@ async function readStates($: EngineInterface, app: App, handles: readonly string
  * Opens an address of Orchard's browser UI in the person's browser. Only the loopback address on
  * a workspace path is ever opened, whatever a handler is handed.
  */
+const isOrchardHref = (href: string) => /^http:\/\/127\.0\.0\.1(?::\d{1,5})?\/w\/[^\s]+$/.test(href)
+
 async function openInOrchard($: EngineInterface, href: string) {
-  if (!/^http:\/\/127\.0\.0\.1(?::\d{1,5})?\/w\/[^\s]+$/.test(href)) return
+  if (!isOrchardHref(href)) return
   try {
     await $.process.run(['open', href], { timeoutMs: 10_000 })
   } catch {
@@ -1689,6 +1771,10 @@ async function disconnect($: EngineInterface, app: App, to: OrchardStatus = { ki
   const { rt, ls } = app
   if (ls.isDisconnected) return
   ls.isDisconnected = true
+  ls.confirmTimer?.cancel()
+  ls.confirmTimer = undefined
+  await putView($, held => ({ ...held, isConfirming: false }))
+  await putNow($, () => null)
   stopLoop(ls, 'disconnected')
   rt.timer?.cancel()
   rt.timer = undefined
@@ -1705,7 +1791,7 @@ async function disconnect($: EngineInterface, app: App, to: OrchardStatus = { ki
   ls.lastOtherAt = undefined
   endHold($, app)
   await releaseLease($, app)
-  await putWorkspaceActivity($, () => EMPTY_WORKSPACE_ACTIVITY)
+  await putWorkspaceActivity($, app, () => EMPTY_WORKSPACE_ACTIVITY)
   await setStatus($, app, to)
 }
 
@@ -1716,11 +1802,44 @@ async function connect($: EngineInterface, app: App): Promise<boolean> {
   return true
 }
 
+/** Copies an address of Orchard's browser UI to the clipboard of the surface the press came from. */
+async function copyLink($: EngineInterface, href: string, surface: Parameters<PaneHandlers['copy']>[1]) {
+  if (!isOrchardHref(href)) return
+  try {
+    if (!(await $.ui.copy({ text: href, surface })).isCopied) $.ui.toast('Orchard: could not copy the link')
+  } catch {
+    $.ui.toast('Orchard: could not copy the link')
+  }
+}
+
+/** Disconnect was pressed: the pane asks first, and the question lapses by itself. */
+async function askDisconnect($: EngineInterface, app: App) {
+  const { ls } = app
+  ls.confirmTimer?.cancel()
+  await putView($, held => ({ ...held, isConfirming: true }))
+  ls.confirmTimer = $.clock.after(CONFIRM_MS, () => {
+    ls.confirmTimer = undefined
+    detach(putView($, held => ({ ...held, isConfirming: false })))
+  })
+}
+
+async function answerDisconnect($: EngineInterface, app: App, isYes: boolean) {
+  const { ls } = app
+  ls.confirmTimer?.cancel()
+  ls.confirmTimer = undefined
+  await putView($, held => ({ ...held, isConfirming: false }))
+  if (isYes) await disconnect($, app)
+}
+
 function paneHandlers($: EngineInterface, app: App): PaneHandlers {
   return {
     open: href => detach(openInOrchard($, href)),
-    disconnect: () => detach(disconnect($, app)),
+    copy: (href, surface) => detach(copyLink($, href, surface)),
+    disconnect: () => detach(askDisconnect($, app)),
+    confirmDisconnect: () => detach(answerDisconnect($, app, true)),
+    cancelDisconnect: () => detach(answerDisconnect($, app, false)),
     connect: () => detach(connect($, app)),
+    showSubagents: isShown => detach(putView($, held => ({ ...held, showSubagents: isShown }))),
   }
 }
 
@@ -2031,7 +2150,12 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     // /clear keeps this process, its loop and its lease holder id; every other end is a session that will not beat again.
-    if (e.reason !== 'clear') await releaseLease($, app)
+    if (e.reason !== 'clear') {
+      await releaseLease($, app)
+      // The status line is this session's: it goes with it.
+      app.ls.statusShown = null
+      pin($, undefined)
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -2073,6 +2197,7 @@ export const register: Register = (on, options) => {
         const now = await $.clock.now()
         await putAgents($, held => withSpawned(held, { agentId, description: e.description, type: e.subagentType }, now))
         await armAgents($, app)
+        detach(autoOpen($, app))
       } catch {
         // The table is a courtesy; the subagent started.
       }
@@ -2088,7 +2213,11 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     // A turn that ends in a subagent's loop: look at the list now, in case it was the agent's last.
-    if (e.agentId === undefined) detach(setMainStatus($, app, 'idle'))
+    if (e.agentId === undefined) {
+      detach(setMainStatus($, app, 'idle'))
+      // The batch it was handling is done.
+      detach(putNow($, () => null))
+    }
     else detach(lookAtAgents($, app, true))
     detach(ensureListening($, app))
     return next(e)
@@ -2139,6 +2268,8 @@ export const register: Register = (on, options) => {
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     paneClosed(app)
+    // The person's own close is final for this session: nothing opens the pane unasked again.
+    if (e.origin.kind === 'person') app.ls.isPaneDeclined = true
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -2157,19 +2288,22 @@ export const register: Register = (on, options) => {
       Svg: e.surface !== 'terminal' && 'Svg' in t ? t.Svg : undefined,
     }
     const held = await readQueue($, app)
-    const pending: PendingLine[] = held.items.slice(0, 5).map(a => ({ sender: a.senderName ?? a.senderId, snippet: snippetOf(a.body) }))
+    const endpoint = app.rt.current?.conn.endpoint
     return renderPane(
       table,
       {
         participantId: app.rt.current?.identity.participantId ?? '',
         workspaceName: (await read($, workspace))?.name ?? '',
-        workspaceHref: app.rt.current === undefined ? null : workspaceHref(app.rt.current.conn.endpoint),
+        workspaceHref: endpoint === undefined ? null : workspaceHref(endpoint),
         status: await read($, status),
         counts: await read($, counts),
-        pending,
+        now: await read($, handling),
+        queued: held.items.length,
         plugins: await read($, plugins),
         agents: await read($, agents),
         activity: await read($, activity),
+        view: await read($, view),
+        agentHref: handle => (endpoint === undefined ? null : agentHref(endpoint, handle)),
         // Read (the atom, to be drawn again when it moves) and shown from memory, which is never behind it.
         lastPollAt: app.ls.lastPollAt ?? (await read($, heartbeat)).lastPollAt,
         nowMs: await $.clock.now(),
@@ -2191,15 +2325,19 @@ export const register: Register = (on, options) => {
     // Theme tokens only (no hex), so the band follows the person's light/dark theme.
     const paint = (tone: BandTone): { color?: string; dimColor?: boolean } =>
       tone === 'mark' ? { color: 'suggestion' } : tone === 'ok' ? { color: 'success' } : tone === 'warn' ? { color: 'warning' } : tone === 'err' ? { color: 'error' } : tone === 'dim' ? { dimColor: true } : {}
+    // The bands beneath (beads-band's) stack under this one: the tree has the same shape whether or not they draw.
+    const rest = await next(e)
     return (
-      <Box>
-        {line.segments.map((segment, i) => (
-          <Text key={`band-${i}`} wrap="truncate-end" bold={segment.tone === 'mark'} {...paint(segment.tone)}>
-            {segment.text}
-          </Text>
-        ))}
+      <Box flexDirection="column">
+        <Box key="orchard-band">
+          {line.segments.map((segment, i) => (
+            <Text key={`band-${i}`} wrap="truncate-end" bold={segment.tone === 'mark'} {...paint(segment.tone)}>
+              {segment.text}
+            </Text>
+          ))}
+        </Box>
+        {rest ?? null}
       </Box>
     )
   })
 }
-

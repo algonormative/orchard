@@ -116,9 +116,25 @@ export function world(on: On, options: WorldOptions = {}) {
     return { value: { tool: `mcp__orchard__${e.name}` } } as never
   })
   const opened: { id: string; title?: string; focus?: true }[] = []
+  // The panes the plugin has open, as `$.ui.panes()` lists them, and what it copied to the clipboard.
+  const panes: string[] = []
+  const copied: { text: string; surface: unknown }[] = []
+  // What `$.ui.open` answers: a window with room places the pane, one without leaves it waiting.
+  const place: { isPlaced: boolean } = { isPlaced: true }
   on('ui.open', async (_$, e) => {
     opened.push({ id: e.id, title: e.title, focus: e.focus })
-    return { value: { isPlaced: true } } as never
+    if (!panes.includes(e.id)) panes.push(e.id)
+    return { value: place.isPlaced ? { isPlaced: true } : { isPlaced: false, reason: 'the window is too narrow' } } as never
+  })
+  on('ui.panes', async () => ({ value: panes.map(id => ({ id, title: id, isShown: true, isFocused: false, isPlaced: true })) }) as never)
+  on('ui.close', async (_$, e) => {
+    const at = panes.indexOf(e.id)
+    if (at >= 0) panes.splice(at, 1)
+    return {} as never
+  })
+  on('ui.copy', async (_$, e) => {
+    copied.push({ text: e.text, surface: e.surface })
+    return { value: { isCopied: true } } as never
   })
   // The engine's agents: a spawn starts one that `$.agent.list()` then shows, until a test changes its status or removes it.
   const agents: { list: AgentInfo[]; spawns: string[]; lists: number; deny: string | undefined } = { list: [], spawns: [], lists: 0, deny: undefined }
@@ -138,11 +154,20 @@ export function world(on: On, options: WorldOptions = {}) {
   on('session.end', async (_$, e) => ({ sessionId: e.sessionId }))
   on('turn.start', async (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', async (_$, e) => ({ text: e.answer }) as never)
+  // A band another mod draws beneath the plugin's, when a test sets one.
+  const below: { band: string | undefined } = { band: undefined }
   on('ui.render', async ($$, e) => {
-    const { Box } = $$.ui.resolve(e)
+    const { Box, Text } = $$.ui.resolve(e)
+    if (e.component === 'AbovePrompt' && below.band !== undefined) {
+      return (
+        <Box>
+          <Text>{below.band}</Text>
+        </Box>
+      )
+    }
     return <Box />
   })
-  return { clock, timers, fake, fs, store, sinks, session, state, box, gate, submits, submit, registered, opened, agents }
+  return { clock, timers, fake, fs, store, sinks, session, state, box, gate, submits, submit, registered, opened, panes, copied, place, below, agents }
 }
 
 export type World = ReturnType<typeof world>
@@ -166,8 +191,8 @@ export async function visible($: Engine, w: World): Promise<string[]> {
     ...w.sinks.seen,
     ...w.submits.map(s => JSON.stringify(s)),
     JSON.stringify(w.session.appended()),
-    // The feed and the plugins' items are drawn for the person (their links carry the workspace address), never shown to the model.
-    JSON.stringify({ ...w.state.latest, activity: undefined, plugins: undefined }),
+    // The feed, the plugins' items and the message being handled are drawn for the person (their links carry the workspace address), never shown to the model.
+    JSON.stringify({ ...w.state.latest, activity: undefined, plugins: undefined, now: undefined }),
   ]
 }
 

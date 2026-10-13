@@ -117,7 +117,7 @@ test("idle polls write no state: not the band's, not the feed's", { options: OPT
   await w.clock.advance(10 * 60_000)
   expect(calls(w, 'alerts') - polls).toBeGreaterThanOrEqual(8) // ten minutes of long polls came back empty
   expect(writesOf(w)).toEqual(settled)
-  expect(await bandText($)).toBe(`◆ ${ME} in Fruit Stand · ● listening`)
+  expect(await bandText($)).toBe('◆ Claude is connected to Fruit Stand')
 })
 
 test('idle polls with the pane open write only the poll clock', { options: OPTIONS }, async ($, on) => {
@@ -145,7 +145,7 @@ test('the band is written when its line changes, not when its sources do', { opt
   const before = w.state.writes.band ?? 0
   w.fake.push({ id: 'd1', sender_id: 'claude-other', body: 'hi', destination: { kind: 'direct', id: ME }, recipient_ids: [ME] }, { reasons: ['direct'] })
   await w.clock.settle()
-  expect(await bandText($)).toContain('1 new')
+  expect(await bandText($)).toContain('1 queued')
   const afterNews = w.state.writes.band ?? 0
   expect(afterNews).toBeGreaterThan(before)
   // more traffic that leaves the line as it is (a decision count recomputed to the same number) writes nothing

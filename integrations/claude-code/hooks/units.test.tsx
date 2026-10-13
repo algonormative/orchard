@@ -1,6 +1,10 @@
 import { expect, test } from 'claude-code/testing'
 
 import { bandLine } from './band'
+import { agentColor, agentState, handlingText, howOf, nowOf, shortHandle } from './feed'
+import { statusLine } from './statusline'
+import type { BandInput } from './band'
+import type { OrchardAgent } from '../types'
 import { checkConn, defaultName, defaultParticipantId, parseProjectFile, readOptions, resolveIdentity } from './config'
 import { BACKOFF_MAX_MS, backoffDelay, parseWorkspace } from './connect'
 import { CLI_TIMEOUT_MS, DEFAULT_BIN, runOrchard, sanitizeMessage } from './orchard-cli'
@@ -115,32 +119,44 @@ test('the project file is read for participantId and name and nothing else', () 
   expect(parseProjectFile('{"participantId":"a/b"}').ok).toBe(false)
 })
 
-test('the band is the session\'s own line: its participant in the workspace, offline, or a sanitized error, and never a request id', () => {
+test('the band is the session\'s one line: connected, busy, with subagents, left, offline or a sanitized error, and never a request id', () => {
   const quiet = { unread: 0, forYou: 0, needsYou: 0 }
   const ws = { name: 'Fruit Stand', ownerId: 'owner' }
-  const me = 'claude-fruit-stand'
-  const line = (status: Parameters<typeof bandLine>[0], workspace: Parameters<typeof bandLine>[1], counts: typeof quiet & { isHeld?: boolean }) => bandLine(status, workspace, counts, me)
-  expect(bandLine(null, null, quiet, me)).toBeNull()
-  expect(line({ kind: 'connecting' }, null, quiet)?.text).toBe('◆ claude-fruit-stand · connecting…')
-  // Before the identity is known there is only the mod's name.
-  expect(bandLine({ kind: 'connecting' }, null, quiet)?.text).toBe('◆ orchard · connecting…')
-  // Connected and quiet still draws the standing sign that it is alive; any count above zero replaces it.
-  expect(line({ kind: 'connected' }, ws, quiet)?.text).toBe('◆ claude-fruit-stand in Fruit Stand · ● listening')
-  expect(line({ kind: 'connected' }, { name: null, ownerId: null }, quiet)?.text).toBe('◆ claude-fruit-stand · ● listening')
-  expect(line({ kind: 'connected' }, { name: null, ownerId: null }, { unread: 1, forYou: 0, needsYou: 0 })?.text).toBe('◆ claude-fruit-stand · 1 new')
-  expect(line({ kind: 'offline', failures: 3 }, ws, quiet)).toMatchObject({ text: '◆ claude-fruit-stand in Fruit Stand · ○ offline', tone: 'warning' })
-  expect(line({ kind: 'disconnected' }, ws, quiet)).toMatchObject({ text: '◆ claude-fruit-stand in Fruit Stand · disconnected', tone: 'quiet' })
-  expect(line({ kind: 'signed-off' }, ws, quiet)).toMatchObject({ text: '◆ claude-fruit-stand in Fruit Stand · signed off', tone: 'quiet' })
-  expect(line({ kind: 'error', message: 'nope' }, ws, quiet)).toMatchObject({ text: '◆ claude-fruit-stand in Fruit Stand · error: nope', tone: 'error' })
-  expect(line({ kind: 'connected' }, ws, { unread: 3, forYou: 0, needsYou: 0 })?.text).toBe('◆ claude-fruit-stand in Fruit Stand · 3 new')
-  expect(line({ kind: 'connected' }, ws, { unread: 2, forYou: 1, needsYou: 1 })?.text).toBe('◆ claude-fruit-stand in Fruit Stand · 2 new · 1 for you · needs you 1')
-  expect(line({ kind: 'connected' }, ws, { unread: 2, forYou: 1, needsYou: 0, isHeld: true })?.text).toBe('◆ claude-fruit-stand in Fruit Stand · 2 new · 1 for you · sends when box is empty')
-  expect(line({ kind: 'connected' }, ws, { unread: 0, forYou: 0, needsYou: 2 })?.text).toBe('◆ claude-fruit-stand in Fruit Stand · needs you 2')
-  expect(line({ kind: 'connected' }, ws, { unread: -1, forYou: Number.NaN, needsYou: 0 })?.text).toBe('◆ claude-fruit-stand in Fruit Stand · ● listening')
+  const line = (status: BandInput['status'], workspace: BandInput['workspace'], counts: BandInput['counts'], extra: Partial<BandInput> = {}) => bandLine({ status, workspace, counts, ...extra })
+  const sub = (agentId: string, status: OrchardAgent['status'], extra: Partial<OrchardAgent> = {}): OrchardAgent => ({ agentId, description: agentId, type: 'general-purpose', status, startedAt: 0, ...extra })
+  expect(line(null, null, quiet)).toBeNull()
+  expect(line({ kind: 'connecting' }, null, quiet)?.text).toBe('◆ Claude · connecting…')
+  // Connected and quiet still draws the standing sign that it is alive.
+  expect(line({ kind: 'connected' }, ws, quiet)?.text).toBe('◆ Claude is connected to Fruit Stand')
+  expect(line({ kind: 'connected' }, { name: null, ownerId: null }, quiet)?.text).toBe('◆ Claude is connected to the workspace')
+  expect(line({ kind: 'connected' }, { name: null, ownerId: null }, { unread: 1, forYou: 0, needsYou: 0 })?.text).toBe('◆ Claude · 1 queued')
+  expect(line({ kind: 'offline', failures: 3 }, ws, quiet)).toMatchObject({ text: '◆ Claude in Fruit Stand · ○ offline', tone: 'warning' })
+  expect(line({ kind: 'disconnected' }, ws, quiet)).toMatchObject({ text: '◇ Claude is disconnected from Fruit Stand · /orchard connect', tone: 'quiet' })
+  expect(line({ kind: 'signed-off' }, ws, quiet)).toMatchObject({ text: '◇ Claude is signed off from Fruit Stand · /orchard connect', tone: 'quiet' })
+  expect(line({ kind: 'error', message: 'nope' }, ws, quiet)).toMatchObject({ text: '◆ Claude in Fruit Stand · error: nope', tone: 'error' })
+  expect(line({ kind: 'connected' }, ws, { unread: 3, forYou: 0, needsYou: 0 })?.text).toBe('◆ Claude in Fruit Stand · 3 queued')
+  expect(line({ kind: 'connected' }, ws, { unread: 2, forYou: 1, needsYou: 1 })?.text).toBe('◆ Claude in Fruit Stand · 2 queued · needs you 1')
+  expect(line({ kind: 'connected' }, ws, { unread: 2, forYou: 1, needsYou: 0, isHeld: true })?.text).toBe('◆ Claude in Fruit Stand · 2 queued · sends when box is empty')
+  expect(line({ kind: 'connected' }, ws, { unread: 0, forYou: 0, needsYou: 2 })?.text).toBe('◆ Claude in Fruit Stand · needs you 2')
+  expect(line({ kind: 'connected' }, ws, { unread: -1, forYou: Number.NaN, needsYou: 0 })?.text).toBe('◆ Claude is connected to Fruit Stand')
   expect(line({ kind: 'connected', isStoreFailing: true }, ws, quiet)).toMatchObject({ tone: 'warning' })
-  expect(line({ kind: 'connected' }, { name: 'Line one\nline two', ownerId: null }, { unread: 1, forYou: 0, needsYou: 0 })?.text).toBe('◆ claude-fruit-stand in Line one line two · 1 new')
-  expect(line({ kind: 'connected' }, { name: 'Line one\nline two', ownerId: null }, quiet)?.text).toBe('◆ claude-fruit-stand in Line one line two · ● listening')
-  expect(line({ kind: 'shared' }, ws, quiet)?.text).toBe('◆ claude-fruit-stand in Fruit Stand · another session is listening')
+  expect(line({ kind: 'connected' }, { name: 'Line one\nline two', ownerId: null }, { unread: 1, forYou: 0, needsYou: 0 })?.text).toBe('◆ Claude in Line one line two · 1 queued')
+  expect(line({ kind: 'shared' }, ws, quiet)?.text).toBe('◆ Claude in Fruit Stand · another session is listening')
+
+  // What it is handling now, and what waits behind it.
+  const one = { at: 0, total: 1, items: [{ sender: 'Ada', how: 'DM', snippet: 'hi' }] }
+  expect(line({ kind: 'connected' }, ws, { unread: 1, forYou: 1, needsYou: 0 }, { now: one })?.text).toBe('◆ Claude in Fruit Stand · handling DM from Ada · 1 queued')
+  expect(line({ kind: 'connected' }, ws, quiet, { now: { ...one, total: 3 } })?.text).toBe('◆ Claude in Fruit Stand · handling 3 messages')
+
+  // Subagents: said while one runs or one is still signed on; a clean finish is no news.
+  const agents = {
+    a: sub('a', 'running', { handle: 'claude-vault.a', signedOn: true }),
+    b: sub('b', 'completed', { handle: 'claude-vault.b', signedOn: true }),
+    c: sub('c', 'completed', { handle: 'claude-vault.c', signedOn: false }),
+  }
+  expect(line({ kind: 'connected' }, ws, quiet, { agents })?.text).toBe('◆ Claude in Fruit Stand · 3 subagents · 1 running · 1 still signed on')
+  expect(line({ kind: 'connected' }, ws, quiet, { agents: { c: agents.c } })?.text).toBe('◆ Claude is connected to Fruit Stand')
+  expect(line({ kind: 'connected' }, ws, quiet, { agents: { b: { ...agents.b, sharesBase: true } } })?.text).toBe('◆ Claude is connected to Fruit Stand')
 })
 
 test('workspace_info gives a name and an owner; missing pieces stay null', () => {
@@ -206,4 +222,38 @@ test('runOrchard: exit 3 has no message, exit 2 and 4 a sanitized one, others a 
 test('runOrchard: output that is not JSON leaves json out', async () => {
   const result = await runOrchard(stubRun({ exitCode: 0, stdout: 'not json' }).run, CONN, ['status'])
   expect(result).toEqual({ exitCode: 0, json: undefined })
+})
+
+test('the status line: quiet or a count in ten minutes, the open tasks when known, and what the connection is when it is not up', () => {
+  const ws = { name: 'Fruit Stand', ownerId: null }
+  const none = { recentFromOthers: 0, openTasks: null }
+  expect(statusLine(null, ws, none)).toBeUndefined()
+  expect(statusLine({ kind: 'connected' }, ws, none)).toBe('orchard · Fruit Stand · quiet')
+  expect(statusLine({ kind: 'connected' }, ws, { recentFromOthers: 4, openTasks: 12 })).toBe('orchard · Fruit Stand · ● 4 in 10m · 12 open tasks')
+  expect(statusLine({ kind: 'connected' }, ws, { recentFromOthers: 0, openTasks: 1 })).toBe('orchard · Fruit Stand · quiet · 1 open task')
+  expect(statusLine({ kind: 'connected' }, { name: null, ownerId: null }, none)).toBe('orchard · quiet')
+  expect(statusLine({ kind: 'disconnected' }, ws, none)).toBe('orchard · disconnected')
+  expect(statusLine({ kind: 'signed-off' }, ws, none)).toBe('orchard · signed off')
+  expect(statusLine({ kind: 'offline', failures: 1 }, ws, none)).toBe('orchard · offline')
+})
+
+test('the words of the pane: short handles, an agent\'s state, how a message reached the session, a stable colour per agent', () => {
+  expect(shortHandle('claude-vault.garden', 'claude-vault')).toBe('garden')
+  expect(shortHandle('claude-vault', 'claude-vault')).toBe('claude-vault')
+  expect(shortHandle('claude-other.x', 'claude-vault')).toBe('claude-other.x')
+  const a = (status: OrchardAgent['status'], extra: Partial<OrchardAgent> = {}): OrchardAgent => ({ agentId: 'a1', description: 'd', type: 't', status, startedAt: 0, ...extra })
+  expect(agentState(a('running'))).toEqual({ text: '● running', tone: 'ok' })
+  expect(agentState(a('completed', { handle: 'x', signedOn: false }))).toEqual({ text: '✓ done · signed off', tone: 'dim' })
+  expect(agentState(a('completed', { handle: 'x', signedOn: true }))).toEqual({ text: '⚠ done · still signed on', tone: 'warn' })
+  expect(agentState(a('completed', { handle: 'x', signedOn: true, sharesBase: true })).text).toBe('✓ done')
+  expect(agentState(a('idle', { agentId: 'main', handle: 'x', signedOn: true })).text).toBe('● signed on')
+  expect(howOf({ reasons: ['direct'], where: 'direct' })).toBe('DM')
+  expect(howOf({ reasons: ['channel'], where: 'channel general' })).toBe('#general')
+  expect(agentColor('agent-1')).toBe(agentColor('agent-1'))
+  const alert = { senderName: 'Ada', senderId: 'ada', reasons: ['mention'], where: 'channel general', body: 'hi\nthere' } as never
+  const now = nowOf([alert, alert, alert, alert], 5, () => null)
+  expect(now).toMatchObject({ at: 5, total: 4 })
+  expect(now.items).toHaveLength(3)
+  expect(handlingText(now)).toBe('handling 4 messages')
+  expect(handlingText(nowOf([alert], 5, () => null))).toBe('handling mention from Ada')
 })

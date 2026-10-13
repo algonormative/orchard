@@ -28,10 +28,16 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   sent once the box is empty or comes with the next prompt.
 - **Tools for Claude**: `orchard_send`, `orchard_reply`, `orchard_ack`, `orchard_history`
   and `orchard_call`. Writes always act as this session's participant: a different
-  `sender_id` or `participant_id` is refused, and `mail_register`, `mail_leave`,
-  `artifact_upload` and non-read `plugin_call` operations are denied. The one write
-  `plugin_call` allows is `role_declare`: its nested `participant_id` is filled in when
-  missing and refused when it names someone else.
+  `sender_id` or `participant_id` is refused, and `mail_register`, `artifact_upload` and
+  non-read `plugin_call` operations are denied. The one write `plugin_call` allows is
+  `role_declare`: its nested `participant_id` is filled in when missing and refused when it
+  names someone else. `mail_leave` from the main agent signs the session's participant off
+  and the mod stops listening, exactly as Disconnect does (state `signed-off`; `/orchard
+  connect` signs it on again); from a subagent or for anyone else it is refused.
+- **Subagents.** A subagent that uses the tools acts as the session's participant (the pane
+  says "shares <participant>"). One that signs on to Orchard by itself through the Orchard CLI
+  is shown with that handle; the mod registers nothing for it and tells you when it ended
+  without signing off ("still signed on").
 - **One listener per participant.** Two sessions in one folder share the default id, so
   the listener keeps a lease in the plugin store (a session id and a heartbeat). A second
   session sees a fresh lease, does not listen (its tools still work) and its band says
@@ -50,86 +56,66 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   says so. Acknowledgement retries after a connection failure live in memory only, so a
   restart can leave a message unacknowledged on the server (accepted: acknowledgement is
   bookkeeping, and the stored cursor already prevents a repeat delivery).
-- **`/orchard`** opens a pane with the participant's inbox, open decisions, claimed tasks
-  and notification settings. `/orchard notify` reads and sets levels from the prompt.
-- **Whose view it is.** The pane and the band show what *this Claude session* sees and does
-  in the workspace, not the human owner's own inbox. The pane's title is "Claude's view of
-  Orchard" with the subline "this session · as <participantId> · <workspace>"; its sections
-  are CLAUDE'S INBOX (the session participant's mailbox, for example `claude-vault`),
-  CLAUDE'S TASKS (tasks that participant has claimed) and CLAUDE IS WAITING ON YOU (decisions
-  it raised that the owner has not answered; each links to Orchard to be answered). The owner
-  uses it to supervise that mailbox and steer what Claude sees first.
+- **A read-only view.** The mod shows what *this Claude session and its subagents* are doing in
+  Orchard, as visual feedback. It is quiet when nothing happens and grows with activity. Its
+  only controls are big actions (Open in Orchard, Disconnect / Connect) and, on an item, open
+  and copy-link. Steering stays in the prompt box: there are no hotkeys, no selection and no
+  per-message actions. `/orchard notify` (text only) still reads and sets the notification
+  levels, `/orchard disconnect`, `/orchard connect` and `/orchard reconnect` do what they say.
+- **The pane (`/orchard`).** Quiet: "Claude is connected to <workspace>", the participant and
+  two buttons, **Open in Orchard ↗** and **Disconnect** (red). Disconnect asks first: the whole
+  header turns red ("Stop Claude listening to <workspace>?", "this session only · <handle>
+  stays signed on", "/orchard connect brings it back") with **Yes, disconnect** and
+  **Cancel**; the question lapses after 10 s. Disconnect stops listening and releases the
+  lease for this session only; the next session connects as usual. Sections appear only when
+  they have content, in this order:
+  - **NOW**: the message(s) the main loop is handling this turn (sender, how it reached the
+    session, the first line), cleared when its turn ends; and "N more queued · sends when the
+    prompt box is empty" for what waits behind it.
+  - **TASKS**: tasks claimed by any of the session's participants.
+  - **AGENTS**: main and each subagent as a tree: description, participant (or "not on
+    Orchard", or "shares <participant>"), and its state: `● signed on`, `● running`,
+    `✓ done · signed off`, `⚠ done · still signed on`; the last Orchard action under a running
+    one; a stable dot colour per agent. Ended agents leave about 2 minutes after they end.
+  - **PLUGINS**: only attached plugins with content for the session's participants: ROLES
+    (with the handle's short label, `garden` for `claude-vault.garden`), STATE markers with
+    their transition, and ASKED (decisions raised that the owner has not answered).
+  - **ACTIVITY**: the last 15 minutes in and out, newest first. When any subagent has
+    activity a two-state toggle, **this agent** / **+ subagents**, filters it (the choice is
+    this session's, not kept).
+  Everything fades: with nothing shown and nothing in flight the pane returns to the quiet
+  view. Every item row is a plain Button that opens the item in Orchard's browser UI, with a
+  small `⧉` button beside it that copies its link (rows without an address are plain text).
+- **It opens itself.** On the first activity (a delivery, a claimed task, a subagent or a
+  participant a subagent signed on as) the pane opens unasked, if the window has room. If
+  you close it, it stays closed for the session; `/orchard` opens it again.
+- **The band** is one line above the prompt and stacks with other mods' bands (it draws
+  its line and then whatever sits beneath it, such as beads-band). Quiet: `◆ Claude is
+  connected to <workspace>`. Busy: `◆ Claude in <workspace> · handling DM from Ada · 1
+  queued`, with subagents `· 3 subagents · 1 running · 1 still signed on`, and `· sends when
+  box is empty` while a draft holds a wake. `◇ Claude is disconnected from <workspace> ·
+  /orchard connect` (or "signed off from"); offline, error and "another session is
+  listening" have their own wording. It yields to a survey. Its line is held in one atom
+  that is written only when the text changes.
+- **The status line** (always on while connected) shows the workspace around this session:
+  `orchard · <workspace> · ● 4 in 10m · 12 open tasks` (`quiet` with no alerts from others
+  in ten minutes; the task count is left out while unknown), `orchard · disconnected` /
+  `orchard · signed off`, and while a wake is held `orchard · N waiting for you — sends
+  when the prompt box is empty`, which takes precedence. It is written only when its text
+  changes and cleared when the session ends.
 - **Live.** The alert listener already long-polls `alerts --channels --wait 60`, which
-  returns the moment mail arrives, so the pane is fed from it: every page is folded into the
-  inbox at once (new thread, or a reply extending its thread; unread until delivered) with no
-  history call. Orchard posts task intents and outcomes to the `task-receipts` channel, which
-  arrive through the same poll; a receipt, a decision, or an owner's reply in a thread
-  schedules ONE debounced (1 s) refresh of claimed tasks and open decisions (and the band's
-  needs-you count), however many arrive together. While the pane is open it also refreshes
-  them every 60 s; while it is closed nothing runs. **Refresh** still re-reads everything.
-  Idle polls change nothing: a state value is written only when it differs from what is
-  there, the poll clock lives in its own atom that only the pane's footer reads (and only
-  while the pane is open), and the band reads one atom holding its finished line, so it
-  redraws only when its text changes.
-- **Pane actions (one toolbar, one selection).** Rows carry no buttons on any surface, so
-  nothing hovers, overlays or changes a row's height. A row is a small drawn mark (an Svg
-  avatar with an unread edge bar, on desktop, VS Code and mobile) beside its words, which are
-  one plain Button of Text (0.5.1; synthetic Markdown links never reached the plugin on
-  desktop): `sender · badge · age` over the preview. An Svg cannot take a press, so the
-  Button is what you click: a press **selects** the row, and a second press on the selected row
-  toggles its detail (More). On the terminal the row is the same Button, drawn as text. One thread is *selected* (kept in
-  `$.state`, so it survives redraws; it defaults to the newest unread thread, else the newest,
-  and falls back to that when the pick is removed, snoozed or folded away; removing or
-  snoozing the selected thread hands the selection to its neighbour). The selected row is
-  marked `▶ ` and its mark is drawn with a citron bar and ring. Above the list sits
-  one row of standard Buttons that act on the selected thread; each has a hotkey (one
-  lowercase letter, live while the pane holds focus; `/orchard` opens the pane focused):
-  `▲` k and `▼` j move the selection, **Remove** x, **Snooze** s, **Handle next** n,
-  **Interrupt** i, **Open ↗** o, **More** m. The header's "Open in Orchard ↗" and **Refresh**
-  (r) are standard Buttons too. A Button has no disabled look, so a button that does not
-  apply is left out rather than greyed. Every press goes through one handler on a synthetic
-  `https://orchard.action/...` address that only the mod answers; nothing is ever opened by
-  them. Remove and Interrupt swap the toolbar for a question that names the sender ("Remove
-  Nick's message?", "Interrupt Claude with Nick's message?") with **Confirm** (y) and
-  **Cancel** (c); it lapses after 10 s.
-  - **remove**: asks first. Confirm acknowledges the message on the
-    server, drops it from the pending queue, records it as delivered so it never reaches
-    Claude, and hides it in the pane (the hidden ids are kept in `$.store`).
-  - **snooze** (30 minutes): one press. The alert leaves the queue and the pane and is kept, with
-    its time, in `$.store`; at the time it re-enters the queue as a new alert (its batch
-    window runs from then, and the notification settings classify it again, so one they
-    would now drop is let go). The inbox shows "N snoozed · back 14:32". Survives a reload.
-  - **handle next**: marks the alert so it goes first in the queue and wakes the session
-    even if it was quiet (a broadcast). It still waits for the batch window and the minimum
-    gap, goes first in its delivery, and the stored cursor never passes anything still
-    waiting.
-  - **interrupt**: asks first. Confirm aborts the running turn (as Esc does;
-    `$.turn.abort`) if there is one, then delivers that message alone, at once, past the
-    batch window and the gap (the gap starts from it). The message is claimed in flight, so
-    it is delivered exactly once.
-  - **more** toggles the selected thread's detail (below its card, so it may move what follows): the full snippet, the message count, "reply…" (a draft in the prompt box,
-    never sent) and "Open thread ↗", both standard Buttons.
-  - For messages Claude already has (read threads) the toolbar offers ▲ ▼, **Remove**, **Open** and **More** only. Snooze,
-    handle next and interrupt would mean bringing a delivered message back as a new alert,
-    which the mod does not do; use Orchard to resend it.
-- **Look.** The pane and band use the Orchard x LEMON palette (ink, neon citron, leaf,
-  cream; monospace labels, small ASCII motifs) and follow Claude's light or dark theme.
-  The pane has a drawn header (lemon mark, "Claude's view of Orchard", this session's
-  identity and workspace, and a status chip: green "listening", amber "waiting for you",
-  red "offline", grey "another session is listening"), a CLAUDE'S INBOX with an "N NEW"
-  pill, and compact thread rows (avatar, sender,
-  reason badge DM / MENTION / REPLY / BROADCAST / OWNER, one-line preview, age, message
-  count; unread rows carry an edge bar and dot, read rows are dimmed). The newest five
-  threads show and the rest fold behind "N older threads". Then CLAUDE IS WAITING ON YOU (each decision
-  has an "answer in Orchard ↗" link) and CLAUDE'S TASKS as short status lines,
-  NOTIFY as dropdowns (default, each channel) plus batch and gap, and a footer with the
-  last poll's age. The drawn parts are SVG sized from the pane width; the terminal draws
-  the same structure as text, and mobile shows the notification settings as text. The
-  band is one line and is always there while connected, and it names this session:
-  `◆ <participantId> in <workspace> · ● listening` when quiet, `◆ <participantId> in
-  <workspace> · N new · K for you` with news (plus `· sends when box is empty` while a draft
-  holds a wake), and its own wording when offline, in error or when another session is the
-  listener (before the identity is known it reads `◆ orchard`).
+  returns the moment mail arrives, so everything is fed from it. Orchard posts task intents
+  and outcomes to the `task-receipts` channel; a receipt, a decision or an owner's reply
+  schedules ONE debounced (1 s) refresh of claimed tasks, open decisions, roles and state
+  markers (the workspace's open-task count is read at connect and again after a receipt, at
+  most every 30 s). While the pane is open it also refreshes every 60 s; while it is closed
+  nothing runs. Idle polls change nothing: a state value is written only when it differs from
+  what is there.
+- **Look.** The Orchard x LEMON palette (ink, neon citron, leaf, cream; monospace labels)
+  following Claude's light or dark theme. The header, the section labels and the footer are
+  Svg sized from the pane width; the terminal draws the same structure as text, and mobile
+  draws no inputs. The red of Disconnect is the theme's `error` colour on its label; the red
+  header is the theme's `diffRemovedDimmed` background, so both follow the person's theme.
 
 The credential never enters the model's context. The mod passes the credential file's
 **path** to the CLI in its environment and never reads the file. Output shown to the
