@@ -88,6 +88,7 @@ test('with the pane open the workspace is read every 60 s; with none open, never
 
 test('a decision the owner answers moves the waiting-on-you section and the band', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
+  w.place.isPlaced = false // a pane waiting for room hides nothing: the band shows
   w.fake.hasDecisionsTool = true
   await begin($, w)
   w.fake.push({ id: 'dec1', sender_id: ME, kind: 'decision', body: 'Ship the awning?', destination: { kind: 'direct', id: 'owner' }, recipient_ids: ['owner'] })

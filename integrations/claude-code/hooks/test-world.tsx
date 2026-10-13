@@ -132,7 +132,7 @@ export function world(on: On, options: WorldOptions = {}) {
     if (!panes.includes(e.id)) panes.push(e.id)
     return { value: place.isPlaced ? { isPlaced: true } : { isPlaced: false, reason: 'the window is too narrow' } } as never
   })
-  on('ui.panes', async () => ({ value: panes.map(id => ({ id, title: id, isShown: true, isFocused: false, isPlaced: true })) }) as never)
+  on('ui.panes', async () => ({ value: panes.map(id => ({ id, title: id, isShown: true, isFocused: false, isPlaced: place.isPlaced })) }) as never)
   on('ui.close', async (_$, e) => {
     const at = panes.indexOf(e.id)
     if (at >= 0) panes.splice(at, 1)

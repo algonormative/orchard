@@ -122,7 +122,7 @@ remembered, so resuming the conversation connects again.
   connected to <workspace>`. Busy: `◆ Claude in <workspace> · handling DM from Ada · 1
   queued`, with subagents `· 3 subagents · 1 running · 1 still signed on`, and `· sends when
   box is empty` while a draft holds a wake. `◇ Claude is disconnected from <workspace> ·
-  /orchard connect` (or "signed off from"); offline and error have their own wording. It yields to a survey. Its line is held in one atom
+  /orchard connect` (or "signed off from"); offline and error have their own wording. It yields to a survey, and it steps aside while the pane is open (the pane says everything it would; the status line stays) and comes back when the pane closes. Its line is held in one atom
   that is written only when the text changes.
 - **The status line** (always on while connected) shows the workspace around this session:
   `orchard · <workspace> · ● 4 in 10m · 12 open tasks` (`quiet` with no alerts from others

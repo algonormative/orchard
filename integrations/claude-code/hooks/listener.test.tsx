@@ -39,6 +39,7 @@ async function start($: Engine, on: Parameters<typeof world>[0], options: WorldO
 for (const reasons of [['direct'], ['mention'], ['reply'], ['broadcast', 'mention']]) {
   test(`wakes an idle session on ${reasons.join(' + ')}, after the batch window`, { options: OPTIONS }, async ($, on) => {
     const w = await start($, on)
+    w.place.isPlaced = false // a pane waiting for room hides nothing: the band shows
     expect(alertsCalls(w)).toHaveLength(1)
 
     deliver(w, 'm1', reasons)
@@ -106,6 +107,7 @@ test('a broadcast rides along with the next wake, and is acknowledged with it', 
 
 test('a broadcast rides along with the next prompt the person types', { options: OPTIONS }, async ($, on) => {
   const w = await start($, on)
+  w.place.isPlaced = false // a pane waiting for room hides nothing: the band shows
   deliver(w, 'b1', ['broadcast'], { body: 'deploy freeze at noon', destination: { kind: 'broadcast' } })
   await w.clock.settle()
   expect(await bandText($)).toBe('◆ Claude in Fruit Stand · 1 queued')
@@ -303,6 +305,7 @@ const NOTIFY = { command: 'orchard', origin: { kind: 'composer' as const }, pres
 /** A draft in the box and one waking alert: the wake is held at 10 s, and the first recheck is due at 25 s. */
 async function heldWake($: Engine, on: Parameters<typeof world>[0], mode: NotifyMode = 'no-surface') {
   const w = world(on)
+  w.place.isPlaced = false // a pane waiting for room hides nothing: the band shows
   w.sinks.notify.mode = mode
   await begin($, w)
   w.box.text = 'half a thought I was typing'
@@ -1422,6 +1425,7 @@ test('past 50 (endpoint, participant) records the least recently used are evicte
 
 test('a failed store write shows in the band, and the band clears once a write goes through', { options: OPTIONS }, async ($, on) => {
   const w = await start($, on)
+  w.place.isPlaced = false // a pane waiting for room hides nothing: the band shows
   expect(await bandText($)).toBe('◆ Claude is connected to Fruit Stand')
 
   w.store.fail.set = true
