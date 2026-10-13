@@ -123,6 +123,7 @@ test('sections appear only when they have something, in order, and go when it do
 
 test('NOW names the message the main loop handles from its delivery to the end of its turn; what waits behind it is counted', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
+  w.place.isPlaced = false // a pane waiting for room hides nothing: the band shows
   await begin($, w)
   await openPane($, w)
   const ui = await mountPane($, 'terminal')
@@ -347,6 +348,7 @@ test('Disconnect asks first: the header turns red, says what happens, and Cancel
 
 test('the question lapses after 10 s, and Yes disconnects the session and turns the pane into Connect, which connects it again', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
+  w.place.isPlaced = false // a pane waiting for room hides nothing: the band shows
   await begin($, w)
   await openPane($, w)
   const ui = await mountPane($, 'terminal')
@@ -379,6 +381,7 @@ test('the question lapses after 10 s, and Yes disconnects the session and turns 
 
 test('a pane over a session whose participant signed off says so and offers Connect', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
+  w.place.isPlaced = false // a pane waiting for room hides nothing: the band shows
   await begin($, w)
   await openPane($, w)
   const ui = await mountPane($, 'terminal')
@@ -458,6 +461,7 @@ test('the band stacks with the bands beneath it: it calls next(e) and keeps thei
 
 test('the band says it in one line per state: connected, handling, subagents, disconnected', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
+  w.place.isPlaced = false // a pane waiting for room hides nothing: the band shows
   await begin($, w)
   expect(await bandText($)).toBe('◆ Claude is connected to Fruit Stand')
   wake(w, 'm1')
@@ -722,4 +726,23 @@ test('drawings are sized from the pane width and clipped to it', () => {
   expect(widthOf(55)).toBe(432)
   expect(widthOf(10)).toBe(300)
   expect(widthOf(500)).toBe(560)
+})
+
+test('the band steps aside while the pane is open and comes back when it closes', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  await begin($, w)
+  await w.clock.advance(15_000)
+  expect(await bandText($, 'desktop')).toContain('Claude is connected to')
+
+  await $.command.run(RUN(''))
+  await $.ui.mount({ plugin: 'orchard', surface: 'desktop', component: 'Pane', requestId: 'orchard', props: PANE_PROPS })
+  await w.clock.advance(1_000)
+  expect(await bandText($, 'desktop')).toBeUndefined()
+
+  // the test engine cannot raise `ui.close`, so the pane goes from beneath: out of the list, and a reopen finds no room
+  w.panes.length = 0
+  w.place.isPlaced = false
+  wake(w)
+  await w.clock.advance(15_000)
+  expect(await bandText($, 'desktop')).toMatch(/^◆ Claude in Fruit Stand · /)
 })

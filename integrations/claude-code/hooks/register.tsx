@@ -285,9 +285,18 @@ async function putHeartbeat($: EngineInterface, change: (current: OrchardHeartbe
   return true
 }
 
-/** Derives the band's line from status, workspace, counts, what is being handled and the agents, and writes it if the line differs. */
+/** True while the Orchard pane is drawn: it shows everything the band would say, so the band steps aside. A pane waiting undrawn for room does not count. */
+async function isPaneDrawn($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)
+  } catch {
+    return false
+  }
+}
+
+/** Derives the band's line from status, workspace, counts, what is being handled and the agents, and writes it if the line differs. Nothing while the pane is drawn. */
 async function refreshBand($: EngineInterface) {
-  const line = bandLine({ status: await read($, status), workspace: await read($, workspace), counts: await read($, counts), now: await read($, handling), agents: await read($, agents) })
+  const line = (await isPaneDrawn($)) ? null : bandLine({ status: await read($, status), workspace: await read($, workspace), counts: await read($, counts), now: await read($, handling), agents: await read($, agents) })
   await putBand($, () => line)
 }
 
@@ -1561,6 +1570,7 @@ async function paneOpened($: EngineInterface, app: App) {
     ls.isPaneOpen = true
     armSafety($, app)
   }
+  await refreshBand($)
   await putHeartbeat($, () => ({ lastPollAt: ls.lastPollAt }))
 }
 
@@ -2262,7 +2272,10 @@ export const register: Register = (on, options) => {
     paneClosed(app)
     // The person's own close is final for this session: nothing opens the pane unasked again.
     if (e.origin.kind === 'person') app.ls.isPaneDeclined = true
-    return next(e)
+    const closed = await next(e)
+    // The pane is gone now: the band comes back.
+    await refreshBand($)
+    return closed
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -2270,6 +2283,8 @@ export const register: Register = (on, options) => {
     if (!app.ls.isPaneOpen && app.ls.isOptedIn) {
       app.ls.isPaneOpen = true
       armSafety($, app)
+      // A draw may not write state: the band steps aside just after it.
+      $.clock.after(0, () => detach(refreshBand($)))
     }
     const t = $.ui.resolve(e)
     const table: Table = {
