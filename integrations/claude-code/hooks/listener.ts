@@ -70,8 +70,8 @@ export type ListenerState = {
   holdTimer: Cancelable | undefined
   /** The status line pinned for the hold (undefined: none is). */
   heldStatus: string | undefined
-  /** This module instance has unpinned a status line an earlier instance may have left. */
-  isStatusSwept: boolean
+  /** What this instance last pinned to the status line (null: it cleared it; undefined: it has pinned nothing yet, so its first line replaces one an earlier instance left). */
+  statusShown: string | null | undefined
   /** Tells this module instance's claims on deliveries from another's (a reinstall or reload leaves both alive). */
   instanceId: string
   /** A waking delivery is in flight (a `$.prompt.submit` that has not resolved). */
@@ -106,6 +106,10 @@ export type ListenerState = {
   isDisconnected: boolean
   /** The /orchard pane is open: only then is the slow safety refresh armed and the poll clock mirrored. */
   isPaneOpen: boolean
+  /** The person closed the pane this session: it is never opened unasked again. */
+  isPaneDeclined: boolean
+  /** The disconnect question lapses when this fires. */
+  confirmTimer: Cancelable | undefined
   /** The one debounced read of the workspace's tasks and plugins a receipt (or this session's own write) asked for, and when it will run. */
   workTimer: Cancelable | undefined
   workDueAt: number | undefined
@@ -151,7 +155,7 @@ export function createListenerState(): ListenerState {
     isHeld: false,
     holdTimer: undefined,
     heldStatus: undefined,
-    isStatusSwept: false,
+    statusShown: undefined,
     instanceId: crypto.randomUUID(),
     isDelivering: false,
     inFlight: new Set(),
@@ -169,6 +173,8 @@ export function createListenerState(): ListenerState {
     decisionsTool: 'unknown',
     isDisconnected: false,
     isPaneOpen: false,
+    isPaneDeclined: false,
+    confirmTimer: undefined,
     workTimer: undefined,
     workDueAt: undefined,
     workReadAt: undefined,
@@ -241,5 +247,5 @@ export function heldNotice(unread: number, forYou: number): string {
 
 /** The status line pinned under the prompt for as long as a wake is held. */
 export function heldStatusLine(waiting: number): string {
-  return `Orchard: ${waiting} waiting for you — sends when the prompt box is empty`
+  return `orchard · ${waiting} waiting for you — sends when the prompt box is empty`
 }

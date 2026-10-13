@@ -3,7 +3,7 @@
 //
 // The colours are CSS variables on :root, redefined under `prefers-color-scheme: dark`; the
 // desktop draws an Svg in the app's page, so the media query follows Claude's own light/dark
-// theme. Svg cannot hold controls: everything clickable is built from Box/Text/Button/Select
+// theme. Svg cannot hold controls: everything clickable is built from Box/Text/Button
 // in pane.tsx, and these strings are only the decoration around it.
 import type { OrchardCounts, OrchardStatus } from '../types'
 
@@ -18,7 +18,7 @@ export function widthOf(columns: number | undefined): number {
   return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Math.floor(columns) * PX_PER_COLUMN - 8))
 }
 
-const STYLE = `:root{--bg:#f8faef;--card:#e5ecca;--text:#070b08;--dim:#465349;--accent:#3f4a00;--leaf:#1d5c27;--leafbg:#cfe6cb;--rule:#b4c194;--chip:#ebf1d4;--chipline:#a9b88a;--grain:#dde5c3;--badge:#e6ff68;--onbadge:#0d140f;--peach:#ffcfad;--dot:#8aa000;--err:#8f1d1d;--errbg:#f6d3cf;--warn:#7a4a00;--warnbg:#f7e2b0}@media (prefers-color-scheme: dark){:root{--bg:#070c0a;--card:#18251d;--text:#f6fae8;--dim:#a5b5a7;--accent:#ecff7a;--leaf:#93f09b;--leafbg:#2c4a32;--rule:#3f5548;--chip:#1b281f;--chipline:#46604f;--grain:#1f2e25;--badge:#e6ff68;--onbadge:#090f0d;--peach:#ffcfad;--dot:#e6ff68;--err:#ff9d94;--errbg:#4a2220;--warn:#ffd37a;--warnbg:#4a3a14}}.mono{font-family:ui-monospace,'SF Mono',Menlo,monospace}.bg{fill:var(--bg)}.card{fill:var(--card)}.text{fill:var(--text)}.dim{fill:var(--dim)}.accent{fill:var(--accent)}.leaf{fill:var(--leaf)}.leafbg{fill:var(--leafbg)}.rule{fill:var(--rule)}.grain{fill:var(--grain)}.badge{fill:var(--badge)}.onbadge{fill:var(--onbadge)}.peach{fill:var(--peach)}.dot{fill:var(--dot)}.err{fill:var(--err)}.errbg{fill:var(--errbg)}.warn{fill:var(--warn)}.warnbg{fill:var(--warnbg)}.chip{fill:var(--chip);stroke:var(--chipline)}.outline{fill:none;stroke:var(--dim)}.sel{fill:none;stroke:var(--dot);stroke-width:2}.bar{fill:var(--dot)}`
+const STYLE = `:root{--bg:#f8faef;--card:#e5ecca;--text:#070b08;--dim:#465349;--accent:#3f4a00;--leaf:#1d5c27;--leafbg:#cfe6cb;--rule:#b4c194;--chip:#ebf1d4;--chipline:#a9b88a;--grain:#dde5c3;--badge:#e6ff68;--onbadge:#0d140f;--peach:#ffcfad;--dot:#8aa000;--err:#8f1d1d;--errbg:#f6d3cf;--warn:#7a4a00;--warnbg:#f7e2b0;--red:#b3261e;--onred:#ffffff}@media (prefers-color-scheme: dark){:root{--bg:#070c0a;--card:#18251d;--text:#f6fae8;--dim:#a5b5a7;--accent:#ecff7a;--leaf:#93f09b;--leafbg:#2c4a32;--rule:#3f5548;--chip:#1b281f;--chipline:#46604f;--grain:#1f2e25;--badge:#e6ff68;--onbadge:#090f0d;--peach:#ffcfad;--dot:#e6ff68;--err:#ff9d94;--errbg:#4a2220;--warn:#ffd37a;--warnbg:#4a3a14;--red:#ff6b5e;--onred:#1a0605}}.mono{font-family:ui-monospace,'SF Mono',Menlo,monospace}.bg{fill:var(--bg)}.card{fill:var(--card)}.text{fill:var(--text)}.dim{fill:var(--dim)}.accent{fill:var(--accent)}.leaf{fill:var(--leaf)}.leafbg{fill:var(--leafbg)}.rule{fill:var(--rule)}.grain{fill:var(--grain)}.badge{fill:var(--badge)}.onbadge{fill:var(--onbadge)}.peach{fill:var(--peach)}.dot{fill:var(--dot)}.err{fill:var(--err)}.errbg{fill:var(--errbg)}.warn{fill:var(--warn)}.warnbg{fill:var(--warnbg)}.red{fill:var(--red)}.onred{fill:var(--onred)}.chip{fill:var(--chip);stroke:var(--chipline)}.outline{fill:none;stroke:var(--dim)}.sel{fill:none;stroke:var(--dot);stroke-width:2}.bar{fill:var(--dot)}`
 
 /** Escapes text for XML after dropping control characters. */
 export function esc(value: string): string {
@@ -47,14 +47,15 @@ function svg(width: number, height: number, body: string): string {
 
 // ---- the status chip ----
 
-export type ChipKind = 'listening' | 'waiting' | 'offline' | 'shared' | 'connecting' | 'error' | 'disconnected' | 'signed-off'
+export type ChipKind = 'listening' | 'working' | 'waiting' | 'offline' | 'shared' | 'connecting' | 'error' | 'disconnected' | 'signed-off'
 export type Chip = { kind: ChipKind; label: string }
 
-/** green listening / amber waiting for you / red offline (or error) / grey another session is listening, disconnected, signed off, or connecting. */
-export function chipOf(status: OrchardStatus | null, counts: OrchardCounts | null): Chip {
+/** green listening or working / amber waiting for you / red offline (or error) / grey another session is listening, disconnected, signed off, or connecting. `isBusy`: a message is being handled or a subagent runs. */
+export function chipOf(status: OrchardStatus | null, counts: OrchardCounts | null, isBusy = false): Chip {
   switch (status?.kind) {
     case 'connected':
-      return (counts?.needsYou ?? 0) > 0 || counts?.isHeld === true ? { kind: 'waiting', label: 'waiting for you' } : { kind: 'listening', label: 'listening' }
+      if ((counts?.needsYou ?? 0) > 0 || counts?.isHeld === true) return { kind: 'waiting', label: 'waiting for you' }
+      return isBusy ? { kind: 'working', label: 'working' } : { kind: 'listening', label: 'listening' }
     case 'offline':
       return { kind: 'offline', label: 'offline' }
     case 'error':
@@ -72,6 +73,7 @@ export function chipOf(status: OrchardStatus | null, counts: OrchardCounts | nul
 
 const CHIP_CLASS: Record<ChipKind, { bg: string; fg: string }> = {
   listening: { bg: 'leafbg', fg: 'leaf' },
+  working: { bg: 'leafbg', fg: 'leaf' },
   waiting: { bg: 'warnbg', fg: 'warn' },
   offline: { bg: 'errbg', fg: 'err' },
   error: { bg: 'errbg', fg: 'err' },
@@ -83,34 +85,51 @@ const CHIP_CLASS: Record<ChipKind, { bg: string; fg: string }> = {
 
 // ---- header ----
 
+/** With the handle line and the chip, or only the title (the quiet view and the disconnect question say the rest in Text). */
 export const HEADER_HEIGHT = 90
+export const HEADER_HEIGHT_SHORT = 56
 
 /** The pane is one Claude session's view of the workspace: its title says so, its subline says which session and where. */
 export const PANE_TITLE = "Claude's view of Orchard"
-export const sublineOf = (participantId: string, workspaceName: string) => `this session · as ${participantId} · ${workspaceName || 'workspace'}`
+export const sublineOf = (participantId: string) => `as ${participantId}`
 
-export function headerSvg(w: number, args: { workspaceName: string; participantId: string; chip: Chip }): string {
-  const { bg, fg } = CHIP_CLASS[args.chip.kind]
-  const label = esc(args.chip.label)
-  const chipW = Math.ceil(args.chip.label.length * 6.4 + 36)
-  const chipX = Math.max(18, w - 18 - chipW)
+export type HeaderArgs = {
+  workspaceName: string
+  participantId: string
+  /** Absent: the short header, title only. */
+  chip?: Chip
+  /** `confirm`: the sleepy red mascot and "DISCONNECT?" (the Box around it is red too). */
+  mood?: 'normal' | 'confirm'
+}
+
+export const headerHeight = (args: Pick<HeaderArgs, 'chip'>) => (args.chip === undefined ? HEADER_HEIGHT_SHORT : HEADER_HEIGHT)
+
+export function headerSvg(w: number, args: HeaderArgs): string {
+  const isConfirm = args.mood === 'confirm'
+  const height = headerHeight(args)
   const nameMax = Math.max(8, Math.floor((w - 56 - 18) / 8.6))
   const idMax = Math.max(6, Math.floor((w - 56 - 18) / 6.2))
-  const pulse = args.chip.kind === 'listening' ? '<animate attributeName="opacity" values="1;.35;1" dur="2.4s" repeatCount="indefinite"/>' : ''
-  const body =
-    `<rect width="${w}" height="${HEADER_HEIGHT}" class="bg"/>` +
-    `<text x="${w - 140}" y="30" class="mono grain" font-size="9">· . ✿ . · ˚ . ·</text>` +
-    `<text x="${w - 110}" y="46" class="mono grain" font-size="9">˚ · . ✿ ·</text>` +
-    `<g transform="translate(18,20)"><circle cx="14" cy="14" r="13" class="badge"/>` +
-    `<ellipse cx="18" cy="5" rx="5" ry="3" fill="#81e78a" transform="rotate(-30 18 5)"/>` +
-    `<text x="9" y="19" class="mono onbadge" font-size="12" font-weight="700">◕‿◕</text>` +
-    `<text x="38" y="11" class="mono accent" font-size="10" letter-spacing="1.5">ORCHARD //</text>` +
-    `<text x="38" y="27" class="text" font-size="15" font-weight="700">${esc(cut(PANE_TITLE, nameMax))}</text></g>` +
-    `<text x="56" y="82" class="mono dim" font-size="10">${esc(cut(sublineOf(args.participantId, args.workspaceName), idMax))}</text>` +
-    `<g transform="translate(${chipX},52)"><rect width="${chipW}" height="22" rx="11" class="${bg}"/>` +
-    `<circle cx="14" cy="11" r="4" class="${fg}">${pulse}</circle>` +
-    `<text x="25" y="15" class="mono ${fg}" font-size="10.5">${label}</text></g>`
-  return svg(w, HEADER_HEIGHT, body)
+  const mascot = isConfirm
+    ? `<circle cx="14" cy="14" r="13" class="red"/><text x="7" y="19" class="mono onred" font-size="12" font-weight="700">ᴗ﹏ᴗ</text>`
+    : `<circle cx="14" cy="14" r="13" class="badge"/><ellipse cx="18" cy="5" rx="5" ry="3" fill="#81e78a" transform="rotate(-30 18 5)"/>` +
+      `<text x="9" y="19" class="mono onbadge" font-size="12" font-weight="700">◕‿◕</text>`
+  const label = isConfirm ? 'ORCHARD // DISCONNECT?' : "ORCHARD // CLAUDE'S VIEW"
+  let body =
+    `<g transform="translate(18,${isConfirm ? 12 : 20})">${mascot}` +
+    `<text x="38" y="11" class="mono ${isConfirm ? 'red' : 'accent'}" font-size="10" letter-spacing="1.5">${esc(label)}</text>` +
+    `<text x="38" y="27" class="text" font-size="15" font-weight="700">${esc(cut(args.workspaceName || 'Orchard', nameMax))}</text></g>`
+  if (args.chip !== undefined) {
+    const { bg, fg } = CHIP_CLASS[args.chip.kind]
+    const chipW = Math.ceil(args.chip.label.length * 6.4 + 36)
+    const chipX = Math.max(18, w - 18 - chipW)
+    const pulse = args.chip.kind === 'listening' || args.chip.kind === 'working' ? '<animate attributeName="opacity" values="1;.35;1" dur="2.4s" repeatCount="indefinite"/>' : ''
+    body +=
+      `<text x="56" y="82" class="mono dim" font-size="10">${esc(cut(sublineOf(args.participantId), idMax))}</text>` +
+      `<g transform="translate(${chipX},52)"><rect width="${chipW}" height="22" rx="11" class="${bg}"/>` +
+      `<circle cx="14" cy="11" r="4" class="${fg}">${pulse}</circle>` +
+      `<text x="25" y="15" class="mono ${fg}" font-size="10.5">${esc(args.chip.label)}</text></g>`
+  }
+  return svg(w, height, body)
 }
 
 // ---- section labels ----

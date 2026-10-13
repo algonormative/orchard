@@ -1,22 +1,21 @@
 // The /orchard pane as a pure function of its data: a read-only view of what this Claude session
-// and its subagents are doing in Orchard. register.tsx resolves the element table (`$.ui.resolve`)
-// and builds the handlers (they are the `$` calls), so nothing here touches `$`. The header, the
-// section labels and the footer are Svg strings from svg.ts on the surfaces that draw an Svg; the
-// terminal has none and gets the same structure as Text. Its only controls are Open in Orchard and
-// Disconnect / Connect, both plain Buttons.
-import type { Elements } from 'claude-code'
+// and its subagents are doing in Orchard. It is quiet when nothing is going on (one sentence and two
+// buttons) and grows with activity: each section appears only when it has something to say.
+// register.tsx resolves the element table (`$.ui.resolve`) and builds the handlers (they are the `$`
+// calls), so nothing here touches `$`. The header, the section labels and the footer are Svg strings
+// from svg.ts on the surfaces that draw an Svg; the terminal has none and gets the same structure as
+// Text. The controls are big actions only (Open in Orchard, Disconnect / Connect, and the activity
+// toggle) and, on an item, open-in-Orchard and copy-link; steering stays in the prompt box.
+import type { Elements, UiPressArgument } from 'claude-code'
 
-import type { OrchardActivityEntry, OrchardAgents, OrchardCounts, OrchardPlugins, OrchardStatus } from '../types'
-import { MAIN } from './feed'
-import { FOOTER_HEIGHT, PANE_TITLE, chipOf, footerSvg, footerText, headerSvg, sectionSvg, sublineOf, widthOf } from './svg'
+import type { OrchardActivityEntry, OrchardAgent, OrchardAgents, OrchardCounts, OrchardNow, OrchardPlugins, OrchardStatus, OrchardView } from '../types'
+import { MAIN, RECENT_MS, agentColor, agentState, isEnded, shortHandle } from './feed'
+import { FOOTER_HEIGHT, PANE_TITLE, chipOf, footerSvg, footerText, headerHeight, headerSvg, sectionSvg, sublineOf, widthOf } from './svg'
 
 export type Table = Pick<Elements['mobile'], 'Box' | 'Text' | 'Button'> & {
   /** Absent on the terminal; the caller also leaves it out where a surface should not draw one. */
   Svg?: Elements['desktop']['Svg']
 }
-
-/** An alert waiting for a wake or the next prompt, as the "now" section lists it. */
-export type PendingLine = { sender: string; snippet: string }
 
 export type PaneView = {
   /** Shown in the header and nowhere else. */
@@ -26,13 +25,20 @@ export type PaneView = {
   workspaceHref: string | null
   status: OrchardStatus | null
   counts: OrchardCounts | null
-  pending: readonly PendingLine[]
+  /** The messages the main loop is handling this turn. */
+  now: OrchardNow | null
+  /** Alerts waiting for a wake or the next prompt. */
+  queued: number
   plugins: OrchardPlugins
   agents: OrchardAgents
   activity: readonly OrchardActivityEntry[]
+  /** What the person toggled (this session only). */
+  view: OrchardView
+  /** Where a participant's page opens in Orchard; null where it has none. */
+  agentHref: (handle: string) => string | null
   /** Clock time the alert loop last heard back; the footer shows its age. */
   lastPollAt?: number | null
-  /** The clock, for relative times and the footer. */
+  /** The clock, for relative times, the fade and the footer. */
   nowMs: number
   /** Cells across the pane body, for sizing the drawings. */
   columns?: number
@@ -43,15 +49,24 @@ export type PaneView = {
 export type PaneHandlers = {
   /** Opens an address of the browser UI in the person's browser. */
   open: (href: string) => void
-  /** Disconnect this session from Orchard, or connect it again. */
+  /** Copies an address to the clipboard of the surface the press came from. */
+  copy: (href: string, surface: UiPressArgument['surface']) => void
+  /** Disconnect was pressed: ask first. */
   disconnect: () => void
+  /** The question was answered yes / no. */
+  confirmDisconnect: () => void
+  cancelDisconnect: () => void
   connect: () => void
+  /** The activity list shows this agent's entries only (false) or the subagents' too (true). */
+  showSubagents: (isShown: boolean) => void
 }
 
 /** How many activity lines the pane lists. */
 export const ACTIVITY_SHOWN = 15
 
-const CHIP_TOKEN = { listening: 'success', waiting: 'warning', offline: 'error', error: 'error', shared: undefined, connecting: undefined, disconnected: undefined, 'signed-off': undefined } as const
+/** Theme keys the Text rows paint with; they follow the person's light/dark theme. */
+const CHIP_TOKEN = { listening: 'success', working: 'success', waiting: 'warning', offline: 'error', error: 'error', shared: undefined, connecting: undefined, disconnected: undefined, 'signed-off': undefined } as const
+const TONE = { ok: 'success', warn: 'warning', dim: undefined } as const
 
 /** "now", "3m", "2h": how long before `nowMs` an entry happened. */
 export function ago(at: number, nowMs: number): string {
@@ -61,133 +76,264 @@ export function ago(at: number, nowMs: number): string {
   return `${Math.floor(s / 3600)}h`
 }
 
+const humane = (word: string) => word.replace(/_/g, ' ')
+
+/** What the person has had in view lately: entries newer than the fade. */
+export function recentActivity(activity: readonly OrchardActivityEntry[], nowMs: number): OrchardActivityEntry[] {
+  return activity.filter(entry => nowMs - entry.at <= RECENT_MS)
+}
+
+/** The agents of the AGENTS section: main first, then the subagents in the order they started. Empty without a subagent. */
+export function agentRows(agents: OrchardAgents): OrchardAgent[] {
+  const subs = Object.values(agents)
+    .filter(a => a.agentId !== MAIN)
+    .sort((a, b) => a.startedAt - b.startedAt)
+  const main = agents[MAIN]
+  return subs.length === 0 ? [] : main === undefined ? subs : [main, ...subs]
+}
+
+/** Nothing is going on: the pane shows its quiet view. */
+export function isQuiet(view: PaneView): boolean {
+  const { plugins } = view
+  const hasPlugins = plugins.roles.length > 0 || plugins.states.length > 0 || plugins.decisions.length > 0
+  return view.now === null && view.queued === 0 && plugins.tasks.length === 0 && !hasPlugins && agentRows(view.agents).length === 0 && recentActivity(view.activity, view.nowMs).length === 0
+}
+
 export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   const { Box, Text, Button, Svg } = ui
-  const { plugins, nowMs } = view
+  const { plugins, nowMs, participantId: me } = view
+  type Part = string | ReturnType<typeof Text>
   const w = widthOf(view.columns)
-  const chip = chipOf(view.status, view.counts)
-  const isSignedOff = view.status?.kind === 'signed-off'
-  const isDisconnected = view.status?.kind === 'disconnected' || isSignedOff
+  const kind = view.status?.kind
+  const isDisconnected = kind === 'disconnected' || kind === 'signed-off'
+  const isConnected = kind === 'connected'
+  const isConfirming = view.view.isConfirming && !isDisconnected
+  const rows = agentRows(view.agents)
+  const isBusy = view.now !== null || rows.some(a => a.agentId !== MAIN && !isEnded(a.status) && a.status !== 'idle')
+  const chip = chipOf(view.status, view.counts, isBusy)
+  const isQuietView = isConnected && isQuiet(view) && !isConfirming
 
   const picture = (key: string, source: string, alt: string, height: number, isInteractive = false, width = w) =>
     Svg === undefined ? null : <Svg key={key} source={source} alt={alt} width={width} height={height} isInteractive={isInteractive} />
 
   /** A section label: the drawn rule and caps on Svg surfaces, a Text line elsewhere. */
-  const section = (key: string, label: string) =>
+  const section = (key: string, label: string, width = w) =>
     Svg === undefined ? (
       <Box key={key}>
         <Text bold color="warning">{label}</Text>
       </Box>
     ) : (
-      picture(key, sectionSvg(w, label), label, 30)
+      picture(key, sectionSvg(width, label), label, 30, false, width)
     )
 
+  /**
+   * One item: a plain Button that opens `href` in Orchard with a small copy button beside it, or plain
+   * Text where it has no address. `parts` are strings and Text, which is all a Button holds.
+   */
+  const item = (key: string, href: string | null | undefined, raw: Part[], indent = 0) => {
+    const parts = raw.map(part => (typeof part === 'string' ? <Text>{part}</Text> : part))
+    return href === null || href === undefined ? (
+      <Box key={key} paddingLeft={indent}>
+        <Text>{parts}</Text>
+      </Box>
+    ) : (
+      <Box key={key} flexDirection="row" paddingLeft={indent} columnGap={1}>
+        <Button key={`${key}-open`} plain onPress={() => on.open(href)}>
+          {parts}
+        </Button>
+        <Button key={`${key}-copy`} plain dimColor label="⧉" onPress={press => on.copy(href, press.surface)} />
+      </Box>
+    )
+  }
+
+  const dim = (text: string) => <Text dimColor>{text}</Text>
+
+  // ---- the header, the one sentence and the two buttons ----
+
+  const name = view.workspaceName || 'the workspace'
+  const hasDetail = !isQuietView && !isConfirming
   const header =
     Svg === undefined ? (
       <Box key="header" flexDirection="column">
         <Box>
-          <Text bold>◆ {PANE_TITLE}</Text>
+          <Text bold color={isConfirming ? 'error' : undefined}>◆ {isConfirming ? 'ORCHARD // DISCONNECT?' : PANE_TITLE}</Text>
         </Box>
-        <Text dimColor>{sublineOf(view.participantId, view.workspaceName)}</Text>
-        <Text color={CHIP_TOKEN[chip.kind]} dimColor={CHIP_TOKEN[chip.kind] === undefined}>● {chip.label}</Text>
+        <Text bold>{view.workspaceName || 'Orchard'}</Text>
+        {hasDetail ? <Text dimColor>{sublineOf(me)}</Text> : null}
+        {hasDetail ? <Text color={CHIP_TOKEN[chip.kind]} dimColor={CHIP_TOKEN[chip.kind] === undefined}>● {chip.label}</Text> : null}
       </Box>
     ) : (
       picture(
         'header',
-        headerSvg(w, { workspaceName: view.workspaceName, participantId: view.participantId, chip }),
-        `${PANE_TITLE}, workspace ${view.workspaceName || ''}, ${chip.label}`.replace(/\s+,/, ','),
-        90,
+        headerSvg(w, { workspaceName: view.workspaceName, participantId: me, ...(hasDetail ? { chip } : {}), mood: isConfirming ? 'confirm' : 'normal' }),
+        `${isConfirming ? 'Disconnect?' : PANE_TITLE}, workspace ${view.workspaceName || ''}${hasDetail ? `, ${chip.label}` : ''}`.replace(/\s+,/, ','),
+        headerHeight(hasDetail ? { chip } : {}),
         true,
       )
     )
 
-  const subagents = Object.values(view.agents)
-    .filter(a => a.agentId !== MAIN)
-    .sort((a, b) => a.startedAt - b.startedAt)
-  const main = view.agents[MAIN]
-  const recent = view.activity.slice(-ACTIVITY_SHOWN).reverse()
-  const tasks = plugins.tasks
-  const waiting = plugins.decisions
-  const hasPlugins = plugins.roles.length > 0 || plugins.states.length > 0
-  const hasContent = view.pending.length + waiting.length + tasks.length + subagents.length + recent.length > 0 || hasPlugins
+  const statement: string[] = isConfirming
+    ? [`Stop Claude listening to ${name}?`, `this session only · ${me} stays signed on`, '/orchard connect brings it back']
+    : kind === 'disconnected'
+      ? [`Claude is disconnected from ${name}`, 'Not listening, and nothing wakes this session. Connect to listen again.']
+      : kind === 'signed-off'
+        ? [`Claude has signed off from ${name}`, 'Its participant left Orchard, so nothing wakes this session. Connect signs it on again.']
+        : kind === 'offline'
+          ? [`Claude cannot reach ${name}`, 'Retrying. Nothing is lost while it is away.']
+          : view.status?.kind === 'error'
+            ? ['Claude could not connect to Orchard', view.status.message]
+            : kind === 'shared'
+              ? [`Another session is listening as ${me}`, 'This one does not listen, so nothing wakes it.']
+              : kind === 'connecting' || view.status === null
+                ? [`Connecting to ${name}…`]
+                : isQuietView
+                  ? [`Claude is connected to ${name}`, `as ${me} · nothing in flight · steer from the prompt box`]
+                  : []
+
+  const buttons = (
+    <Box key="header-actions" flexDirection="row" flexWrap="wrap" columnGap={1}>
+      {isConfirming ? (
+        <Button key="confirm-disconnect" variant="primary" label="Yes, disconnect" onPress={on.confirmDisconnect}>
+          <Text bold color="error">Yes, disconnect</Text>
+        </Button>
+      ) : view.workspaceHref === null ? null : (
+        <Button key="open-workspace" label="Open in Orchard ↗" onPress={() => on.open(view.workspaceHref as string)} />
+      )}
+      {isConfirming ? (
+        <Button key="cancel-disconnect" label="Cancel" onPress={on.cancelDisconnect} />
+      ) : isDisconnected ? (
+        <Button key="connect" label="Connect" onPress={on.connect} />
+      ) : (
+        <Button key="disconnect" label="Disconnect" onPress={on.disconnect}>
+          <Text color="error">Disconnect</Text>
+        </Button>
+      )}
+    </Box>
+  )
+
+  const top = (
+    <Box key="top" flexDirection="column" backgroundColor={isConfirming ? 'diffRemovedDimmed' : undefined} paddingX={isConfirming ? 1 : undefined}>
+      {header}
+      {statement.length === 0 ? null : (
+        <Box key="statement" flexDirection="column" alignItems={isConfirming || isQuietView ? 'center' : undefined}>
+          {statement.map((line, i) => (
+            <Text key={`statement-${i}`} bold={i === 0} dimColor={i > 0}>
+              {line}
+            </Text>
+          ))}
+        </Box>
+      )}
+      {buttons}
+    </Box>
+  )
+
+  // ---- NOW ----
+
+  const now = view.now
+  const nowSection =
+    now === null && view.queued === 0
+      ? null
+      : [
+          section('section-now', 'NOW'),
+          ...(now?.items ?? []).map((m, i) =>
+            item(`now-${i}`, m.href, [<Text bold>{m.sender}</Text>, <Text dimColor>{` ${m.how}${i === 0 ? ' · handling now' : ''}`}</Text>, m.snippet === '' ? '' : ` “${m.snippet}”`]),
+          ),
+          ...(now !== null && now.total > now.items.length ? [<Text key="now-more" dimColor>{`+ ${now.total - now.items.length} more in this batch`}</Text>] : []),
+          view.queued === 0 ? null : (
+            <Text key="now-queued" color="warning">
+              {`${view.queued} ${now === null ? '' : 'more '}queued · ${view.counts?.isHeld === true ? 'sends when the prompt box is empty' : 'waiting to be sent'}`}
+            </Text>
+          ),
+        ]
+
+  // ---- TASKS ----
+
+  const tasksSection =
+    plugins.tasks.length === 0
+      ? null
+      : [section('section-tasks', 'TASKS'), ...plugins.tasks.map(task => item(`task-${task.id}`, task.href, [<Text color="success">◐ </Text>, task.title, <Text dimColor>{` ${humane(task.status)}`}</Text>]))]
+
+  // ---- AGENTS ----
+
+  const agentLine = (agent: OrchardAgent) => {
+    const state = agentState(agent)
+    const href = agent.handle !== undefined && agent.sharesBase !== true ? view.agentHref(agent.handle) : null
+    const isMain = agent.agentId === MAIN
+    const where = agent.sharesBase === true ? `shares ${me}` : agent.handle === undefined ? 'not on Orchard' : agent.handle
+    const parts: Part[] = [
+      <Text color={isMain ? 'suggestion' : agentColor(agent.agentId)}>● </Text>,
+      <Text bold={isMain}>{isMain ? 'main' : agent.description === '' ? agent.type : agent.description}</Text>,
+      dim(` ${where} `),
+      <Text color={TONE[state.tone]} dimColor={state.tone === 'dim'}>{state.text}</Text>,
+    ]
+    return (
+      <Box key={`agent-${agent.agentId}`} flexDirection="column" paddingLeft={isMain ? 0 : 2}>
+        {item(`agent-row-${agent.agentId}`, href, parts)}
+        {agent.lastAction === undefined || isEnded(agent.status) ? null : (
+          <Box key={`agent-last-${agent.agentId}`} paddingLeft={2}>
+            <Text dimColor>{agent.lastAction}</Text>
+          </Box>
+        )}
+      </Box>
+    )
+  }
+  const agentsSection = rows.length === 0 ? null : [section('section-agents', 'AGENTS'), ...rows.map(agentLine)]
+
+  // ---- PLUGINS ----
+
+  const hasPlugins = plugins.roles.length > 0 || plugins.states.length > 0 || plugins.decisions.length > 0
+  const pluginsSection = !hasPlugins
+    ? null
+    : [
+        section('section-plugins', 'PLUGINS'),
+        ...plugins.roles.map(role => (
+          <Text key={`role-${role.participantId}`}>
+            <Text dimColor>ROLES </Text>
+            {role.roles.join(', ')}
+            <Text dimColor>{` ${shortHandle(role.participantId, me)}`}</Text>
+          </Text>
+        )),
+        ...plugins.states.map(marker => item(`state-${marker.id}`, marker.href, [<Text dimColor>STATE </Text>, marker.title, <Text dimColor>{` ${marker.state}`}</Text>])),
+        ...plugins.decisions.map(decision => item(`decision-${decision.id}`, decision.href, [<Text dimColor>ASKED </Text>, <Text color="warning">{`◆ ${decision.snippet}`}</Text>])),
+      ]
+
+  // ---- ACTIVITY ----
+
+  const recent = recentActivity(view.activity, nowMs)
+  const hasSubActivity = recent.some(entry => entry.agentId !== MAIN)
+  const isAll = view.view.showSubagents && hasSubActivity
+  const listed = (isAll ? recent : recent.filter(entry => entry.agentId === MAIN)).slice(-ACTIVITY_SHOWN).reverse()
+  const labelOf = (entry: OrchardActivityEntry) => (entry.agentId === MAIN ? 'main' : view.agents[entry.agentId]?.description || shortHandle(entry.handle, me))
+  const activitySection =
+    recent.length === 0
+      ? null
+      : [
+          <Box key="activity-head" flexDirection="row" columnGap={1} alignItems="center">
+            {section('section-activity', 'ACTIVITY', hasSubActivity ? 120 : w)}
+            {hasSubActivity ? <Button key="scope-this" variant={isAll ? 'secondary' : 'primary'} label="this agent" onPress={() => on.showSubagents(false)} /> : null}
+            {hasSubActivity ? <Button key="scope-all" variant={isAll ? 'primary' : 'secondary'} label="+ subagents" onPress={() => on.showSubagents(true)} /> : null}
+          </Box>,
+          ...(listed.length === 0 ? [<Text key="activity-none" dimColor>Nothing from this agent lately.</Text>] : []),
+          ...listed.map((entry, i) => {
+            const isOut = entry.direction === 'out'
+            return item(`activity-${i}`, entry.href, [
+              ...(isAll ? [<Text color={entry.agentId === MAIN ? 'suggestion' : agentColor(entry.agentId)}>● </Text>, dim(`${labelOf(entry)} `)] : []),
+              <Text color={isOut ? 'suggestion' : undefined} dimColor={!isOut}>{isOut ? '→ ' : '← '}</Text>,
+              <Text dimColor={!isOut}>{entry.text}</Text>,
+              dim(` ${ago(entry.at, nowMs)}`),
+            ])
+          }),
+        ]
 
   return (
     <Box flexDirection="column">
-      {header}
-      <Box key="header-actions" flexDirection="row" flexWrap="wrap" columnGap={1}>
-        {view.workspaceHref === null ? null : <Button key="open-workspace" label="Open in Orchard ↗" onPress={() => on.open(view.workspaceHref as string)} />}
-        {isDisconnected ? (
-          <Button key="connect" label="Connect" onPress={on.connect} />
-        ) : (
-          <Button key="disconnect" label="Disconnect" onPress={on.disconnect} />
-        )}
-      </Box>
-      {isSignedOff ? <Text dimColor>Signed off: this session left Orchard, so it is not listening and nothing wakes it. Connect to sign it on again.</Text> : null}
-      {isDisconnected && !isSignedOff ? <Text dimColor>Disconnected: not listening, and nothing wakes this session. Connect to listen again.</Text> : null}
-
-      {view.pending.length === 0 ? null : section('section-now', 'NOW')}
-      {view.pending.map((line, i) => (
-        <Text key={`now-${i}`}>
-          {line.sender}: {line.snippet}
-        </Text>
-      ))}
-      {view.pending.length > 0 && view.counts?.isHeld === true ? <Text dimColor>sends when the prompt box is empty</Text> : null}
-
-      {waiting.length === 0 ? null : section('section-waiting', 'WAITING ON YOU')}
-      {waiting.map(decision => (
-        <Text key={`decision-${decision.id}`} color="warning">
-          ◆ {decision.snippet}
-        </Text>
-      ))}
-
-      {tasks.length === 0 ? null : section('section-tasks', 'TASKS')}
-      {tasks.map(task => (
-        <Text key={`task-${task.id}`}>
-          {task.title} <Text dimColor>{task.status}</Text>
-        </Text>
-      ))}
-
-      {subagents.length === 0 ? null : section('section-agents', 'AGENTS')}
-      {main !== undefined && subagents.length > 0 ? (
-        <Text key="agent-main">
-          main{' '}
-          <Text dimColor>
-            {main.status}
-            {main.lastAction === undefined ? '' : ` · ${main.lastAction}`}
-          </Text>
-        </Text>
-      ) : null}
-      {subagents.map(agent => (
-        <Text key={`agent-${agent.agentId}`}>
-          {agent.description === '' ? agent.type : agent.description}{' '}
-          <Text dimColor>
-            {agent.status} · {agent.handle ?? 'not connected'}
-            {agent.lastAction === undefined ? '' : ` · ${agent.lastAction}`}
-          </Text>
-        </Text>
-      ))}
-
-      {hasPlugins ? section('section-plugins', 'PLUGINS') : null}
-      {plugins.roles.map(role => (
-        <Text key={`role-${role.participantId}`}>
-          roles <Text dimColor>{role.roles.join(', ')}</Text>
-        </Text>
-      ))}
-      {plugins.states.map(marker => (
-        <Text key={`state-${marker.id}`}>
-          {marker.title} <Text dimColor>{marker.state}</Text>
-        </Text>
-      ))}
-
-      {recent.length === 0 ? null : section('section-activity', 'ACTIVITY')}
-      {recent.map((entry, i) => (
-        <Text key={`activity-${i}`} dimColor={entry.direction === 'in'}>
-          {entry.direction === 'in' ? '←' : '→'} {entry.text} <Text dimColor>{ago(entry.at, nowMs)}</Text>
-        </Text>
-      ))}
-
-      {!hasContent && !isDisconnected ? <Text dimColor>Claude is connected to {view.workspaceName || 'the workspace'}. Nothing is going on yet.</Text> : null}
-      {Svg === undefined ? (
+      {top}
+      {nowSection}
+      {tasksSection}
+      {agentsSection}
+      {pluginsSection}
+      {activitySection}
+      {isQuietView ? null : Svg === undefined ? (
         <Text dimColor>{footerText(view.lastPollAt, nowMs)}</Text>
       ) : (
         picture('footer', footerSvg(w, footerText(view.lastPollAt, nowMs)), 'Tending the grove', FOOTER_HEIGHT)

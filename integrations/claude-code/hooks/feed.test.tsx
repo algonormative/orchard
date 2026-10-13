@@ -302,14 +302,25 @@ test('the pane lists the agents with what each last did, and the activity feed, 
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'orchard', surface, component: 'Pane', requestId: 'orchard', props: { title: 'Orchard', isFocused: false } as never })
-    const all = [...(await ui.findAll({ type: 'Text' })).map(t => String(t.text)), ...(await ui.findAll({ type: 'Svg' })).map(v => String(v.props.alt))].join('\n')
+    const drawn = async () => [...(await ui.findAll({ type: 'Text' })).map(t => String(t.text)), ...(await ui.findAll({ type: 'Svg' })).map(v => String(v.props.alt))].join('\n')
+    const rows = async () => (await ui.findAll({ type: 'Button' })).map(b => String(b.key)).filter(k => /^activity-\d+-open$/.test(k))
+    const all = await drawn()
     expect(all, surface).toContain('AGENTS')
     expect(all, surface).toContain('Write the notes')
     // the subagent used the mod's tools, which act as the session's participant (the pane draws what the agents table holds)
-    expect(all, surface).toContain(`running · ${ME} · Sent to Nick: notes are up`)
+    expect(all, surface).toContain(`shares ${ME}`)
+    expect(all, surface).toContain('● running')
+    expect(all, surface).toContain('Sent to Nick: notes are up') // its last action, under its row
     expect(all, surface).toContain('ACTIVITY')
-    expect(all.indexOf('← Other Claude (DM): Thanks, one more thing'), surface).toBeGreaterThan(-1)
-    expect(all.indexOf('← Other Claude (DM)'), surface).toBeLessThan(all.indexOf('→ Sent to Nick: notes are up'))
+    // "this agent" lists the main loop's entries only; "+ subagents" adds the subagent's, newest first
+    expect(all, surface).toContain('Other Claude (DM): Thanks, one more thing')
+    expect(await rows(), surface).toEqual(['activity-0-open'])
+    await ui.press({ key: 'scope-all' })
+    expect(await rows(), surface).toEqual(['activity-0-open', 'activity-1-open'])
+    const both = await drawn()
+    expect(both.indexOf('Other Claude (DM)'), surface).toBeLessThan(both.lastIndexOf('Sent to Nick: notes are up'))
+    await ui.press({ key: 'scope-this' })
+    expect(await rows(), surface).toEqual(['activity-0-open'])
     await ui.unmount()
   }
 })
@@ -496,9 +507,9 @@ test('disconnecting lets go of a held wake: the status line is unpinned and noth
   w.box.text = 'a draft I am typing'
   w.fake.push(direct('d1'), { reasons: ['direct'] })
   await w.clock.advance(11_000)
-  expect(w.sinks.events.filter(e => e.name === 'ui.status').at(-1)?.text).toContain('Orchard: 1 waiting for you')
+  expect(w.sinks.events.filter(e => e.name === 'ui.status').at(-1)?.text).toContain('orchard · 1 waiting for you')
   await $.command.run(RUN('disconnect'))
-  expect(w.sinks.events.filter(e => e.name === 'ui.status').at(-1)?.text).toBeUndefined() // the status line is unpinned
+  expect(w.sinks.events.filter(e => e.name === 'ui.status').at(-1)?.text).toBe('orchard · disconnected') // the held notice is gone, the line says why
   const notified = w.sinks.events.filter(e => e.name === 'ui.notify').length
   w.box.text = ''
   await w.clock.advance(5 * 60_000)
@@ -546,7 +557,7 @@ test('the main agent signing off with mail_leave stops the session as a Disconne
 
   // the session is out of the workspace, with a status of its own; Orchard has it signed off
   expect(w.state.latest.status).toEqual({ kind: 'signed-off' })
-  expect(await bandText($)).toBe('◆ claude-fruit-stand in Fruit Stand · signed off')
+  expect(await bandText($)).toBe('◇ Claude is signed off from Fruit Stand · /orchard connect')
   expect(w.store.data.has(lease)).toBe(false)
   expect(table(w).main).toMatchObject({ handle: ME, signedOn: false })
 

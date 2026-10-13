@@ -2,7 +2,7 @@
 // sentences, the table of agents (main and subagents) and how it follows `$.agent.list()`, the
 // workspace-wide counts, and what the optional plugins (tasks, roles, state) hold for this
 // session's handles. No `$` here; register.tsx makes every call and every write.
-import type { OrchardActivityEntry, OrchardAgent, OrchardAgentStatus, OrchardAgents, OrchardAlert, OrchardPlugins } from '../types'
+import type { OrchardActivityEntry, OrchardAgent, OrchardAgentStatus, OrchardAgents, OrchardAlert, OrchardNow, OrchardPlugins } from '../types'
 import { plain } from './config'
 import type { SignOn, Shown } from './handles'
 import { MUTATING_CALLS, PINNED_PLUGIN_WRITE } from './tools'
@@ -34,10 +34,9 @@ export function pushActivity(list: readonly OrchardActivityEntry[], entry: Orcha
   return [...list, entry].slice(-keep)
 }
 
-/** What `absorb` tells the feed about an alert, in words a person reads: who, how it reached this session, what it said. */
-export function inboundText(alert: Pick<OrchardAlert, 'senderName' | 'senderId' | 'reasons' | 'where' | 'body' | 'kind'>): string {
-  const who = line(alert.senderName ?? alert.senderId, 40)
-  const how = alert.reasons.includes('mention')
+/** How an alert reached this session, in a word: `mention`, `DM`, `reply`, `broadcast`, `#channel`. */
+export function howOf(alert: Pick<OrchardAlert, 'reasons' | 'where'>): string {
+  return alert.reasons.includes('mention')
     ? 'mention'
     : alert.reasons.includes('direct')
       ? 'DM'
@@ -48,9 +47,45 @@ export function inboundText(alert: Pick<OrchardAlert, 'senderName' | 'senderId' 
           : alert.where.startsWith('channel ')
             ? `#${alert.where.slice('channel '.length)}`
             : alert.where
+}
+
+/** What `absorb` tells the feed about an alert, in words a person reads: who, how it reached this session, what it said. */
+export function inboundText(alert: Pick<OrchardAlert, 'senderName' | 'senderId' | 'reasons' | 'where' | 'body' | 'kind'>): string {
+  const who = line(alert.senderName ?? alert.senderId, 40)
   const first = alert.body.split('\n').find(l => l.trim() !== '') ?? ''
   const snippet = line(first, 80)
-  return `${who} (${how})${snippet === '' ? '' : `: ${snippet}`}`
+  return `${who} (${howOf(alert)})${snippet === '' ? '' : `: ${snippet}`}`
+}
+
+/** How many messages the "now" section lists by name. */
+export const NOW_SHOWN = 3
+
+/** The messages of a delivered batch as the main loop's current work; `hrefOf` says where one opens. */
+export function nowOf(batch: readonly OrchardAlert[], at: number, hrefOf: (alert: OrchardAlert) => string | null): OrchardNow {
+  return {
+    at,
+    total: batch.length,
+    items: batch.slice(0, NOW_SHOWN).map(alert => {
+      const href = hrefOf(alert)
+      return {
+        sender: line(alert.senderName ?? alert.senderId, 40),
+        how: howOf(alert),
+        snippet: line(alert.body.split('\n').find(l => l.trim() !== '') ?? '', 80),
+        ...(href === null ? {} : { href }),
+      }
+    }),
+  }
+}
+
+/** "handling DM from Ada", or "handling 3 messages". */
+export function handlingText(now: OrchardNow): string {
+  const first = now.items[0]
+  return now.total === 1 && first !== undefined ? `handling ${first.how} from ${first.sender}` : `handling ${now.total} messages`
+}
+
+/** The part of a handle after `<base>.`, when it has that form (`garden` for `claude-vault.garden`), else the whole handle. */
+export function shortHandle(handle: string, base: string): string {
+  return base !== '' && handle.startsWith(`${base}.`) && handle.length > base.length + 1 ? handle.slice(base.length + 1) : handle
 }
 
 /** Whose names the sentences use: a name where the directory has one, the id where it does not. */
@@ -383,3 +418,45 @@ export function stateMarkers(
 }
 
 export const EMPTY_PLUGINS: OrchardPlugins = { attached: [], roles: [], states: [], decisions: [], tasks: [] }
+
+// ---- how the pane and the band word the agents ----
+
+/** Entries older than this are not shown: the pane returns to its quiet view. */
+export const RECENT_MS = 15 * 60_000
+
+/** One dot colour per agent, stable for an agent id (raw colours picked to read on a light and a dark theme). */
+const AGENT_COLORS = ['#4aa3df', '#9b7bea', '#f0a15a', '#35b58a', '#e1668f', '#d4ad1f'] as const
+export function agentColor(agentId: string): string {
+  let h = 0
+  for (const ch of agentId) h = (h * 31 + ch.charCodeAt(0)) >>> 0
+  return AGENT_COLORS[h % AGENT_COLORS.length] as string
+}
+
+export type AgentLine = { text: string; tone: 'ok' | 'warn' | 'dim' }
+
+/**
+ * What the agents row says of an agent's state. A subagent that signed itself on to Orchard and ended
+ * without signing off is the one to look at (`warn`); one that shares the session's participant has no
+ * sign-on of its own to forget.
+ */
+export function agentState(agent: OrchardAgent): AgentLine {
+  if (isEnded(agent.status)) {
+    const own = agent.handle !== undefined && agent.sharesBase !== true && agent.agentId !== MAIN
+    if (own && agent.signedOn === true) return { text: '⚠ done · still signed on', tone: 'warn' }
+    if (own && agent.signedOn === false) return { text: '✓ done · signed off', tone: 'dim' }
+    return { text: '✓ done', tone: 'dim' }
+  }
+  if (agent.status === 'idle') return agent.agentId === MAIN && agent.signedOn === true ? { text: '● signed on', tone: 'ok' } : { text: '● idle', tone: 'dim' }
+  if (agent.status === 'waiting') return { text: '● waiting', tone: 'ok' }
+  return { text: '● running', tone: 'ok' }
+}
+
+/** How many subagents the table holds, how many are running, and how many ended while still signed on to Orchard. */
+export function subagentCounts(held: OrchardAgents): { total: number; running: number; stillOn: number } {
+  const subs = Object.values(held).filter(a => a.agentId !== MAIN)
+  return {
+    total: subs.length,
+    running: subs.filter(a => isMoving(a.status)).length,
+    stillOn: subs.filter(a => agentState(a).text === '⚠ done · still signed on').length,
+  }
+}
