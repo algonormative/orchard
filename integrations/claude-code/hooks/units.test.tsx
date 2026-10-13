@@ -8,7 +8,7 @@ import { planEviction } from './lease'
 import { statusLine } from './statusline'
 import type { BandInput } from './band'
 import type { OrchardAgent } from '../types'
-import { checkConn, defaultName, defaultParticipantId, parseProjectFile, readOptions, resolveIdentity, sessionSid } from './config'
+import { checkConn, connectedKey, defaultName, defaultParticipantId, parseProjectFile, readOptions, resolveIdentity, sessionSid } from './config'
 import { BACKOFF_MAX_MS, backoffDelay, parseWorkspace } from './connect'
 import { CLI_TIMEOUT_MS, DEFAULT_BIN, runOrchard, sanitizeMessage } from './orchard-cli'
 import type { Conn, Run } from './orchard-cli'
@@ -64,7 +64,7 @@ test('the backoff doubles from 5 s to a 5 min cap', () => {
 
 test('options: blanks are unset, the binary defaults to the app', () => {
   const none = readOptions({})
-  expect(none).toEqual({ bin: DEFAULT_BIN, endpoint: '', credentialFile: '', participantId: '', name: '' })
+  expect(none).toEqual({ bin: DEFAULT_BIN, endpoint: '', credentialFile: '', participantId: '', name: '', autoConnect: false })
   expect(readOptions({ endpoint: '  http://127.0.0.1:1/workspaces/a/mcp ', orchardBin: '  ' }).endpoint).toBe('http://127.0.0.1:1/workspaces/a/mcp')
   expect(readOptions({ orchardBin: '  ' }).bin).toBe(DEFAULT_BIN)
 })
@@ -295,4 +295,12 @@ test('the words of the pane: short handles, an agent\'s state, how a message rea
   expect(now.items).toHaveLength(3)
   expect(handlingText(now)).toBe('handling 4 messages')
   expect(handlingText(nowOf([alert], 5, () => null))).toBe('handling mention from Ada')
+})
+
+test('autoConnect is on only for true; the key remembering a connected session names the endpoint and the session', () => {
+  expect(readOptions({ autoConnect: true }).autoConnect).toBe(true)
+  expect(readOptions({ autoConnect: 'true' }).autoConnect).toBe(true)
+  expect(readOptions({ autoConnect: false }).autoConnect).toBe(false)
+  expect(readOptions({ autoConnect: 'yes' }).autoConnect).toBe(false)
+  expect(connectedKey('http://e/mcp', 'abc123')).toBe('connected http://e/mcp abc123')
 })

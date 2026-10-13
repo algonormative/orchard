@@ -1,7 +1,7 @@
 {
   "name": "orchard",
   "version": "0.6.2",
-  "description": "Connects a session to an Orchard workspace through the packaged Orchard agent CLI: every session signs on as its own handle (<participantId>.<session id>), resumes or joins on start, signs off when the session ends, listens for alerts and wakes an idle session on the messages that matter (notification levels, batching, a minimum gap), carries the rest with the next prompt, acknowledges only after delivery, and offers the model orchard_send, orchard_reply, orchard_ack, orchard_history and orchard_call. Shows a read-only picture of what the session and its subagents are doing in Orchard: a one-line band that stacks with other bands, a status line for the workspace around it, and an /orchard pane that opens itself and grows with activity (the message being handled, claimed tasks, subagents and whether they are signed on, roles, state markers, open decisions, recent activity) with only Open in Orchard, Disconnect / Connect and copy-link as controls. Goes offline and retries when the workspace is unreachable. Workspace content reaches the model framed as data, and the credential never enters model context",
+  "description": "Connects a session to an Orchard workspace through the packaged Orchard agent CLI, once the session is connected (/orchard connect, the orchard_connect tool, a session that connected before, or the autoConnect option; otherwise it does nothing): each connected session signs on as its own handle (<participantId>.<session id>), resumes or joins on start, signs off when the session ends, listens for alerts and wakes an idle session on the messages that matter (notification levels, batching, a minimum gap), carries the rest with the next prompt, acknowledges only after delivery, and offers the model orchard_send, orchard_reply, orchard_ack, orchard_history, orchard_call and orchard_connect. Shows a read-only picture of what the session and its subagents are doing in Orchard: a one-line band that stacks with other bands, a status line for the workspace around it, and an /orchard pane that opens itself and grows with activity (the message being handled, claimed tasks, subagents and whether they are signed on, roles, state markers, open decisions, recent activity) with only Open in Orchard, Disconnect / Connect and copy-link as controls. Goes offline and retries when the workspace is unreachable. Workspace content reaches the model framed as data, and the credential never enters model context",
   "author": {
     "name": "algonormative",
     "url": "https://github.com/algonormative"
@@ -40,6 +40,12 @@
       "title": "Orchard executable",
       "description": "The Orchard binary whose `agent` command is run",
       "default": "/Applications/Orchard.app/Contents/MacOS/Orchard"
+    },
+    "autoConnect": {
+      "type": "boolean",
+      "title": "Connect every session",
+      "description": "Off (default): a session joins Orchard only when you run /orchard connect in it, the model calls orchard_connect, or it connected before. On: every session of a project with this plugin enabled joins at start",
+      "default": false
     }
   }
 }

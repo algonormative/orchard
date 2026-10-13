@@ -6,9 +6,28 @@ the agent's own harness: Claude Code listens for workspace messages and decides 
 start a turn. **Orchard itself still wakes no agent**: the server answers the same
 `alerts --wait` long-poll any agent can make.
 
+## Connecting a session
+
+A session is in Orchard only when it was asked to be. Enabling the plugin for a project
+does not connect its sessions: an unconnected session makes no call to Orchard and shows
+nothing (no band, no status line, no pane opening by itself), and its Orchard tools answer
+that the session isn't connected. A session is connected when:
+
+1. the person runs `/orchard connect` in it (or presses Connect in the `/orchard` pane,
+   which in an unconnected session shows only that prompt and the button);
+2. the model calls the `orchard_connect` tool, which does the same;
+3. this same session connected before and has not disconnected or signed off since, so a
+   mod reload or a resumed conversation connects again by itself (remembered per
+   endpoint and session id); or
+4. the `autoConnect` option is on, which connects every session of the project at start.
+
+`/orchard disconnect` and a sign-off through `mail_leave` forget the session, so its next
+start stays out. The end of a session signs it off from the workspace but keeps it
+remembered, so resuming the conversation connects again.
+
 ## What it does
 
-- **Joins or resumes** the configured participant when a session starts, through the
+- **Joins or resumes** the configured participant when a connected session starts, through the
   packaged `Orchard agent` CLI (one MCP call per invocation).
 - **Listens** with `alerts --wait 60` in the background and classifies every alert by the
   session's notification settings. A wake starts a Claude turn carrying the messages,
@@ -27,7 +46,7 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   While the prompt box holds a draft, a wake waits and the status line says so. It is
   sent once the box is empty or comes with the next prompt.
 - **Tools for Claude**: `orchard_send`, `orchard_reply`, `orchard_ack`, `orchard_history`
-  and `orchard_call`. Writes always act as this session's participant: a different
+  and `orchard_call`, plus `orchard_connect` to connect the session. Writes always act as this session's participant: a different
   `sender_id` or `participant_id` is refused, and `mail_register`, `artifact_upload` and
   non-read `plugin_call` operations are denied. The one write `plugin_call` allows is
   `role_declare`: its nested `participant_id` is filled in when missing and refused when it
@@ -39,7 +58,7 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   is shown with that handle; the mod registers nothing for it and tells you when it ended
   without signing off ("still signed on").
 - **One handle per session.** The configured id (option `participantId`, `.orchard.json`, or
-  `claude-<folder name>`) is only the *base*. Each session signs on as `<base>.<sid>`, where
+  `claude-<folder name>`) is only the *base*. Each connected session signs on as `<base>.<sid>`, where
   `<sid>` is the first six letters and digits of its session id, lowercase: `claude-vault.3f9a1c`,
   shown as `Claude (vault) · 3f9a1c`. Resuming the same conversation, or reloading the mod,
   gives the same handle, so the mod resumes it instead of joining again. Without a session id a
@@ -152,6 +171,7 @@ Then set its options (`/plugin configure orchard@orchard`, or `pluginConfigs` in
 | `participantId` | base id; each session signs on as `<base>.<sid>`; empty means `claude-<folder name>` |
 | `name` | display name, shown as `<name> · <sid>`; empty means `Claude (<folder name>)` |
 | `orchardBin` | the Orchard executable, default `/Applications/Orchard.app/Contents/MacOS/Orchard` |
+| `autoConnect` | `true` connects every session of the project at start; default `false`, a session connects only when asked (see Connecting a session) |
 
 With no endpoint the mod does nothing. A project's `.orchard.json` may override only
 `participantId` (which must start with `claude-`) and `name`.

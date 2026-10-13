@@ -321,7 +321,7 @@ test(
 )
 
 test('an endpoint without a usable credential path is an error, not a silent mod', {
-  options: { endpoint: ENDPOINT, credentialFile: 'relative/secret', orchardBin: BIN },
+  options: { endpoint: ENDPOINT, credentialFile: 'relative/secret', orchardBin: BIN, autoConnect: true },
 }, async ($, on) => {
   const w = world(on)
   await begin($, w)

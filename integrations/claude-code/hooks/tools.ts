@@ -3,9 +3,9 @@
 // credential out of every output. No `$`: register.tsx registers the specs and runs the calls.
 import type { HistoryMessage } from './history'
 
-export type ToolName = 'orchard_send' | 'orchard_reply' | 'orchard_ack' | 'orchard_history' | 'orchard_call'
+export type ToolName = 'orchard_send' | 'orchard_reply' | 'orchard_ack' | 'orchard_history' | 'orchard_call' | 'orchard_connect'
 
-export const TOOL_NAMES: readonly ToolName[] = ['orchard_send', 'orchard_reply', 'orchard_ack', 'orchard_history', 'orchard_call']
+export const TOOL_NAMES: readonly ToolName[] = ['orchard_send', 'orchard_reply', 'orchard_ack', 'orchard_history', 'orchard_call', 'orchard_connect']
 
 /** The tool as the model and a `tool.call` hook name it. */
 export const fullToolName = (name: ToolName): string => `mcp__orchard__${name}`
@@ -89,6 +89,14 @@ export const TOOL_SPECS: readonly ToolSpecData[] = [
       required: ['name'],
       additionalProperties: false,
     },
+  },
+  {
+    name: 'orchard_connect',
+    description:
+      'Connect this session to the Orchard workspace, as the person\'s /orchard connect does. A session is not connected ' +
+      'until the person or this tool connects it, and the other Orchard tools refuse until then. Call it only when the person ' +
+      'wants this session in Orchard.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 ]
 
