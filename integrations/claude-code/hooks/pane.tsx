@@ -44,6 +44,8 @@ export type PaneView = {
   columns?: number
   /** The surface drawing the pane. */
   surface?: 'terminal' | 'desktop' | 'vscode' | 'mobile'
+  /** False for a session nobody connected to Orchard: the pane is the prompt to connect and nothing else. */
+  isConnected?: boolean
 }
 
 export type PaneHandlers = {
@@ -108,6 +110,16 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   const { plugins, nowMs, participantId: me } = view
   type Part = string | ReturnType<typeof Text>
   type Node = ReturnType<typeof Box> | ReturnType<typeof Text> | ReturnType<typeof Button> | null
+  if (view.isConnected === false) {
+    return (
+      <Box key="unconnected" flexDirection="column" paddingX={GUTTER}>
+        <Text bold>{`This session isn't connected to ${view.workspaceName || 'Orchard'}`}</Text>
+        <Box key="connect-actions" marginTop={1}>
+          <Button key="connect" label="Connect" onPress={on.connect} />
+        </Box>
+      </Box>
+    )
+  }
   const w = widthOf(view.columns)
   const kind = view.status?.kind
   const isDisconnected = kind === 'disconnected' || kind === 'signed-off'

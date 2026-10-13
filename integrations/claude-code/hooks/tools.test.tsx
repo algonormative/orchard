@@ -25,9 +25,9 @@ async function start($: Engine, on: Parameters<typeof world>[0]) {
   return w
 }
 
-test('five deferred tools are registered, none of their text names a secret', { options: OPTIONS }, async ($, on) => {
+test('six deferred tools are registered, none of their text names a secret', { options: OPTIONS }, async ($, on) => {
   const w = await start($, on)
-  expect(w.registered.map(t => t.name)).toEqual(['orchard_send', 'orchard_reply', 'orchard_ack', 'orchard_history', 'orchard_call'])
+  expect(w.registered.map(t => t.name)).toEqual(['orchard_send', 'orchard_reply', 'orchard_ack', 'orchard_history', 'orchard_call', 'orchard_connect'])
   expect(w.registered.every(t => t.isDeferred === true)).toBe(true)
   for (const tool of w.registered) {
     expect(tool.description.length).toBeGreaterThan(20)

@@ -12,7 +12,10 @@ export const BIN = '/opt/fake/Orchard'
 export const ENDPOINT = 'http://127.0.0.1:4312/workspaces/ws_0123456789abcdef/mcp'
 export const CREDENTIAL = '/Users/tester/.secrets/orchard-credential-7f3a'
 export const CWD = '/work/Fruit Stand'
-export const OPTIONS = { endpoint: ENDPOINT, credentialFile: CREDENTIAL, orchardBin: BIN }
+/** The default options: nothing connects a session until it is asked to. */
+export const UNCONNECTED = { endpoint: ENDPOINT, credentialFile: CREDENTIAL, orchardBin: BIN }
+/** A connected session (`autoConnect`): the tests that are not about connecting assume one. */
+export const OPTIONS = { ...UNCONNECTED, autoConnect: true }
 /** The configured id for CWD: the base every session of the folder shares (and the key of its settings). */
 export const BASE = 'claude-fruit-stand'
 /** The test session's id, and the six characters of it that end up in its handle. */

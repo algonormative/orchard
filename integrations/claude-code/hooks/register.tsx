@@ -47,7 +47,7 @@ import { statusLine } from './statusline'
 import type { BandTone } from './band'
 import { CLAIM_RECHECK_MS, RECENT_KEY, inflightKey, liveClaims, parseClaims, parseRecent, planEviction, withoutIds } from './lease'
 import { DEFAULT_SETTINGS, addParticipation, classify, parseParticipation, parseSettings, participationKey, settingsKey } from './classify'
-import { checkConn, parseProjectFile, PROJECT_FILE, readOptions, resolveIdentity, sessionSid } from './config'
+import { checkConn, connectedKey, parseProjectFile, PROJECT_FILE, readOptions, resolveIdentity, sessionSid } from './config'
 import type { Options, Parsed, ProjectOverrides } from './config'
 import { backoffDelay, connectOnce, createRuntime, track } from './connect'
 import type { Runtime } from './connect'
@@ -405,6 +405,38 @@ async function readProject($: EngineInterface, cwd: string): Promise<Parsed<Proj
     return parseProjectFile(typeof body === 'string' ? body : '')
   } catch {
     return { ok: false, message: `${PROJECT_FILE} could not be read` }
+  }
+}
+
+/**
+ * Whether this session is connected to Orchard: the person or the model connected it, the project
+ * connects every session (`autoConnect`), or this same session (its handle's suffix) connected before and
+ * has not disconnected since. The last is how a reload or a resumed conversation connects again by itself.
+ * Memory first, so an unconnected session pays one store read and no call to the workspace.
+ */
+async function isOptedIn($: EngineInterface, app: App): Promise<boolean> {
+  const { ls, options } = app
+  if (ls.isOptedIn) return true
+  if (!options.autoConnect && (await storeGet($, connectedKey(options.endpoint, await sessionSidOf($, ls)))) !== true) return false
+  ls.isOptedIn = true
+  return true
+}
+
+/** The session is connected from now on, and remembered as such for its next start. */
+async function optIn($: EngineInterface, app: App) {
+  const { ls, options } = app
+  ls.isOptedIn = true
+  await storeSet($, app, connectedKey(options.endpoint, await sessionSidOf($, ls)), true)
+}
+
+/** The session is no longer remembered as connected. */
+async function optOut($: EngineInterface, app: App) {
+  const { ls, options } = app
+  ls.isOptedIn = false
+  try {
+    await $.store.delete(connectedKey(options.endpoint, await sessionSidOf($, ls)))
+  } catch {
+    // A flag left behind only reconnects this same session at its next start.
   }
 }
 
@@ -1548,7 +1580,7 @@ function paneClosed(app: App) {
  */
 async function autoOpen($: EngineInterface, app: App) {
   const { ls } = app
-  if (ls.isPaneDeclined || ls.isDisconnected) return
+  if (ls.isPaneDeclined || ls.isDisconnected || !ls.isOptedIn) return
   try {
     if ((await $.ui.panes()).some(pane => pane.id === PANE)) return
     const opened = await $.ui.open({ id: PANE, title: 'Orchard' })
@@ -1711,6 +1743,8 @@ async function disconnect($: EngineInterface, app: App, to: OrchardStatus = { ki
   const { rt, ls } = app
   if (ls.isDisconnected) return
   ls.isDisconnected = true
+  // A disconnected session does not come back by itself at its next start.
+  await optOut($, app)
   ls.confirmTimer?.cancel()
   ls.confirmTimer = undefined
   await putView($, held => ({ ...held, isConfirming: false }))
@@ -1733,9 +1767,11 @@ async function disconnect($: EngineInterface, app: App, to: OrchardStatus = { ki
   await setStatus($, app, to)
 }
 
-/** Connect: a disconnected session starts again as at session start. False when it was not disconnected. */
+/** Connect: a session not yet connected, or disconnected, starts as at session start. False when it already is connected. */
 async function connect($: EngineInterface, app: App): Promise<boolean> {
-  if (!app.ls.isDisconnected) return false
+  const { ls } = app
+  if (ls.isOptedIn && !ls.isDisconnected) return false
+  await optIn($, app)
   detach(start($, app, await $.session.cwd()))
   return true
 }
@@ -1790,6 +1826,7 @@ type Caller = { agentId: string | undefined; as: string }
 
 const denied = (message: string): ToolAnswer => ({ deny: `Orchard: ${message}` })
 
+const NOT_CONNECTED = "this session isn't connected to Orchard; /orchard connect (or the orchard_connect tool) connects it"
 const DISCONNECTED = 'this session is disconnected from Orchard; /orchard connect puts it back'
 const SIGNED_OFF = 'this session signed off from Orchard; /orchard connect signs it on again'
 
@@ -1988,8 +2025,13 @@ async function signOff($: EngineInterface, app: App, participantId: string) {
 }
 
 async function answerTool($: EngineInterface, app: App, name: string, input: unknown, agentId: string | undefined): Promise<ToolAnswer> {
+  // The model connects the session the way the person's /orchard connect does.
+  if (name === 'orchard_connect') {
+    return { result: (await connect($, app)) ? 'Orchard: connecting this session; the other Orchard tools work once it is connected.' : 'Orchard: this session is already connected.' }
+  }
   // A disconnected session is out of the workspace: nothing the model asks reaches it.
   if (app.ls.isDisconnected) return denied((await read($, status))?.kind === 'signed-off' ? SIGNED_OFF : DISCONNECTED)
+  if (!app.ls.isOptedIn) return denied(NOT_CONNECTED)
   // Every agent of the session acts as its own participant through these tools; a subagent that wants one of its own signs on through the CLI.
   const caller: Caller = { agentId, as: app.rt.current?.identity.participantId ?? '' }
   try {
@@ -2029,6 +2071,8 @@ async function ensureListening($: EngineInterface, app: App) {
   // The person disconnected this session: only Connect (or a new session) listens again.
   if (ls.isDisconnected) return
   if (!ls.isStarted) {
+    // A session nobody connected stays out, however many prompts it takes.
+    if (!(await isOptedIn($, app))) return
     ls.isStarted = true
     let cwd: string
     try {
@@ -2081,6 +2125,8 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     await registerSurface($)
+    // A session nobody connected to Orchard does nothing here: no call, no band, no status line, no pane.
+    if (!(await isOptedIn($, app))) return next(e)
     // Not awaited: the first prompt does not wait on a workspace that may be down.
     detach(start($, app, e.cwd))
     return next(e)
@@ -2102,8 +2148,8 @@ export const register: Register = (on, options) => {
     if (!isPersonsPrompt(e.origin)) return next(e)
 
     const { ls } = app
-    // A disconnected session delivers nothing and acknowledges nothing; what is queued waits for Connect.
-    if (ls.isDisconnected) return next(e)
+    // A disconnected or unconnected session delivers nothing and acknowledges nothing; what is queued waits for Connect.
+    if (ls.isDisconnected || !ls.isOptedIn) return next(e)
     const pending = await readQueue($, app)
     const batch = takeBatch(pending, await blockedIds($, app, pending), wakeOf(ls))
     if (batch.length === 0) return next(e)
@@ -2129,7 +2175,7 @@ export const register: Register = (on, options) => {
   // Subagents: their descriptions arrive with the spawn. The hook only watches: it never denies or changes one.
   on('agent.spawn', async ($, e, next) => {
     const result = await next(e)
-    if (result.agentId !== undefined) {
+    if (result.agentId !== undefined && app.ls.isOptedIn) {
       const { agentId } = result
       try {
         const now = await $.clock.now()
@@ -2145,18 +2191,19 @@ export const register: Register = (on, options) => {
 
   // A subagent's run raises no turn.start: this one is the main loop's.
   on('turn.start', async ($, e, next) => {
-    detach(setMainStatus($, app, 'running'))
+    if (app.ls.isOptedIn) detach(setMainStatus($, app, 'running'))
     return next(e)
   }).catch(($, e, next) => next(e))
 
   on('turn.complete', async ($, e, next) => {
     // A turn that ends in a subagent's loop: look at the list now, in case it was the agent's last.
-    if (e.agentId === undefined) {
+    if (!app.ls.isOptedIn) {
+      // Nothing of Orchard to update; ensureListening below may still connect a remembered session.
+    } else if (e.agentId === undefined) {
       detach(setMainStatus($, app, 'idle'))
       // The batch it was handling is done.
       detach(putNow($, () => null))
-    }
-    else detach(lookAtAgents($, app, true))
+    } else detach(lookAtAgents($, app, true))
     detach(ensureListening($, app))
     return next(e)
   })
@@ -2164,10 +2211,12 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'orchard' }, async ($, e) => {
     const [word = '', ...rest] = e.args.trim().split(/\s+/)
     if (word === 'reconnect') {
+      if (!app.ls.isOptedIn) return { text: (await connect($, app)) ? 'Connecting to Orchard…' : 'Orchard is already connected.' }
       detach(start($, app, await $.session.cwd()))
       return { text: 'Reconnecting to Orchard…' }
     }
     if (word === 'disconnect') {
+      if (!app.ls.isOptedIn && !app.ls.isDisconnected) return { text: "This session isn't connected to Orchard." }
       if (app.ls.isDisconnected) return { text: 'Orchard is already disconnected. /orchard connect listens again.' }
       await disconnect($, app)
       return { text: 'Disconnected from Orchard: not listening, nothing wakes this session. /orchard connect puts it back.' }
@@ -2175,13 +2224,16 @@ export const register: Register = (on, options) => {
     if (word === 'connect') {
       return { text: (await connect($, app)) ? 'Connecting to Orchard…' : 'Orchard is already connected (/orchard reconnect starts over).' }
     }
-    if (word === 'notify') return { text: await runNotify($, app, rest.join(' ')) }
+    if (word === 'notify') {
+      if (!app.ls.isOptedIn) return { text: "This session isn't connected to Orchard; /orchard connect connects it." }
+      return { text: await runNotify($, app, rest.join(' ')) }
+    }
     if (word !== '') return { text: 'Usage: /orchard [notify … | disconnect | connect | reconnect]' }
 
     // The tasks and plugins are read as the pane opens, so it does not draw what was true a while ago.
-    detach(refreshWorkspace($, app))
+    if (app.ls.isOptedIn) detach(refreshWorkspace($, app))
     const opened = await $.ui.open({ id: PANE, title: 'Orchard', focus: true })
-    await paneOpened($, app)
+    if (app.ls.isOptedIn) await paneOpened($, app)
     return { text: opened.isPlaced ? 'Orchard pane opened.' : 'Orchard pane: widen the terminal to see it.' }
   })
 
@@ -2191,7 +2243,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const result = await next(e)
     try {
-      if (succeeded(result)) detach(noteObserved($, app, e.agentId ?? MAIN, e.command))
+      if (app.ls.isOptedIn && succeeded(result)) detach(noteObserved($, app, e.agentId ?? MAIN, e.command))
     } catch {
       // Watching is a courtesy; the command has run either way.
     }
@@ -2203,6 +2255,8 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__orchard__orchard_ack' }, ($, e) => answerTool($, app, 'orchard_ack', e, e.agentId))
   on('tool.call', { tool: 'mcp__orchard__orchard_history' }, ($, e) => answerTool($, app, 'orchard_history', e, e.agentId))
   on('tool.call', { tool: 'mcp__orchard__orchard_call' }, ($, e) => answerTool($, app, 'orchard_call', e, e.agentId))
+  // A regular expression: the generated tool types list the tools the host had registered, and this one is newer.
+  on('tool.call', { tool: /^mcp__orchard__orchard_connect$/ }, ($, e) => answerTool($, app, 'orchard_connect', e, e.agentId))
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     paneClosed(app)
@@ -2213,7 +2267,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     // Drawn means open: from here the tasks and plugins are kept fresh (memory only; a draw may not write state).
-    if (!app.ls.isPaneOpen) {
+    if (!app.ls.isPaneOpen && app.ls.isOptedIn) {
       app.ls.isPaneOpen = true
       armSafety($, app)
     }
@@ -2247,6 +2301,7 @@ export const register: Register = (on, options) => {
         nowMs: await $.clock.now(),
         columns: typeof e.props.bodyColumns === 'number' ? e.props.bodyColumns : undefined,
         surface: e.surface,
+        isConnected: app.ls.isOptedIn || app.ls.isDisconnected,
       },
       paneHandlers($, app),
     )

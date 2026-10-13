@@ -23,6 +23,8 @@ export type Options = {
   credentialFile: string
   participantId: string
   name: string
+  /** Every session of the project connects at start; off, a session connects only when asked. */
+  autoConnect: boolean
 }
 
 /**
@@ -62,8 +64,12 @@ export function readOptions(options: PluginOptions): Options {
     credentialFile: text(options.credentialFile),
     participantId: text(options.participantId),
     name: text(options.name),
+    autoConnect: options.autoConnect === true || options.autoConnect === 'true',
   }
 }
+
+/** What remembers that a session connected: this endpoint and this session's short id (its handle's suffix). */
+export const connectedKey = (endpoint: string, sid: string): string => `connected ${endpoint} ${sid}`
 
 /** The connection, or why it cannot be made. The message never holds the path. */
 export function checkConn(options: Options): Parsed<Conn> {

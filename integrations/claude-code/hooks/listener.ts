@@ -98,6 +98,8 @@ export type ListenerState = {
    * `missing` after a tool error (a host older than the tool) so it is not asked again.
    */
   decisionsTool: 'unknown' | 'available' | 'missing'
+  /** This session is connected to Orchard: the person, the model, `autoConnect` or a remembered earlier connection of the same session said so. Until then the mod does nothing. */
+  isOptedIn: boolean
   /** The person disconnected this session, or its participant signed off: nothing listens, nothing wakes. Memory only, never kept across sessions. */
   isDisconnected: boolean
   /** The /orchard pane is open: only then is the slow safety refresh armed and the poll clock mirrored. */
@@ -165,6 +167,7 @@ export function createListenerState(): ListenerState {
     sid: undefined,
     isStoreFailing: false,
     decisionsTool: 'unknown',
+    isOptedIn: false,
     isDisconnected: false,
     isPaneOpen: false,
     isPaneDeclined: false,
