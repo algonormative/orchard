@@ -49,12 +49,12 @@ export function howOf(alert: Pick<OrchardAlert, 'reasons' | 'where'>): string {
             : alert.where
 }
 
-/** What `absorb` tells the feed about an alert, in words a person reads: who, how it reached this session, what it said. */
+/** What `absorb` tells the feed about an alert, in words a person reads: `Ada · DM  snippet` (who, how it reached this session, what it said; two spaces before the snippet). The pane draws the arrow. */
 export function inboundText(alert: Pick<OrchardAlert, 'senderName' | 'senderId' | 'reasons' | 'where' | 'body' | 'kind'>): string {
   const who = line(alert.senderName ?? alert.senderId, 40)
   const first = alert.body.split('\n').find(l => l.trim() !== '') ?? ''
   const snippet = line(first, 80)
-  return `${who} (${howOf(alert)})${snippet === '' ? '' : `: ${snippet}`}`
+  return `${who} · ${howOf(alert)}${snippet === '' ? '' : `  ${snippet}`}`
 }
 
 /** How many messages the "now" section lists by name. */
@@ -109,7 +109,7 @@ const str = (value: unknown): string | undefined => (typeof value === 'string' &
 export function sendNote(destination: Destination, body: string, names: Names, messageId?: string): Note {
   const first = body.split('\n').find(l => l.trim() !== '') ?? ''
   const snippet = line(first, 80)
-  const tail = snippet === '' ? '' : `: ${snippet}`
+  const tail = snippet === '' ? '' : `  ${snippet}`
   const text =
     destination.kind === 'direct'
       ? `Sent to ${line(names.person(destination.id), 40)}${tail}`
@@ -122,7 +122,7 @@ export function sendNote(destination: Destination, body: string, names: Names, m
 export function replyNote(toName: string, body: string, messageId: string | undefined, targetId: string): Note {
   const first = body.split('\n').find(l => l.trim() !== '') ?? ''
   const snippet = line(first, 80)
-  return { kind: 'reply', text: `Replied to ${line(toName, 40)}${snippet === '' ? '' : `: ${snippet}`}`, ref: { kind: 'message', id: messageId ?? targetId } }
+  return { kind: 'reply', text: `Replied to ${line(toName, 40)}${snippet === '' ? '' : `  ${snippet}`}`, ref: { kind: 'message', id: messageId ?? targetId } }
 }
 
 export function ackNote(count: number): Note {

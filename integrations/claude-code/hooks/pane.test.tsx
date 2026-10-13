@@ -135,7 +135,8 @@ test('NOW names the message the main loop handles from its delivery to the end o
   let all = (await drawnText(ui)).join('\n')
   expect(await sectionsOf(ui)).toContain('NOW')
   expect(all).toContain('Other Claude')
-  expect(all).toContain('DM · handling now')
+  expect(all).toContain(' · DM')
+  expect(all).toContain('handling now')
   expect(all).toContain('“did the check pass?”')
   expect(await bandText($)).toBe('◆ Claude in Fruit Stand · handling DM from Other Claude')
 
@@ -193,9 +194,15 @@ test('agents: main and each subagent as a tree, with the state Orchard and the e
     for (const text of ['main', 'Phase Garden re-check', `${ME}.garden`, '● signed on', '● running', '✓ done · signed off', '⚠ done · still signed on', 'not on Orchard', `shares ${ME}`, 'Sent to Ada: started']) {
       expect(all, `${surface} ${text}`).toContain(text)
     }
+    // every agent row carries its state: three run, one signed on, one done and off, one done and still on, in that column
+    const lines = all.split('\n')
+    expect(lines.filter(l => l === '● running'), surface).toHaveLength(3)
+    for (const state of ['● signed on', '✓ done · signed off', '⚠ done · still signed on']) expect(lines.filter(l => l === state), `${surface} ${state}`).toHaveLength(1)
+    // the handle and the last action sit on the second line, dim, under the description
+    expect(all, surface).toContain(`${ME}.garden · Sent to Ada: started`)
     // the roles row uses the short label of the handle
     expect(all, surface).toContain('plotter check')
-    expect(all, surface).toMatch(/ garden/)
+    expect(all.split('\n'), surface).toContain('garden')
     expect(all.includes(`${ME}.garden plotter`), surface).toBe(false)
     await ui.unmount()
   }
@@ -215,16 +222,19 @@ test('activity: the last 15 minutes, newest first; the toggle shows only when a 
   const ui = await mountPane($, 'terminal')
   const texts = async () => (await drawnText(ui)).join('\n')
   expect(await controlsOf(ui)).toEqual(['open-workspace', 'disconnect', 'scope-this', 'scope-all'])
-  expect(await texts()).toContain('Replied to Ada')
-  expect((await texts()).includes('Sent to Bram')).toBe(false)
+  expect(await texts()).toContain('replied to Ada')
+  expect((await texts()).includes('sent to Bram')).toBe(false)
 
   await ui.press({ key: 'scope-all' })
   expect(w.state.latest.view).toEqual({ showSubagents: true, isConfirming: false })
   const both = await texts()
-  expect(both).toContain('Sent to Bram: hi')
-  expect(both.indexOf('Sent to Bram'), 'newest first').toBeLessThan(both.indexOf('Replied to Ada'))
+  expect(both).toContain('sent to Bram: hi')
+  expect(both.indexOf('sent to Bram'), 'newest first').toBeLessThan(both.indexOf('replied to Ada'))
   await ui.press({ key: 'scope-this' })
-  expect((await texts()).includes('Sent to Bram')).toBe(false)
+  expect((await texts()).includes('sent to Bram')).toBe(false)
+
+  // the verb reads after its arrow, lowercase, with the age at the right
+  expect(await texts()).toContain('→ ')
 
   // with no subagent entries there is no toggle
   await ui.unmount()

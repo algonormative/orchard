@@ -10,7 +10,7 @@ import type { Elements, UiPressArgument } from 'claude-code'
 
 import type { OrchardActivityEntry, OrchardAgent, OrchardAgents, OrchardCounts, OrchardNow, OrchardPlugins, OrchardStatus, OrchardView } from '../types'
 import { MAIN, RECENT_MS, agentColor, agentState, isEnded, shortHandle } from './feed'
-import { FOOTER_HEIGHT, PANE_TITLE, chipOf, footerSvg, footerText, headerHeight, headerSvg, sectionSvg, sublineOf, widthOf } from './svg'
+import { FOOTER_HEIGHT, PANE_TITLE, SECTION_HEIGHT, chipOf, footerSvg, footerText, headerHeight, headerSvg, sectionSvg, sublineOf, widthOf } from './svg'
 
 export type Table = Pick<Elements['mobile'], 'Box' | 'Text' | 'Button'> & {
   /** Absent on the terminal; the caller also leaves it out where a surface should not draw one. */
@@ -61,6 +61,10 @@ export type PaneHandlers = {
   showSubagents: (isShown: boolean) => void
 }
 
+/** Cells of gutter either side of the pane body, and the pixels the drawings count a cell as. */
+const GUTTER = 2
+const PX_PER_CELL = 8
+
 /** How many activity lines the pane lists. */
 export const ACTIVITY_SHOWN = 15
 
@@ -103,6 +107,7 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   const { Box, Text, Button, Svg } = ui
   const { plugins, nowMs, participantId: me } = view
   type Part = string | ReturnType<typeof Text>
+  type Node = ReturnType<typeof Box> | ReturnType<typeof Text> | ReturnType<typeof Button> | null
   const w = widthOf(view.columns)
   const kind = view.status?.kind
   const isDisconnected = kind === 'disconnected' || kind === 'signed-off'
@@ -113,38 +118,68 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   const chip = chipOf(view.status, view.counts, isBusy)
   const isQuietView = isConnected && isQuiet(view) && !isConfirming
 
-  const picture = (key: string, source: string, alt: string, height: number, isInteractive = false, width = w) =>
+  // One gutter for the whole body: labels, rows, rules and buttons all start at the same edge, and
+  // the drawings are narrower by the two gutters so their rules end where the rows do.
+  const bodyW = Math.max(200, w - 2 * GUTTER * PX_PER_CELL)
+
+  const picture = (key: string, source: string, alt: string, height: number, isInteractive = false, width = bodyW) =>
     Svg === undefined ? null : <Svg key={key} source={source} alt={alt} width={width} height={height} isInteractive={isInteractive} />
 
-  /** A section label: the drawn rule and caps on Svg surfaces, a Text line elsewhere. */
-  const section = (key: string, label: string, width = w) =>
+  /** A section: its label (the drawn rule and caps on Svg surfaces, a Text line elsewhere) and its rows, one marginTop above. */
+  const block = (key: string, label: string, rowsOf: Node[], head?: Node) => (
+    <Box key={key} flexDirection="column" marginTop={1}>
+      {head ?? sectionLabel(`${key}-label`, label)}
+      {rowsOf}
+    </Box>
+  )
+  const sectionLabel = (key: string, label: string) =>
     Svg === undefined ? (
       <Box key={key}>
         <Text bold color="warning">{label}</Text>
       </Box>
     ) : (
-      picture(key, sectionSvg(width, label), label, 30, false, width)
+      picture(key, sectionSvg(bodyW, label), label, SECTION_HEIGHT)
     )
 
+  const asText = (part: Part) => (typeof part === 'string' ? <Text>{part}</Text> : part)
+
   /**
-   * One item: a plain Button that opens `href` in Orchard with a small copy button beside it, or plain
-   * Text where it has no address. `parts` are strings and Text, which is all a Button holds.
+   * One row: `left` grows and truncates, `right` is a dim column that keeps its width, and the copy
+   * slot is one cell wide on every row (empty where the row has no address) so the ⧉ never moves.
+   * With an address the left side is a plain Button that opens it. `parts` are strings and Text.
    */
-  const item = (key: string, href: string | null | undefined, raw: Part[], indent = 0) => {
-    const parts = raw.map(part => (typeof part === 'string' ? <Text>{part}</Text> : part))
-    return href === null || href === undefined ? (
-      <Box key={key} paddingLeft={indent}>
-        <Text>{parts}</Text>
-      </Box>
-    ) : (
+  const item = (key: string, href: string | null | undefined, raw: Part[], right?: Part, indent = 0) => {
+    const parts = raw.map((part, i) => (typeof part === 'string' ? <Text wrap={i === raw.length - 1 ? 'truncate-end' : undefined}>{part}</Text> : part))
+    const hasHref = href !== null && href !== undefined
+    return (
       <Box key={key} flexDirection="row" paddingLeft={indent} columnGap={1}>
-        <Button key={`${key}-open`} plain onPress={() => on.open(href)}>
-          {parts}
-        </Button>
-        <Button key={`${key}-copy`} plain dimColor label="⧉" onPress={press => on.copy(href, press.surface)} />
+        <Box flexGrow={1} flexShrink={1}>
+          {hasHref ? (
+            <Button key={`${key}-open`} plain onPress={() => on.open(href)}>
+              {parts}
+            </Button>
+          ) : (
+            <Text>{parts}</Text>
+          )}
+        </Box>
+        {right === undefined ? null : (
+          <Box flexShrink={0}>
+            {typeof right === 'string' ? <Text dimColor>{right}</Text> : right}
+          </Box>
+        )}
+        <Box width={1} flexShrink={0}>
+          {hasHref ? <Button key={`${key}-copy`} plain dimColor label="⧉" onPress={press => on.copy(href, press.surface)} /> : null}
+        </Box>
       </Box>
     )
   }
+
+  /** The dim second line of a row, under its title. */
+  const subline = (key: string, text: string, indent: number) => (
+    <Box key={key} paddingLeft={indent}>
+      <Text dimColor wrap="truncate-end">{text}</Text>
+    </Box>
+  )
 
   const dim = (text: string) => <Text dimColor>{text}</Text>
 
@@ -165,7 +200,7 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
     ) : (
       picture(
         'header',
-        headerSvg(w, { workspaceName: view.workspaceName, participantId: me, ...(hasDetail ? { chip } : {}), mood: isConfirming ? 'confirm' : 'normal' }),
+        headerSvg(bodyW, { workspaceName: view.workspaceName, participantId: me, ...(hasDetail ? { chip } : {}), mood: isConfirming ? 'confirm' : 'normal' }),
         `${isConfirming ? 'Disconnect?' : PANE_TITLE}, workspace ${view.workspaceName || ''}${hasDetail ? `, ${chip.label}` : ''}`.replace(/\s+,/, ','),
         headerHeight(hasDetail ? { chip } : {}),
         true,
@@ -221,7 +256,9 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
           ))}
         </Box>
       )}
-      {buttons}
+      <Box key="header-buttons" marginTop={1}>
+        {buttons}
+      </Box>
     </Box>
   )
 
@@ -231,69 +268,62 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   const nowSection =
     now === null && view.queued === 0
       ? null
-      : [
-          section('section-now', 'NOW'),
-          ...(now?.items ?? []).map((m, i) =>
-            item(`now-${i}`, m.href, [<Text bold>{m.sender}</Text>, <Text dimColor>{` ${m.how}${i === 0 ? ' · handling now' : ''}`}</Text>, m.snippet === '' ? '' : ` “${m.snippet}”`]),
-          ),
+      : block('now', 'NOW', [
+          ...(now?.items ?? []).flatMap((m, i) => [
+            item(`now-${i}`, m.href, [<Text bold>{m.sender}</Text>, <Text dimColor>{` · ${m.how}`}</Text>], i === 0 ? 'handling now' : undefined),
+            m.snippet === '' ? null : subline(`now-${i}-snippet`, `“${m.snippet}”`, 0),
+          ]),
           ...(now !== null && now.total > now.items.length ? [<Text key="now-more" dimColor>{`+ ${now.total - now.items.length} more in this batch`}</Text>] : []),
           view.queued === 0 ? null : (
             <Text key="now-queued" color="warning">
               {`${view.queued} ${now === null ? '' : 'more '}queued · ${view.counts?.isHeld === true ? 'sends when the prompt box is empty' : 'waiting to be sent'}`}
             </Text>
           ),
-        ]
+        ])
 
   // ---- TASKS ----
 
   const tasksSection =
     plugins.tasks.length === 0
       ? null
-      : [section('section-tasks', 'TASKS'), ...plugins.tasks.map(task => item(`task-${task.id}`, task.href, [<Text color="success">◐ </Text>, task.title, <Text dimColor>{` ${humane(task.status)}`}</Text>]))]
+      : block('tasks', 'TASKS', plugins.tasks.map(task => item(`task-${task.id}`, task.href, [<Text color="success">◐ </Text>, task.title], humane(task.status))))
 
   // ---- AGENTS ----
 
+  // Line 1: dot, description (truncated) and the state at the right. Line 2, dim and indented under the
+  // description: where it is signed on, and its last action. Subagents sit one step under main.
   const agentLine = (agent: OrchardAgent) => {
     const state = agentState(agent)
     const href = agent.handle !== undefined && agent.sharesBase !== true ? view.agentHref(agent.handle) : null
     const isMain = agent.agentId === MAIN
+    const indent = isMain ? 0 : 2
     const where = agent.sharesBase === true ? `shares ${me}` : agent.handle === undefined ? 'not on Orchard' : agent.handle
-    const parts: Part[] = [
-      <Text color={isMain ? 'suggestion' : agentColor(agent.agentId)}>● </Text>,
-      <Text bold={isMain}>{isMain ? 'main' : agent.description === '' ? agent.type : agent.description}</Text>,
-      dim(` ${where} `),
-      <Text color={TONE[state.tone]} dimColor={state.tone === 'dim'}>{state.text}</Text>,
-    ]
+    const last = agent.lastAction === undefined || isEnded(agent.status) ? '' : ` · ${agent.lastAction}`
     return (
-      <Box key={`agent-${agent.agentId}`} flexDirection="column" paddingLeft={isMain ? 0 : 2}>
-        {item(`agent-row-${agent.agentId}`, href, parts)}
-        {agent.lastAction === undefined || isEnded(agent.status) ? null : (
-          <Box key={`agent-last-${agent.agentId}`} paddingLeft={2}>
-            <Text dimColor>{agent.lastAction}</Text>
-          </Box>
+      <Box key={`agent-${agent.agentId}`} flexDirection="column">
+        {item(
+          `agent-row-${agent.agentId}`,
+          href,
+          [<Text color={isMain ? 'suggestion' : agentColor(agent.agentId)}>● </Text>, <Text bold={isMain}>{isMain ? 'main' : agent.description === '' ? agent.type : agent.description}</Text>],
+          <Text color={TONE[state.tone]} dimColor={state.tone === 'dim'}>{state.text}</Text>,
+          indent,
         )}
+        {subline(`agent-last-${agent.agentId}`, `${where}${last}`, indent + 2)}
       </Box>
     )
   }
-  const agentsSection = rows.length === 0 ? null : [section('section-agents', 'AGENTS'), ...rows.map(agentLine)]
+  const agentsSection = rows.length === 0 ? null : block('agents', 'AGENTS', rows.map(agentLine))
 
   // ---- PLUGINS ----
 
   const hasPlugins = plugins.roles.length > 0 || plugins.states.length > 0 || plugins.decisions.length > 0
   const pluginsSection = !hasPlugins
     ? null
-    : [
-        section('section-plugins', 'PLUGINS'),
-        ...plugins.roles.map(role => (
-          <Text key={`role-${role.participantId}`}>
-            <Text dimColor>ROLES </Text>
-            {role.roles.join(', ')}
-            <Text dimColor>{` ${shortHandle(role.participantId, me)}`}</Text>
-          </Text>
-        )),
-        ...plugins.states.map(marker => item(`state-${marker.id}`, marker.href, [<Text dimColor>STATE </Text>, marker.title, <Text dimColor>{` ${marker.state}`}</Text>])),
+    : block('plugins', 'PLUGINS', [
+        ...plugins.roles.map(role => item(`role-${role.participantId}`, null, [<Text dimColor>ROLES </Text>, role.roles.join(', ')], shortHandle(role.participantId, me))),
+        ...plugins.states.map(marker => item(`state-${marker.id}`, marker.href, [<Text dimColor>STATE </Text>, marker.title], marker.state)),
         ...plugins.decisions.map(decision => item(`decision-${decision.id}`, decision.href, [<Text dimColor>ASKED </Text>, <Text color="warning">{`◆ ${decision.snippet}`}</Text>])),
-      ]
+      ])
 
   // ---- ACTIVITY ----
 
@@ -302,39 +332,50 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   const isAll = view.view.showSubagents && hasSubActivity
   const listed = (isAll ? recent : recent.filter(entry => entry.agentId === MAIN)).slice(-ACTIVITY_SHOWN).reverse()
   const labelOf = (entry: OrchardActivityEntry) => (entry.agentId === MAIN ? 'main' : view.agents[entry.agentId]?.description || shortHandle(entry.handle, me))
+  /** What the agent did reads as a verb after its arrow: "replied to Bram", not "Replied to Bram". */
+  const verbed = (text: string) => (text === '' ? text : text.charAt(0).toLowerCase() + text.slice(1))
   const activitySection =
     recent.length === 0
       ? null
-      : [
-          <Box key="activity-head" flexDirection="row" columnGap={1} alignItems="center">
-            {section('section-activity', 'ACTIVITY', hasSubActivity ? 120 : w)}
-            {hasSubActivity ? <Button key="scope-this" variant={isAll ? 'secondary' : 'primary'} label="this agent" onPress={() => on.showSubagents(false)} /> : null}
-            {hasSubActivity ? <Button key="scope-all" variant={isAll ? 'primary' : 'secondary'} label="+ subagents" onPress={() => on.showSubagents(true)} /> : null}
-          </Box>,
-          ...(listed.length === 0 ? [<Text key="activity-none" dimColor>Nothing from this agent lately.</Text>] : []),
-          ...listed.map((entry, i) => {
-            const isOut = entry.direction === 'out'
-            return item(`activity-${i}`, entry.href, [
-              ...(isAll ? [<Text color={entry.agentId === MAIN ? 'suggestion' : agentColor(entry.agentId)}>● </Text>, dim(`${labelOf(entry)} `)] : []),
-              <Text color={isOut ? 'suggestion' : undefined} dimColor={!isOut}>{isOut ? '→ ' : '← '}</Text>,
-              <Text dimColor={!isOut}>{entry.text}</Text>,
-              dim(` ${ago(entry.at, nowMs)}`),
-            ])
-          }),
-        ]
+      : block(
+          'activity',
+          'ACTIVITY',
+          [
+            hasSubActivity ? (
+              <Box key="activity-scope" flexDirection="row" justifyContent="flex-end" columnGap={1}>
+                <Button key="scope-this" variant={isAll ? 'secondary' : 'primary'} label="this agent" onPress={() => on.showSubagents(false)} />
+                <Button key="scope-all" variant={isAll ? 'primary' : 'secondary'} label="+ subagents" onPress={() => on.showSubagents(true)} />
+              </Box>
+            ) : null,
+            ...(listed.length === 0 ? [<Text key="activity-none" dimColor>Nothing from this agent lately.</Text>] : []),
+            ...listed.map((entry, i) => {
+              const isOut = entry.direction === 'out'
+              return item(
+                `activity-${i}`,
+                entry.href,
+                [
+                  ...(isAll ? [<Text color={entry.agentId === MAIN ? 'suggestion' : agentColor(entry.agentId)}>● </Text>, dim(`${labelOf(entry)} `)] : []),
+                  <Text color={isOut ? 'suggestion' : undefined} dimColor={!isOut}>{isOut ? '→ ' : '← '}</Text>,
+                  <Text dimColor={!isOut}>{isOut ? verbed(entry.text) : entry.text}</Text>,
+                ],
+                ago(entry.at, nowMs),
+              )
+            }),
+          ],
+        )
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" paddingX={GUTTER}>
       {top}
       {nowSection}
       {tasksSection}
       {agentsSection}
       {pluginsSection}
       {activitySection}
-      {isQuietView ? null : Svg === undefined ? (
-        <Text dimColor>{footerText(view.lastPollAt, nowMs)}</Text>
-      ) : (
-        picture('footer', footerSvg(w, footerText(view.lastPollAt, nowMs)), 'Tending the grove', FOOTER_HEIGHT)
+      {isQuietView ? null : (
+        <Box key="footer" marginTop={1} justifyContent="center">
+          {Svg === undefined ? <Text dimColor>{footerText(view.lastPollAt, nowMs)}</Text> : picture('footer', footerSvg(bodyW, footerText(view.lastPollAt, nowMs)), 'Tending the grove', FOOTER_HEIGHT)}
+        </Box>
       )}
     </Box>
   )
