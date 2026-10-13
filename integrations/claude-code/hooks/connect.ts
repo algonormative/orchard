@@ -52,7 +52,7 @@ export type Outcome =
   | { kind: 'error'; message: string }
 
 /** Any exit 0 resets the backoff to its first step. Pass every CLI result through this. */
-export function track(rt: Pick<Runtime, 'failures'>, result: CliResult): CliResult {
+export function track(rt: Runtime, result: CliResult): CliResult {
   if (result.exitCode === EXIT_OK) rt.failures = 0
   return result
 }
@@ -62,27 +62,16 @@ function failed(result: CliResult): Outcome {
   return { kind: 'error', message: result.message ?? 'the Orchard CLI failed' }
 }
 
-/**
- * Resume as `identity`, and join if the participant was never registered: how any participant of
- * this session (its own, a subagent's handle) is entered. `rt` keeps the join's request id across
- * attempts, so a join that ended in exit 3 is retried as the same request.
- */
-export async function enterOnce(run: Run, rt: Pick<Runtime, 'failures' | 'joinRequestId'>, conn: Conn, identity: Identity): Promise<CliResult> {
+export async function connectOnce(run: Run, rt: Runtime, here: Current): Promise<Outcome> {
+  const { conn, identity } = here
   const scrub = [identity.participantId]
+
   let first = track(rt, await resume(run, conn, identity.participantId, scrub))
   if (first.exitCode === EXIT_TOOL && NOT_REGISTERED.test(first.message ?? '')) {
     rt.joinRequestId ??= `orchard-join-${crypto.randomUUID()}`
     first = track(rt, await join(run, conn, identity.participantId, identity.name, rt.joinRequestId, scrub))
     if (first.exitCode === EXIT_OK) rt.joinRequestId = undefined
   }
-  return first
-}
-
-export async function connectOnce(run: Run, rt: Runtime, here: Current): Promise<Outcome> {
-  const { conn, identity } = here
-  const scrub = [identity.participantId]
-
-  const first = await enterOnce(run, rt, conn, identity)
   if (first.exitCode !== EXIT_OK) return failed(first)
 
   const info = track(rt, await workspaceInfo(run, conn, scrub))

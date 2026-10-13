@@ -57,6 +57,8 @@ export function bandLine(
       return line([...head, dim(' · another session is listening')], 'quiet')
     case 'disconnected':
       return line([...head, dim(' · disconnected')], 'quiet')
+    case 'signed-off':
+      return line([...head, dim(' · signed off')], 'quiet')
     case 'connected': {
       const unread = count(counts.unread)
       const forYou = count(counts.forYou)

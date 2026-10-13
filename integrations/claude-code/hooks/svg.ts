@@ -47,10 +47,10 @@ function svg(width: number, height: number, body: string): string {
 
 // ---- the status chip ----
 
-export type ChipKind = 'listening' | 'waiting' | 'offline' | 'shared' | 'connecting' | 'error' | 'disconnected'
+export type ChipKind = 'listening' | 'waiting' | 'offline' | 'shared' | 'connecting' | 'error' | 'disconnected' | 'signed-off'
 export type Chip = { kind: ChipKind; label: string }
 
-/** green listening / amber waiting for you / red offline (or error) / grey another session is listening, disconnected, or connecting. */
+/** green listening / amber waiting for you / red offline (or error) / grey another session is listening, disconnected, signed off, or connecting. */
 export function chipOf(status: OrchardStatus | null, counts: OrchardCounts | null): Chip {
   switch (status?.kind) {
     case 'connected':
@@ -63,6 +63,8 @@ export function chipOf(status: OrchardStatus | null, counts: OrchardCounts | nul
       return { kind: 'shared', label: 'another session is listening' }
     case 'disconnected':
       return { kind: 'disconnected', label: 'disconnected' }
+    case 'signed-off':
+      return { kind: 'signed-off', label: 'signed off' }
     default:
       return { kind: 'connecting', label: 'connecting' }
   }
@@ -76,6 +78,7 @@ const CHIP_CLASS: Record<ChipKind, { bg: string; fg: string }> = {
   shared: { bg: 'chip', fg: 'dim' },
   connecting: { bg: 'chip', fg: 'dim' },
   disconnected: { bg: 'chip', fg: 'dim' },
+  'signed-off': { bg: 'chip', fg: 'dim' },
 }
 
 // ---- header ----

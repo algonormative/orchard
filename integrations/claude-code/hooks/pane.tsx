@@ -51,7 +51,7 @@ export type PaneHandlers = {
 /** How many activity lines the pane lists. */
 export const ACTIVITY_SHOWN = 15
 
-const CHIP_TOKEN = { listening: 'success', waiting: 'warning', offline: 'error', error: 'error', shared: undefined, connecting: undefined, disconnected: undefined } as const
+const CHIP_TOKEN = { listening: 'success', waiting: 'warning', offline: 'error', error: 'error', shared: undefined, connecting: undefined, disconnected: undefined, 'signed-off': undefined } as const
 
 /** "now", "3m", "2h": how long before `nowMs` an entry happened. */
 export function ago(at: number, nowMs: number): string {
@@ -66,7 +66,8 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   const { plugins, nowMs } = view
   const w = widthOf(view.columns)
   const chip = chipOf(view.status, view.counts)
-  const isDisconnected = view.status?.kind === 'disconnected'
+  const isSignedOff = view.status?.kind === 'signed-off'
+  const isDisconnected = view.status?.kind === 'disconnected' || isSignedOff
 
   const picture = (key: string, source: string, alt: string, height: number, isInteractive = false, width = w) =>
     Svg === undefined ? null : <Svg key={key} source={source} alt={alt} width={width} height={height} isInteractive={isInteractive} />
@@ -121,7 +122,8 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
           <Button key="disconnect" label="Disconnect" onPress={on.disconnect} />
         )}
       </Box>
-      {isDisconnected ? <Text dimColor>Disconnected: not listening, and nothing wakes this session. Connect to listen again.</Text> : null}
+      {isSignedOff ? <Text dimColor>Signed off: this session left Orchard, so it is not listening and nothing wakes it. Connect to sign it on again.</Text> : null}
+      {isDisconnected && !isSignedOff ? <Text dimColor>Disconnected: not listening, and nothing wakes this session. Connect to listen again.</Text> : null}
 
       {view.pending.length === 0 ? null : section('section-now', 'NOW')}
       {view.pending.map((line, i) => (

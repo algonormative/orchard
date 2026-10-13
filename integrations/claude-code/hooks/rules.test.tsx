@@ -453,7 +453,7 @@ test('history: open decisions are the ones this participant raised that the owne
   // d1 answered; d4 answered through its follow-up f4; d3 is another participant's; d2 stays open
   expect(openDecisions(messages, ['claude-me'], 'owner').map(m => m.id)).toEqual(['d2'])
   expect(openDecisions(messages, ['claude-other'], 'owner').map(m => m.id)).toEqual(['d3'])
-  // every participant of the list counts: a session's own and the handles its subagents act as
+  // every participant of the list counts: a session's own and the ones its agents signed on as
   expect(openDecisions(messages, ['claude-me', 'claude-other'], 'owner').map(m => m.id)).toEqual(['d2', 'd3'])
   expect(openDecisions([], ['claude-me'], 'owner')).toEqual([])
 })
@@ -486,6 +486,7 @@ test('pinActor: a mutation acts as this participant or is refused; a read is lef
     ['mail_acknowledge', { participant_id: 'owner' }],
     ['task_claim', { participant_id: 'claude-you' }],
     ['task_close', { sender_id: 'owner' }],
+    ['mail_leave', { participant_id: 'owner' }],
     ['mail_send', { sender_id: 'claude-me', participant_id: 'owner' }],
   ] as const) {
     expect(pinActor(tool, args, 'claude-me').ok, tool).toBe(false)
@@ -494,6 +495,7 @@ test('pinActor: a mutation acts as this participant or is refused; a read is lef
   expect(pinActor('mail_send', { body: 'x' }, 'claude-me')).toEqual({ ok: true, value: { body: 'x', sender_id: 'claude-me' } })
   expect(pinActor('task_claim', { participant_id: 'claude-me', task_id: 't' }, 'claude-me')).toEqual({ ok: true, value: { participant_id: 'claude-me', task_id: 't' } })
   expect(pinActor('state_advance', { id: 'x' }, 'claude-me')).toEqual({ ok: true, value: { id: 'x', participant_id: 'claude-me' } })
+  expect(pinActor('mail_leave', { request_id: 'r' }, 'claude-me')).toEqual({ ok: true, value: { request_id: 'r', participant_id: 'claude-me' } })
   expect(pinActor('task_create', { title: 'x' }, 'claude-me')).toEqual({ ok: true, value: { title: 'x' } })
   // reads: the fields are filters
   expect(pinActor('mail_history', { sender_id: 'owner' }, 'claude-me')).toEqual({ ok: true, value: { sender_id: 'owner' } })
@@ -511,7 +513,7 @@ test('pinActor pins the participant nested in a plugin_call role_declare: filled
   expect(own.ok).toBe(true)
   const other = pinActor('plugin_call', call({ participant_id: 'owner' }), 'claude-me')
   expect(other.ok).toBe(false)
-  expect(other.ok ? '' : other.message).toContain("participant_id must be this agent's own participant")
+  expect(other.ok ? '' : other.message).toContain("participant_id must be this session's own participant")
   expect(pinActor('plugin_call', call({ participant_id: 7 }), 'claude-me').ok).toBe(false)
   // reads and the other operations are left as they are
   const read = { plugin_id: 'roles', operation: 'roles_list', arguments: {} }
@@ -519,11 +521,13 @@ test('pinActor pins the participant nested in a plugin_call role_declare: filled
 })
 
 test('parseCall: refused tools say why, plugin_call runs reads only', () => {
-  for (const name of ['artifact_upload', 'mail_register', 'mail_leave']) {
+  for (const name of ['artifact_upload', 'mail_register']) {
     const refused = parseCall({ name, arguments: {} })
     expect(refused.ok).toBe(false)
     expect(refused.ok ? '' : refused.message).toContain(`${name} is not available here`)
   }
+  // signing off is the session's own participant's to do, pinned like any write
+  expect(parseCall({ name: 'mail_leave', arguments: { request_id: 'r' } }).ok).toBe(true)
   expect(parseCall({ name: 'plugin_call', arguments: { plugin_id: 'roles', operation: 'roles_list', arguments: {} } }).ok).toBe(true)
   expect(parseCall({ name: 'plugin_call', arguments: { plugin_id: 'tasks', operation: 'tasks_list', arguments: { store_id: 's' } } }).ok).toBe(true)
   for (const operation of ['task_claim', 'mail_send', 'mail_register', 'artifact_upload', 'state_advance', 'plugin_call', 'plugin_attach', undefined, 7]) {

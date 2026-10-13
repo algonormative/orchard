@@ -4,6 +4,7 @@
 // session's handles. No `$` here; register.tsx makes every call and every write.
 import type { OrchardActivityEntry, OrchardAgent, OrchardAgentStatus, OrchardAgents, OrchardAlert, OrchardPlugins } from '../types'
 import { plain } from './config'
+import type { SignOn, Shown } from './handles'
 import { MUTATING_CALLS, PINNED_PLUGIN_WRITE } from './tools'
 import type { Destination } from './tools'
 
@@ -187,13 +188,13 @@ export function withMain(held: OrchardAgents, patch: { handle?: string; status?:
   const have = held[MAIN]
   const handle = patch.handle ?? have?.handle
   const next: OrchardAgent = {
+    ...have,
     agentId: MAIN,
     description: have?.description ?? 'Claude',
     type: 'main',
     status: patch.status ?? have?.status ?? 'idle',
     startedAt: have?.startedAt ?? now,
     ...(handle === undefined ? {} : { handle }),
-    ...(have?.lastAction === undefined ? {} : { lastAction: have.lastAction }),
   }
   return { ...held, [MAIN]: next }
 }
@@ -201,19 +202,16 @@ export function withMain(held: OrchardAgents, patch: { handle?: string; status?:
 /** A subagent the Agent tool just started. The spawn is a fact; `$.agent.list()` settles the rest. */
 export function withSpawned(held: OrchardAgents, spawn: { agentId: string; description: string; type: string }, now: number): OrchardAgents {
   if (spawn.agentId === MAIN) return held
-  const have = held[spawn.agentId]
+  const { endedAt: _ended, ...have } = held[spawn.agentId] ?? { startedAt: now }
   return {
     ...held,
     [spawn.agentId]: {
+      ...have,
       agentId: spawn.agentId,
       description: line(spawn.description, 80),
       type: line(spawn.type, 40),
       status: 'running',
-      startedAt: have?.startedAt ?? now,
-      ...(have?.handle === undefined ? {} : { handle: have.handle }),
-      ...(have?.observed === undefined ? {} : { observed: have.observed }),
-      ...(have?.sharesBase === undefined ? {} : { sharesBase: have.sharesBase }),
-      ...(have?.lastAction === undefined ? {} : { lastAction: have.lastAction }),
+      startedAt: have.startedAt,
     },
   }
 }
@@ -263,12 +261,34 @@ export function withLastAction(held: OrchardAgents, agentId: string, text: strin
   return agent === undefined ? held : { ...held, [agentId]: { ...agent, lastAction: text } }
 }
 
-/** The table with `as` as the participant `agentId` acts as (flags it did not get are cleared); unchanged when the table does not know the agent. */
-export function withHandle(held: OrchardAgents, agentId: string, as: { handle: string; observed?: true; sharesBase?: true }): OrchardAgents {
-  const agent = held[agentId]
-  if (agent === undefined) return held
-  const { observed: _observed, sharesBase: _sharesBase, ...rest } = agent
-  return { ...held, [agentId]: { ...rest, handle: as.handle, ...(as.observed === undefined ? {} : { observed: true as const }), ...(as.sharesBase === undefined ? {} : { sharesBase: true as const }) } }
+/**
+ * The table with each agent's participant as `acts` has it (a subagent seen doing neither of the two
+ * ways has none; the main loop's is the session's, set at start) and whether Orchard says that
+ * participant is signed on, from `signOn`.
+ */
+export function withHandles(held: OrchardAgents, acts: ReadonlyMap<string, Shown>, signOn: ReadonlyMap<string, SignOn>): OrchardAgents {
+  return Object.fromEntries(
+    Object.entries(held).map(([id, agent]) => {
+      const { handle: _handle, observed: _observed, sharesBase: _sharesBase, signedOn: _signedOn, lastContactAt: _lastContactAt, ...rest } = agent
+      const as: Shown | undefined = id === MAIN ? (agent.handle === undefined ? undefined : { handle: agent.handle }) : acts.get(id)
+      const word = as === undefined ? undefined : signOn.get(as.handle)
+      return [
+        id,
+        {
+          ...rest,
+          ...as,
+          ...(word === undefined ? {} : { signedOn: word.registered, ...(word.lastContactAt === undefined ? {} : { lastContactAt: word.lastContactAt }) }),
+        },
+      ]
+    }),
+  )
+}
+
+/** The subagents that ended between two looks at the table, one the first did not hold included. */
+export function newlyEnded(before: OrchardAgents, after: OrchardAgents): string[] {
+  return Object.values(after)
+    .filter(a => a.agentId !== MAIN && isEnded(a.status) && !(before[a.agentId] !== undefined && isEnded((before[a.agentId] as OrchardAgent).status)))
+    .map(a => a.agentId)
 }
 
 /** Some subagent is in a state that changes by itself. */
