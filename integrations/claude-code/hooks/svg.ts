@@ -121,11 +121,10 @@ export function headerSvg(w: number, args: HeaderArgs): string {
     const { bg, fg } = CHIP_CLASS[args.chip.kind]
     const chipW = Math.ceil(args.chip.label.length * 6.4 + 36)
     const chipX = Math.max(0, w - chipW)
-    const pulse = args.chip.kind === 'listening' || args.chip.kind === 'working' ? '<animate attributeName="opacity" values="1;.35;1" dur="2.4s" repeatCount="indefinite"/>' : ''
     body +=
       `<text x="38" y="82" class="mono dim" font-size="10">${esc(cut(sublineOf(args.participantId), idMax))}</text>` +
       `<g transform="translate(${chipX},52)"><rect width="${chipW}" height="22" rx="11" class="${bg}"/>` +
-      `<circle cx="14" cy="11" r="4" class="${fg}">${pulse}</circle>` +
+      `<circle cx="14" cy="11" r="4" class="${fg}"/>` +
       `<text x="25" y="15" class="mono ${fg}" font-size="10.5">${esc(args.chip.label)}</text></g>`
   }
   return svg(w, height, body)
@@ -151,8 +150,6 @@ export function sectionSvg(w: number, label: string, pill?: string): string {
 
 // ---- footer ----
 
-export const FOOTER_HEIGHT = 28
-
 /** "last poll 4s ago", or nothing before the first poll. */
 export function pollAge(lastPollAt: number | null | undefined, nowMs: number): string | null {
   if (lastPollAt === null || lastPollAt === undefined || !Number.isFinite(lastPollAt) || !Number.isFinite(nowMs)) return null
@@ -163,8 +160,4 @@ export function pollAge(lastPollAt: number | null | undefined, nowMs: number): s
 export function footerText(lastPollAt: number | null | undefined, nowMs: number): string {
   const age = pollAge(lastPollAt, nowMs)
   return `~ ✿ tending the grove${age === null ? '' : ` · last poll ${age}`} ✿ ~`
-}
-
-export function footerSvg(w: number, text: string): string {
-  return svg(w, FOOTER_HEIGHT, `<text x="${w / 2}" y="18" class="mono dim" font-size="9.5" text-anchor="middle">${esc(text)}</text>`)
 }

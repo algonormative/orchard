@@ -10,7 +10,7 @@ import type { Elements, UiPressArgument } from 'claude-code'
 
 import type { OrchardActivityEntry, OrchardAgent, OrchardAgents, OrchardCounts, OrchardNow, OrchardPlugins, OrchardStatus, OrchardView } from '../types'
 import { MAIN, RECENT_MS, agentColor, agentState, isEnded, shortHandle } from './feed'
-import { FOOTER_HEIGHT, PANE_TITLE, SECTION_HEIGHT, chipOf, footerSvg, footerText, headerHeight, headerSvg, sectionSvg, sublineOf, widthOf } from './svg'
+import { PANE_TITLE, SECTION_HEIGHT, chipOf, footerText, headerHeight, headerSvg, sectionSvg, sublineOf, widthOf } from './svg'
 
 export type Table = Pick<Elements['mobile'], 'Box' | 'Text' | 'Button'> & {
   /** Absent on the terminal; the caller also leaves it out where a surface should not draw one. */
@@ -134,8 +134,9 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
   // the drawings are narrower by the two gutters so their rules end where the rows do.
   const bodyW = Math.max(200, w - 2 * GUTTER * PX_PER_CELL)
 
-  const picture = (key: string, source: string, alt: string, height: number, isInteractive = false, width = bodyW) =>
-    Svg === undefined ? null : <Svg key={key} source={source} alt={alt} width={width} height={height} isInteractive={isInteractive} />
+  // Every picture is static: an interactive Svg is a frame the desktop reloads, with a visible flash, on each redraw.
+  const picture = (key: string, source: string, alt: string, height: number, width = bodyW) =>
+    Svg === undefined ? null : <Svg key={key} source={source} alt={alt} width={width} height={height} />
 
   /** A section: its label (the drawn rule and caps on Svg surfaces, a Text line elsewhere) and its rows, one marginTop above. */
   const block = (key: string, label: string, rowsOf: Node[], head?: Node) => (
@@ -215,7 +216,6 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
         headerSvg(bodyW, { workspaceName: view.workspaceName, participantId: me, ...(hasDetail ? { chip } : {}), mood: isConfirming ? 'confirm' : 'normal' }),
         `${isConfirming ? 'Disconnect?' : PANE_TITLE}, workspace ${view.workspaceName || ''}${hasDetail ? `, ${chip.label}` : ''}`.replace(/\s+,/, ','),
         headerHeight(hasDetail ? { chip } : {}),
-        true,
       )
     )
 
@@ -386,7 +386,7 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
       {activitySection}
       {isQuietView ? null : (
         <Box key="footer" marginTop={1} justifyContent="center">
-          {Svg === undefined ? <Text dimColor>{footerText(view.lastPollAt, nowMs)}</Text> : picture('footer', footerSvg(bodyW, footerText(view.lastPollAt, nowMs)), 'Tending the grove', FOOTER_HEIGHT)}
+          {Svg === undefined ? <Text dimColor>{footerText(view.lastPollAt, nowMs)}</Text> : <Text key="footer" dimColor>{footerText(view.lastPollAt, nowMs)}</Text>}
         </Box>
       )}
     </Box>

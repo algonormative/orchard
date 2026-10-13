@@ -746,3 +746,15 @@ test('the band steps aside while the pane is open and comes back when it closes'
   await w.clock.advance(15_000)
   expect(await bandText($, 'desktop')).toMatch(/^◆ Claude in Fruit Stand · /)
 })
+
+test('every picture in the pane is static: an interactive Svg flashes on desktop each time the pane redraws', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  furnish(w)
+  await begin($, w)
+  await w.clock.advance(15_000)
+  const ui = await $.ui.mount({ plugin: 'orchard', surface: 'desktop', component: 'Pane', requestId: 'orchard', props: PANE_PROPS })
+  const svgs = await ui.findAll({ type: 'Svg' })
+  expect(svgs.length).toBeGreaterThan(0)
+  expect(svgs.filter(s => (s.props as { isInteractive?: boolean }).isInteractive === true)).toEqual([])
+  expect(svgs.filter(s => /<animate|last poll/.test(String((s.props as { source?: string }).source)))).toEqual([])
+})
