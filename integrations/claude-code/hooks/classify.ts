@@ -116,7 +116,8 @@ export function parseSettings(value: unknown): Settings {
   }
 }
 
-export const settingsKey = (endpoint: string, participantId: string): string => `settings ${endpoint} ${participantId}`
+/** Settings are kept per base id, shared by every session of the project; the rest of a record is per session handle. */
+export const settingsKey = (endpoint: string, baseId: string): string => `settings ${endpoint} ${baseId}`
 export const participationKey = (endpoint: string, participantId: string): string => `participation ${endpoint} ${participantId}`
 
 /** How many participation ids are kept (the most recent). */

@@ -14,15 +14,13 @@ export type OrchardStatus =
       /** The last write to `$.store` failed (full, or refused): the cursor and settings are not being kept. */
       isStoreFailing?: boolean
     }
-  /** Another session in this folder holds the lease for this participant: this one does not listen. */
-  | { kind: 'shared' }
   /** `failures` counts consecutive failed attempts; the retry delay follows from it (5 s doubling to 5 min). */
   | { kind: 'offline'; failures: number }
   /** Stopped until the person fixes the cause (`/orchard reconnect`). `message` has request ids and paths stripped. */
   | { kind: 'error'; message: string }
-  /** The person disconnected this session (`/orchard disconnect`): no listening, no lease, no wakes, until `/orchard connect`. Never kept across sessions. */
+  /** The person disconnected this session (`/orchard disconnect`): no listening, no wakes, until `/orchard connect`. Never kept across sessions. */
   | { kind: 'disconnected' }
-  /** The session's own participant signed off (the main agent called `mail_leave`): out of the workspace, no listening, no lease, no wakes, until `/orchard connect` signs it on again. Never kept across sessions. */
+  /** The session's own participant signed off (the main agent called `mail_leave`): out of the workspace, no listening, no wakes, until `/orchard connect` signs it on again. Never kept across sessions. */
   | { kind: 'signed-off' }
 
 /** Cached from the workspace when the session connected. `name` is what the band shows. */

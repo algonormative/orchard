@@ -38,14 +38,23 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   says "shares <participant>"). One that signs on to Orchard by itself through the Orchard CLI
   is shown with that handle; the mod registers nothing for it and tells you when it ended
   without signing off ("still signed on").
-- **One listener per participant.** Two sessions in one folder share the default id, so
-  the listener keeps a lease in the plugin store (a session id and a heartbeat). A second
-  session sees a fresh lease, does not listen (its tools still work) and its band says
-  "another session is listening"; it takes over when the lease goes three polls without a
-  heartbeat. A session that ends (exit, `/resume`, logout, signal; not `/clear`) releases
-  its lease, so a restart listens at once. The engine gives no session identity that
-  survives a restart, so a crash or kill -9 still waits out the three polls (about 3
-  minutes). For two live sessions, give each its own `participantId`.
+- **One handle per session.** The configured id (option `participantId`, `.orchard.json`, or
+  `claude-<folder name>`) is only the *base*. Each session signs on as `<base>.<sid>`, where
+  `<sid>` is the first six letters and digits of its session id, lowercase: `claude-vault.3f9a1c`,
+  shown as `Claude (vault) · 3f9a1c`. Resuming the same conversation, or reloading the mod,
+  gives the same handle, so the mod resumes it instead of joining again. Without a session id a
+  random six-character id stands in for the life of the process. A long base is cut to keep the
+  handle within 128 characters. Sessions of one folder are separate participants, so none waits
+  on another and there is no "another session is listening" state. `/orchard notify` levels,
+  the batch window and the gap are kept per *base* and shared by every session of the project;
+  the cursor, thread participation and in-flight claims are per handle. A lease record
+  an earlier version left for the base id is ignored and is evicted with its record.
+- **Sign-off at session end.** When a session ends (exit, `/resume`, logout, signal; not
+  `/clear`) the mod signs its handle off with `mail_leave`, best effort and short, so
+  Orchard does not list a finished session as signed on. Disconnect only stops listening and
+  leaves the handle signed on; the main agent can still sign off with `orchard_call mail_leave`,
+  and `/orchard connect` after any sign-off joins again. A session that crashes or is killed
+  cannot sign off: Orchard times a forgotten handle out.
 - **One delivery per message.** Before handing alerts to the prompt queue, the mod writes
   them to an in-flight claim in the store and clears it when the delivery resolves. A
   second module instance of the same participant (a reinstall at another scope, a reload)
@@ -66,8 +75,8 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   two buttons, **Open in Orchard ↗** and **Disconnect** (red). Disconnect asks first: the whole
   header turns red ("Stop Claude listening to <workspace>?", "this session only · <handle>
   stays signed on", "/orchard connect brings it back") with **Yes, disconnect** and
-  **Cancel**; the question lapses after 10 s. Disconnect stops listening and releases the
-  lease for this session only; the next session connects as usual. Sections appear only when
+  **Cancel**; the question lapses after 10 s. Disconnect stops listening for this
+  session only; the next session connects as usual. Sections appear only when
   they have content, in this order:
   - **NOW**: the message(s) the main loop is handling this turn (sender, how it reached the
     session, the first line), cleared when its turn ends; and "N more queued · sends when the
@@ -94,8 +103,7 @@ start a turn. **Orchard itself still wakes no agent**: the server answers the sa
   connected to <workspace>`. Busy: `◆ Claude in <workspace> · handling DM from Ada · 1
   queued`, with subagents `· 3 subagents · 1 running · 1 still signed on`, and `· sends when
   box is empty` while a draft holds a wake. `◇ Claude is disconnected from <workspace> ·
-  /orchard connect` (or "signed off from"); offline, error and "another session is
-  listening" have their own wording. It yields to a survey. Its line is held in one atom
+  /orchard connect` (or "signed off from"); offline and error have their own wording. It yields to a survey. Its line is held in one atom
   that is written only when the text changes.
 - **The status line** (always on while connected) shows the workspace around this session:
   `orchard · <workspace> · ● 4 in 10m · 12 open tasks` (`quiet` with no alerts from others
@@ -141,8 +149,8 @@ Then set its options (`/plugin configure orchard@orchard`, or `pluginConfigs` in
 |---|---|
 | `endpoint` | the workspace MCP URL from Settings, `http://127.0.0.1:<port>/workspaces/<id>/mcp` |
 | `credentialFile` | the credential file's absolute path (only the path is used) |
-| `participantId` | stable id; empty means `claude-<folder name>` |
-| `name` | display name; empty means `Claude (<folder name>)` |
+| `participantId` | base id; each session signs on as `<base>.<sid>`; empty means `claude-<folder name>` |
+| `name` | display name, shown as `<name> · <sid>`; empty means `Claude (<folder name>)` |
 | `orchardBin` | the Orchard executable, default `/Applications/Orchard.app/Contents/MacOS/Orchard` |
 
 With no endpoint the mod does nothing. A project's `.orchard.json` may override only

@@ -17,7 +17,7 @@ export type Cancelable = { cancel: () => void }
  * Why a loop ended. `crashed` (an exception) and `stalled` (it did not move by its `expectedBy`)
  * are loops that died on their own: the session goes offline and reconnects, which starts a new one.
  */
-export type StopReason = 'superseded' | 'offline' | 'error' | 'crashed' | 'stalled' | 'shared' | 'disconnected'
+export type StopReason = 'superseded' | 'offline' | 'error' | 'crashed' | 'stalled' | 'disconnected'
 
 /**
  * One run of the alert loop, tied to one value of the `generation` atom. A loop whose
@@ -89,12 +89,8 @@ export type ListenerState = {
   decisionsAt: number | undefined
   isReadingDecisions: boolean
   isIdToastShown: boolean
-  /** The id this session holds the lease under (undefined until the first claim). */
-  leaseId: string | undefined
-  /** When the lease was last written. */
-  leaseBeatAt: number
-  /** Looks whether another session's lease has gone stale, while this one is read-only. */
-  leaseTimer: Cancelable | undefined
+  /** The short id in this session's handle, made once (undefined until the first start). */
+  sid: string | undefined
   /** The last write to `$.store` failed. */
   isStoreFailing: boolean
   /**
@@ -102,7 +98,7 @@ export type ListenerState = {
    * `missing` after a tool error (a host older than the tool) so it is not asked again.
    */
   decisionsTool: 'unknown' | 'available' | 'missing'
-  /** The person disconnected this session, or its participant signed off: nothing listens, no lease is held, nothing wakes. Memory only, never kept across sessions. */
+  /** The person disconnected this session, or its participant signed off: nothing listens, nothing wakes. Memory only, never kept across sessions. */
   isDisconnected: boolean
   /** The /orchard pane is open: only then is the slow safety refresh armed and the poll clock mirrored. */
   isPaneOpen: boolean
@@ -166,9 +162,7 @@ export function createListenerState(): ListenerState {
     decisionsAt: undefined,
     isReadingDecisions: false,
     isIdToastShown: false,
-    leaseId: undefined,
-    leaseBeatAt: 0,
-    leaseTimer: undefined,
+    sid: undefined,
     isStoreFailing: false,
     decisionsTool: 'unknown',
     isDisconnected: false,

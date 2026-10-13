@@ -6,7 +6,6 @@ import type { Engine } from 'claude-code/testing'
 
 import { CWD, ENDPOINT, ME, OPTIONS } from './fake-orchard'
 import type { FakeMessage } from './fake-orchard'
-import { leaseKey } from './lease'
 import { bandText, begin, callTool, resumes, typed, world } from './test-world'
 import type { World } from './test-world'
 import type { OrchardActivityEntry, OrchardAgents, OrchardPlugins, OrchardWorkspaceActivity } from '../types'
@@ -441,11 +440,9 @@ test('this session\'s own role, state and task calls refresh the plugins a secon
 
 // ---- Disconnect / Connect ----
 
-test('/orchard disconnect stops the loop and the timers, releases the lease, and wakes for nothing; /orchard connect starts again', { options: OPTIONS }, async ($, on) => {
+test('/orchard disconnect stops the loop and the timers, and wakes for nothing; /orchard connect starts again', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   await begin($, w)
-  const lease = leaseKey(ENDPOINT, ME)
-  expect(w.store.data.has(lease)).toBe(true)
 
   // an alert is pending, inside its batch window
   w.fake.push(direct('d1'), { reasons: ['direct'] })
@@ -455,7 +452,6 @@ test('/orchard disconnect stops the loop and the timers, releases the lease, and
   const out = await $.command.run(RUN('disconnect'))
   expect(out.text).toContain('Disconnected from Orchard')
   expect(w.state.latest.status).toEqual({ kind: 'disconnected' })
-  expect(w.store.data.has(lease)).toBe(false)
   expect((await $.command.run(RUN('disconnect'))).text).toContain('already disconnected')
 
   await w.clock.advance(61_000) // the call in flight when it happened comes back and is dropped
@@ -479,11 +475,10 @@ test('/orchard disconnect stops the loop and the timers, releases the lease, and
   expect(w.fake.calls.length).toBe(everything)
   expect(w.state.latest.status).toEqual({ kind: 'disconnected' })
 
-  // Connect: listening again, the lease is back, and what was pending is delivered
+  // Connect: listening again, and what was pending is delivered
   expect((await $.command.run(RUN('connect'))).text).toBe('Connecting to Orchard…')
   await w.clock.advance(15_000)
   expect(w.state.latest.status).toEqual({ kind: 'connected' })
-  expect(w.store.data.has(lease)).toBe(true)
   expect(calls(w, 'alerts').length).toBeGreaterThan(alerts)
   expect(w.submits.some(s => s.origin !== undefined && JSON.stringify(s).includes('body of d1'))).toBe(true)
   expect((await $.command.run(RUN('connect'))).text).toContain('already connected')
@@ -529,7 +524,6 @@ test('a disconnect is the session\'s own: a new session connects as usual, and t
   await $.session.start({ cwd: CWD, surface: 'terminal', isInteractive: true })
   await w.clock.settle()
   expect(w.state.latest.status).toEqual({ kind: 'connected' })
-  expect(w.store.data.has(leaseKey(ENDPOINT, ME))).toBe(true)
 })
 
 // ---- the session's participant signs off ----
@@ -537,8 +531,6 @@ test('a disconnect is the session\'s own: a new session connects as usual, and t
 test('the main agent signing off with mail_leave stops the session as a Disconnect does, as "signed off"; /orchard connect signs it on again', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   await begin($, w)
-  const lease = leaseKey(ENDPOINT, ME)
-  expect(w.store.data.has(lease)).toBe(true)
   expect(table(w).main?.signedOn).toBe(true)
 
   // an alert is pending, inside its batch window
@@ -558,7 +550,6 @@ test('the main agent signing off with mail_leave stops the session as a Disconne
   // the session is out of the workspace, with a status of its own; Orchard has it signed off
   expect(w.state.latest.status).toEqual({ kind: 'signed-off' })
   expect(await bandText($)).toBe('◇ Claude is signed off from Fruit Stand · /orchard connect')
-  expect(w.store.data.has(lease)).toBe(false)
   expect(table(w).main).toMatchObject({ handle: ME, signedOn: false })
 
   // nothing listens, retries, refreshes or wakes
@@ -589,7 +580,6 @@ test('the main agent signing off with mail_leave stops the session as a Disconne
   expect(w.fake.calls.filter(c => c.cmd === 'join').length).toBe(joins + 1)
   expect(w.fake.isKnown).toBe(true)
   expect(w.state.latest.status).toEqual({ kind: 'connected' })
-  expect(w.store.data.has(lease)).toBe(true)
   expect(table(w).main?.signedOn).toBe(true)
   expect(calls(w, 'alerts').length).toBeGreaterThan(alerts)
   expect(w.submits.some(x => x.origin !== undefined && JSON.stringify(x).includes('body of d1'))).toBe(true)
@@ -614,7 +604,6 @@ test('mail_leave through orchard_call is the session participant\'s alone: anoth
   expect(refused.deny).toContain('Orchard:')
   expect(calls(w, 'mail_leave')).toHaveLength(1)
   expect(w.state.latest.status).toEqual({ kind: 'connected' })
-  expect(w.store.data.has(leaseKey(ENDPOINT, ME))).toBe(true)
   expect(table(w).main?.signedOn).toBe(true)
   // and it still works as the session's participant
   expect((await callTool($, 'orchard_send', { body: 'still here', direct: 'owner' })).deny).toBeUndefined()

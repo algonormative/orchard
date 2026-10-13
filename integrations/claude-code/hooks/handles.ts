@@ -1,5 +1,5 @@
 // What a session's agents are seen acting as in Orchard, as pure functions. The mod creates no
-// identity for an agent and keeps no lease or timer for one: an agent signs itself on and off (the
+// identity for an agent and keeps no timer for one: an agent signs itself on and off (the
 // orchard skill, through the Orchard CLI), or uses this mod's tools, which act as the session's own
 // participant. The mod writes down what it saw and shows it beside what Orchard says of each
 // participant (signed on or not). No `$` here: register.tsx watches the calls and reads Orchard's
@@ -49,11 +49,12 @@ export const isClaudeId = (id: string): boolean => id.startsWith(PROJECT_ID_PREF
 
 /**
  * Records that `agentId` signed on as, or acted as, `id` through the Orchard CLI. The session's own
- * participant (`base`) is the one this mod's tools act as. True when the book learned something.
+ * participant (`base`: the session's handle) is the one this mod's tools act as. True when the book learned something.
  */
 export function observe(book: HandleBook, agentId: string, id: string, base: string): boolean {
   if (id === base) return useTools(book, agentId)
-  if (!isClaudeId(id)) return false
+  // Claude-style ids, and any id under the session's own handle (`<handle>.helper`).
+  if (!isClaudeId(id) && !(id.startsWith(`${base}.`) && !RESERVED_IDS.includes(id.toLowerCase()))) return false
   const entry = entryOf(book, agentId)
   if (entry.observed.includes(id)) return false
   entry.observed.push(id)

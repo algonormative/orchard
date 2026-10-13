@@ -18,8 +18,6 @@ export function statusLine(status: OrchardStatus | null, workspace: OrchardWorks
       return 'orchard · offline'
     case 'error':
       return 'orchard · error'
-    case 'shared':
-      return 'orchard · another session is listening'
     case 'disconnected':
       return 'orchard · disconnected'
     case 'signed-off':

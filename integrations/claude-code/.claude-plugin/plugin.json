@@ -1,7 +1,7 @@
 {
   "name": "orchard",
-  "version": "0.6.0",
-  "description": "Connects a session to an Orchard workspace through the packaged Orchard agent CLI: resumes or joins on start, listens for alerts and wakes an idle session on the messages that matter (notification levels, batching, a minimum gap), carries the rest with the next prompt, acknowledges only after delivery, and offers the model orchard_send, orchard_reply, orchard_ack, orchard_history and orchard_call. Shows a read-only picture of what the session and its subagents are doing in Orchard: a one-line band that stacks with other bands, a status line for the workspace around it, and an /orchard pane that opens itself and grows with activity (the message being handled, claimed tasks, subagents and whether they are signed on, roles, state markers, open decisions, recent activity) with only Open in Orchard, Disconnect / Connect and copy-link as controls. Goes offline and retries when the workspace is unreachable. Workspace content reaches the model framed as data, and the credential never enters model context",
+  "version": "0.6.1",
+  "description": "Connects a session to an Orchard workspace through the packaged Orchard agent CLI: every session signs on as its own handle (<participantId>.<session id>), resumes or joins on start, signs off when the session ends, listens for alerts and wakes an idle session on the messages that matter (notification levels, batching, a minimum gap), carries the rest with the next prompt, acknowledges only after delivery, and offers the model orchard_send, orchard_reply, orchard_ack, orchard_history and orchard_call. Shows a read-only picture of what the session and its subagents are doing in Orchard: a one-line band that stacks with other bands, a status line for the workspace around it, and an /orchard pane that opens itself and grows with activity (the message being handled, claimed tasks, subagents and whether they are signed on, roles, state markers, open decisions, recent activity) with only Open in Orchard, Disconnect / Connect and copy-link as controls. Goes offline and retries when the workspace is unreachable. Workspace content reaches the model framed as data, and the credential never enters model context",
   "author": {
     "name": "algonormative",
     "url": "https://github.com/algonormative"
@@ -26,13 +26,13 @@
     "participantId": {
       "type": "string",
       "title": "Participant id",
-      "description": "Stable identity in the workspace (letters, digits, . _ -). Empty: claude-<name of the session's folder>",
+      "description": "Base identity in the workspace (letters, digits, . _ -); each session signs on as <base>.<session id>. Empty: claude-<name of the session's folder>",
       "default": ""
     },
     "name": {
       "type": "string",
       "title": "Display name",
-      "description": "Name shown to the workspace when joining. Empty: Claude (<name of the session's folder>)",
+      "description": "Name shown to the workspace when joining, followed by the session id. Empty: Claude (<name of the session's folder>)",
       "default": ""
     },
     "orchardBin": {

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { bandLine } from './band'
-import { BIN, CREDENTIAL, CWD, ENDPOINT, ME, OPTIONS } from './fake-orchard'
+import { BIN, CREDENTIAL, CWD, ENDPOINT, ME, OPTIONS, SID } from './fake-orchard'
 import type { Call } from './fake-orchard'
 import { bandText, begin, connectionCalls, expectNoSecrets, resumes, visible, world } from './test-world'
 import type { World } from './test-world'
@@ -100,11 +100,23 @@ test('unknown participant: join with a fresh request id, then the workspace', { 
 
   expect(connectionCalls(w).map(c => c.cmd)).toEqual(['resume', 'join', 'call'])
   const join = w.fake.calls[1] as Call
-  expect(join.argv.slice(0, 7)).toEqual([BIN, 'agent', 'join', '--participant-id', ME, '--name', 'Claude (Fruit Stand)'])
+  expect(join.argv.slice(0, 7)).toEqual([BIN, 'agent', 'join', '--participant-id', ME, '--name', `Claude (Fruit Stand) · ${SID}`])
   expect(join.argv[7]).toBe('--request-id')
   expect(join.argv[8]).toMatch(/^[A-Za-z0-9._-]{1,128}$/)
   expect(w.state.latest.status).toEqual(CONNECTED)
   expectNoSecrets(await visible($, w))
+})
+
+test('the same session again (a resume of the conversation, a reload) is the same handle: resume, never a second join', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  w.fake.isKnown = false
+  await begin($, w)
+  expect(connectionCalls(w).map(c => c.cmd)).toEqual(['resume', 'join', 'call'])
+  // the same session id, a new start: the participant is known now
+  await begin($, w)
+  const entering = w.fake.calls.filter(c => c.cmd === 'resume' || c.cmd === 'join')
+  expect(entering.map(c => c.cmd)).toEqual(['resume', 'join', 'resume'])
+  expect(new Set(entering.map(c => c.argv[c.argv.indexOf('--participant-id') + 1]))).toEqual(new Set([ME]))
 })
 
 test('a join that ended in exit 3 is retried with the same request id', { options: OPTIONS }, async ($, on) => {
@@ -247,8 +259,8 @@ test('.orchard.json overrides participantId and name only', { options: OPTIONS }
   await begin($, w)
 
   const [resume, join] = w.fake.calls as [Call, Call]
-  expect(resume.argv).toEqual([BIN, 'agent', 'resume', '--participant-id', 'claude-ci-bot'])
-  expect(join.argv.slice(0, 7)).toEqual([BIN, 'agent', 'join', '--participant-id', 'claude-ci-bot', '--name', 'CI Bot'])
+  expect(resume.argv).toEqual([BIN, 'agent', 'resume', '--participant-id', `claude-ci-bot.${SID}`])
+  expect(join.argv.slice(0, 7)).toEqual([BIN, 'agent', 'join', '--participant-id', `claude-ci-bot.${SID}`, '--name', `CI Bot · ${SID}`])
   for (const call of w.fake.calls) {
     expect(call.argv[0]).toBe(BIN)
     expect(call.env).toEqual({ ORCHARD_AGENT_ENDPOINT: ENDPOINT, ORCHARD_AGENT_CREDENTIAL_FILE: CREDENTIAL })
@@ -303,8 +315,8 @@ test(
     await begin($, w)
 
     const [resume, join] = w.fake.calls as [Call, Call]
-    expect(resume.argv).toEqual(['/opt/other/Orchard', 'agent', 'resume', '--participant-id', 'agent-7'])
-    expect(join.argv.slice(0, 7)).toEqual(['/opt/other/Orchard', 'agent', 'join', '--participant-id', 'agent-7', '--name', 'Agent Seven'])
+    expect(resume.argv).toEqual(['/opt/other/Orchard', 'agent', 'resume', '--participant-id', `agent-7.${SID}`])
+    expect(join.argv.slice(0, 7)).toEqual(['/opt/other/Orchard', 'agent', 'join', '--participant-id', `agent-7.${SID}`, '--name', `Agent Seven · ${SID}`])
   },
 )
 

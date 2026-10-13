@@ -6,14 +6,14 @@ import type { Engine } from 'claude-code/testing'
 
 import { storeKey } from './alerts'
 import { participationKey, settingsKey } from './classify'
-import { CLAIM_TTL_MS, LEASE_STALE_MS, RECENT_KEY, inflightKey, leaseKey, recordKeys } from './lease'
-import { CREDENTIAL, ENDPOINT, ME, OPTIONS } from './fake-orchard'
+import { CLAIM_TTL_MS, RECENT_KEY, inflightKey, recordKeys } from './lease'
+import { BASE, CREDENTIAL, ENDPOINT, ME, OPTIONS } from './fake-orchard'
 import type { NotifyMode } from './fake-orchard'
-import { HELD_RECHECK_MS, bandText, begin, expectNoSecrets, resumes, typed, visible, world } from './test-world'
+import { HELD_RECHECK_MS, bandText, begin, callTool, expectNoSecrets, resumes, typed, visible, world } from './test-world'
 import type { World, WorldOptions } from './test-world'
 
 const INBOX = storeKey(ENDPOINT, ME)
-const SETTINGS = settingsKey(ENDPOINT, ME)
+const SETTINGS = settingsKey(ENDPOINT, BASE)
 const PARTICIPATION = participationKey(ENDPOINT, ME)
 
 const RECONNECT = { command: 'orchard', args: 'reconnect', origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 100 } }
@@ -1226,31 +1226,67 @@ test('a loop that crashes takes the session offline instead of leaving it lookin
   expect(w.submits[0]?.text).toContain('body of m1')
 })
 
-// ---- one listening session per participant, and a store that stays small ----
+// ---- one handle per session, and a store that stays small ----
 
-const LEASE = leaseKey(ENDPOINT, ME)
+/** What an earlier version kept per base id: nothing reads it any more. */
+const OLD_LEASE = `lease ${ENDPOINT} ${BASE}`
+const leaseKeys = (w: World) => [...w.store.data.keys()].filter(k => k.startsWith('lease '))
 
-test('a second session for the same participant is read-only while the first one beats its lease, and listens once the lease goes stale', { options: OPTIONS }, async ($, on) => {
-  const w = world(on, { store: { [LEASE]: { session: 'the-other-session', at: 0 } } })
+test('an old lease record for the base id is ignored: the session listens as its own handle and writes no lease', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  const held = { session: 'the-other-session', at: await w.clock.now() }
+  w.store.data.set(OLD_LEASE, held)
   await begin($, w)
 
-  expect(alertsCalls(w)).toHaveLength(0)
-  expect(w.state.latest.status).toEqual({ kind: 'shared' })
-  expect(await bandText($)).toBe('◆ Claude in Fruit Stand · another session is listening')
-  await w.clock.advance(100_000)
-  expect(alertsCalls(w)).toHaveLength(0)
-  expect(w.submits).toEqual([])
-  expect(w.store.data.get(LEASE)).toEqual({ session: 'the-other-session', at: 0 })
-
-  // nobody has beaten it for three polls: this session takes it
-  await w.clock.advance(LEASE_STALE_MS)
-  expect(alertsCalls(w).length).toBeGreaterThan(0)
   expect(w.state.latest.status).toEqual({ kind: 'connected' })
-  expect((w.store.data.get(LEASE) as { session: string }).session).not.toBe('the-other-session')
+  expect(alertsCalls(w).length).toBeGreaterThan(0)
+  expect(alertsCalls(w)[0]?.argv).toContain(ME)
+  await w.clock.advance(130_000)
+  expect(w.state.latest.status).toEqual({ kind: 'connected' })
   deliver(w, 'm1')
   await w.clock.settle()
   await w.clock.advance(20_000)
   expect(w.submits).toHaveLength(1)
+  // untouched, and nothing new beside it
+  expect(leaseKeys(w)).toEqual([OLD_LEASE])
+  expect(w.store.data.get(OLD_LEASE)).toEqual(held)
+})
+
+test('an old lease record is forgotten with its record when the store evicts it', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = {}
+  const recent: unknown[] = []
+  for (let i = 1; i <= 60; i++) {
+    const endpoint = `http://127.0.0.1:${9000 + i}/workspaces/w${i}/mcp`
+    store[`lease ${endpoint} claude-old`] = { session: 'x', at: 0 }
+    store[`inbox ${endpoint} claude-old`] = { n: i }
+    recent.push({ endpoint, participantId: 'claude-old', at: i })
+  }
+  store[RECENT_KEY] = recent
+  const w = world(on, { store })
+  await begin($, w)
+  expect(w.store.data.has('lease http://127.0.0.1:9001/workspaces/w1/mcp claude-old')).toBe(false)
+  expect(w.store.data.has('inbox http://127.0.0.1:9001/workspaces/w1/mcp claude-old')).toBe(false)
+  expect(w.store.data.has('lease http://127.0.0.1:9060/workspaces/w60/mcp claude-old')).toBe(true)
+})
+
+test('two sessions of one project are two participants: different session ids, different handles, both listening', { options: OPTIONS }, async ($, on) => {
+  const w = world(on, { sessionId: 'ABCDEF12-0000-4000-8000-000000000000' })
+  await begin($, w)
+  expect(alertsCalls(w)[0]?.argv).toContain(`${BASE}.abcdef`)
+  expect(alertsCalls(w)[0]?.argv).not.toContain(ME)
+  expect(w.state.latest.status).toEqual({ kind: 'connected' })
+})
+
+test('without a session id the handle ends in a random six-character id, kept for the life of the process', { options: OPTIONS }, async ($, on) => {
+  const w = world(on, { sessionId: null })
+  await begin($, w)
+  const first = resumes(w)[0]?.argv ?? []
+  const handle = first[first.indexOf('--participant-id') + 1] ?? ''
+  expect(handle).toMatch(new RegExp(`^${BASE}\\.[a-z0-9]{6}$`))
+  expect(w.state.latest.status).toEqual({ kind: 'connected' })
+  await $.command.run(RECONNECT as never)
+  await w.clock.settle()
+  expect(new Set(resumes(w).map(c => c.argv[c.argv.indexOf('--participant-id') + 1]))).toEqual(new Set([handle]))
 })
 
 const END = (reason: 'clear' | 'prompt_input_exit' | 'resume' | 'other') => ({ reason, sessionId: 'ending', resume: { id: 'ending' } })
@@ -1302,57 +1338,61 @@ test('a delivery claims its ids in the store before the submit and releases them
   expect(w.store.data.get(INBOX)).toMatchObject({ delivered: ['m1'] })
 })
 
-test('session.end releases the lease the session holds, so the next session listens at once', { options: OPTIONS }, async ($, on) => {
+const leaves = (w: World) => w.fake.calls.filter(c => c.tool === 'mail_leave')
+
+test('session.end signs the session\'s handle off with mail_leave', { options: OPTIONS }, async ($, on) => {
   const w = await start($, on)
-  expect(w.store.data.has(LEASE)).toBe(true)
+  expect(w.fake.registered.has(ME)).toBe(true)
 
   await $.session.end(END('prompt_input_exit'))
   await w.clock.settle()
-  expect(w.store.data.has(LEASE)).toBe(false)
+  expect(leaves(w)).toHaveLength(1)
+  expect(JSON.parse(leaves(w)[0]?.stdin ?? '{}')).toMatchObject({ participant_id: ME })
+  expect(w.fake.registered.has(ME)).toBe(false)
+  expect(w.fake.registered.has('claude-other')).toBe(true)
+  // and the loop is stopped
+  const calls = alertsCalls(w).length
+  await w.clock.advance(100_000)
+  expect(alertsCalls(w).length).toBe(calls)
 })
 
-test('session.end after /clear keeps the lease: the same loop goes on', { options: OPTIONS }, async ($, on) => {
+test('session.end after /clear signs nothing off: the same loop goes on', { options: OPTIONS }, async ($, on) => {
   const w = await start($, on)
-  const mine = w.store.data.get(LEASE)
-
   await $.session.end(END('clear'))
   await w.clock.settle()
-  expect(w.store.data.get(LEASE)).toEqual(mine)
+  expect(leaves(w)).toEqual([])
+  expect(w.fake.registered.has(ME)).toBe(true)
 })
 
-test('session.end never releases a lease another session holds', { options: OPTIONS }, async ($, on) => {
-  const w = world(on, { store: { [LEASE]: { session: 'the-other-session', at: 0 } } })
-  await begin($, w)
+test('session.end signs off a disconnected session too (disconnect stays signed on), but not one the model already signed off', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  await $.command.run({ ...RECONNECT, args: 'disconnect' } as never)
+  await w.clock.settle()
+  expect(leaves(w)).toEqual([])
+  expect(w.fake.registered.has(ME)).toBe(true)
   await $.session.end(END('other'))
   await w.clock.settle()
-  expect(w.store.data.get(LEASE)).toEqual({ session: 'the-other-session', at: 0 })
+  expect(leaves(w)).toHaveLength(1)
+  expect(w.fake.registered.has(ME)).toBe(false)
 })
 
-test('a fresh foreign lease keeps a second live session read-only', { options: OPTIONS }, async ($, on) => {
-  const w = world(on)
-  w.store.data.set(LEASE, { session: 'the-other-session', at: await w.clock.now() })
-  await begin($, w)
-  await w.clock.advance(LEASE_STALE_MS - 30_000)
-  expect(w.state.latest.status).toEqual({ kind: 'shared' })
-  expect(alertsCalls(w)).toHaveLength(0)
-})
-
-test('a listening session beats its lease, and stands down when another session has taken it', { options: OPTIONS }, async ($, on) => {
+test('session.end does not sign off twice', { options: OPTIONS }, async ($, on) => {
   const w = await start($, on)
-  const mine = w.store.data.get(LEASE) as { session: string; at: number }
-  expect(typeof mine.session).toBe('string')
-  await w.clock.advance(70_000)
-  expect((w.store.data.get(LEASE) as { at: number }).at).toBeGreaterThan(mine.at)
-  expect(w.state.latest.status).toEqual({ kind: 'connected' })
+  await callTool($, 'orchard_call', { name: 'mail_leave', arguments: {} })
+  await w.clock.settle()
+  expect(leaves(w)).toHaveLength(1)
+  await $.session.end(END('other'))
+  await w.clock.settle()
+  expect(leaves(w)).toHaveLength(1)
+})
 
-  w.store.data.set(LEASE, { session: 'the-other-session', at: await w.clock.now() })
-  await w.clock.advance(130_000)
-  expect(w.state.latest.status).toEqual({ kind: 'shared' })
-  const calls = alertsCalls(w).length
-  deliver(w, 'm1')
-  await w.clock.advance(50_000)
-  expect(alertsCalls(w).length).toBe(calls)
-  expect(w.submits).toEqual([])
+test('session.end with the workspace down ends anyway, and the sign-off call is short', { options: OPTIONS }, async ($, on) => {
+  const w = await start($, on)
+  w.fake.script = call => (call.tool === 'mail_leave' ? 'reject' : undefined)
+  await $.session.end(END('other'))
+  await w.clock.settle()
+  expect(leaves(w)).toHaveLength(1)
+  expect(leaves(w)[0]?.timeoutMs).toBeLessThanOrEqual(10_000)
 })
 
 test('past 50 (endpoint, participant) records the least recently used are evicted from the store, the current one never', { options: OPTIONS }, async ($, on) => {
@@ -1369,14 +1409,15 @@ test('past 50 (endpoint, participant) records the least recently used are evicte
 
   const owners = (key: string) => key.split(' ').slice(1).join(' ')
   const records = new Set([...w.store.data.keys()].filter(k => k !== RECENT_KEY).map(owners))
-  expect(records.size).toBe(50)
+  // the handle's record and the base's (the shared settings) both count as in use
+  expect(records.size).toBe(49)
   expect(records.has(`${ENDPOINT} ${ME}`)).toBe(true)
   expect(w.store.data.has(INBOX)).toBe(true)
   // the newest old ones stay, the oldest go
   expect(records.has('http://127.0.0.1:9060/workspaces/w60/mcp claude-old')).toBe(true)
   expect(records.has('http://127.0.0.1:9001/workspaces/w1/mcp claude-old')).toBe(false)
-  expect(records.has('http://127.0.0.1:9011/workspaces/w11/mcp claude-old')).toBe(false)
-  expect(records.has('http://127.0.0.1:9012/workspaces/w12/mcp claude-old')).toBe(true)
+  expect(records.has('http://127.0.0.1:9012/workspaces/w12/mcp claude-old')).toBe(false)
+  expect(records.has('http://127.0.0.1:9013/workspaces/w13/mcp claude-old')).toBe(true)
 })
 
 test('a failed store write shows in the band, and the band clears once a write goes through', { options: OPTIONS }, async ($, on) => {

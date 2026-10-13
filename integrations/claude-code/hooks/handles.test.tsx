@@ -5,10 +5,9 @@
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { ENDPOINT, ME, OPTIONS } from './fake-orchard'
+import { ENDPOINT, ME, OPTIONS, SID } from './fake-orchard'
 import { newlyEnded, withHandles } from './feed'
 import { MAX_OBSERVED, createBook, hasObserved, observe, observedAs, ownHandles, shownBy, signOnOf, succeeded, useTools } from './handles'
-import { leaseKey } from './lease'
 import { begin, callTool, world } from './test-world'
 import type { World } from './test-world'
 import { RETRY_ADVICE } from './tools'
@@ -505,7 +504,7 @@ test('an agent that ended while still signed on shows it did not sign off; one t
   expect(participantReads(w)).toBe(after)
 })
 
-test('the mod keeps no lease and no timer for an agent: nothing but the session\'s own lease sits in the store, however long the agents run', { options: OPTIONS }, async ($, on) => {
+test('the mod keeps no lease and no timer for an agent: no lease sits in the store at all, however long the agents run', { options: OPTIONS }, async ($, on) => {
   const w = world(on)
   shell(on)
   await begin($, w)
@@ -516,11 +515,25 @@ test('the mod keeps no lease and no timer for an agent: nothing but the session\
   const writes = w.store.writes.length
 
   await w.clock.advance(20 * 60_000)
-  expect(leaseKeys(w)).toEqual([leaseKey(ENDPOINT, ME)])
+  expect(leaseKeys(w)).toEqual([])
   expect(entering(w)).toBe(1)
-  // the writes since are the session's own heartbeat and its place in the stream
+  // the writes since are the session's place in the stream
   expect(w.store.writes.slice(writes).every(x => !/\.sub\d/.test(x.key))).toBe(true)
   expect(table(w)[a]).toMatchObject({ status: 'running', handle: 'claude-helper' })
+})
+
+test('an id under the session\'s own handle is the session\'s even without the claude- prefix; another session\'s handle needs the prefix', { options: { ...OPTIONS, participantId: 'agent-7' } }, async ($, on) => {
+  const w = world(on)
+  const sh = shell(on)
+  await begin($, w)
+  void sh
+  const handle = `agent-7.${SID}`
+  const agentId = await spawn($, 'Helper')
+  await bash($, `${BIN} agent join --participant-id ${handle}.helper --name Helper --request-id r1`, agentId)
+  await bash($, `${BIN} agent join --participant-id agent-7.zzzzzz.helper --name Other --request-id r2`, agentId)
+  await w.clock.settle()
+  expect(table(w)[agentId]).toMatchObject({ handle: `${handle}.helper`, observed: true })
+  expect(table(w).main).toMatchObject({ handle })
 })
 
 // ---- the mod's tools ----
@@ -549,7 +562,7 @@ test('a subagent that uses the mod\'s tools acts as the session\'s participant, 
   expect(feed(w).filter(e => e.direction === 'out').map(e => [e.agentId, e.handle])).toEqual([[a, ME], ['main', ME], [a, ME]])
   // and the mod made nothing for it
   expect(entering(w)).toBe(entered)
-  expect(leaseKeys(w)).toHaveLength(1)
+  expect(leaseKeys(w)).toEqual([])
 })
 
 test('a call the mod refused does not make its agent a user of the session\'s participant', { options: OPTIONS }, async ($, on) => {

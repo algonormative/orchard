@@ -68,8 +68,6 @@ export function bandLine(input: BandInput): BandLine | null {
       return line([...head, { text: ' · ○ offline', tone: 'warn' }], 'warning')
     case 'error':
       return line([...head, { text: ` · error: ${plain(status.message, 120)}`, tone: 'err' }], 'error')
-    case 'shared':
-      return line([...head, dim(' · another session is listening')], 'quiet')
     case 'disconnected':
       return leftLine('disconnected from', name)
     case 'signed-off':

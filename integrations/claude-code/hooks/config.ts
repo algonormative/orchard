@@ -25,7 +25,15 @@ export type Options = {
   name: string
 }
 
-export type Identity = { participantId: string; name: string }
+/**
+ * Who a session is in the workspace. `participantId` is the session's own handle (`<base>.<sid>`);
+ * `baseId` is the configured id every session of the project shares, which keeps the settings.
+ */
+export type Identity = { participantId: string; baseId: string; name: string }
+
+/** Length of the per-session suffix of a handle. */
+export const SID_LENGTH = 6
+const MAX_ID = 128
 
 /** What a participantId in a `.orchard.json` must start with: it cannot name a human participant. */
 export const PROJECT_ID_PREFIX = 'claude-'
@@ -126,10 +134,22 @@ export function defaultName(cwd: string): string {
   return base === '' ? 'Claude' : `Claude (${base})`
 }
 
-/** Project file over option over default. */
-export function resolveIdentity(options: Options, cwd: string, project: ProjectOverrides): Parsed<Identity> {
-  const participantId = project.participantId ?? (options.participantId || defaultParticipantId(cwd))
-  if (!ID.test(participantId)) return fail('participantId must be 1-128 letters, digits, . _ -')
-  const name = plain(project.name ?? (options.name || defaultName(cwd)))
-  return ok({ participantId, name: name === '' ? 'Claude' : name })
+/**
+ * The session's short id: the first six letters and digits of its session id, lowercase.
+ * `fallback` (a random id) stands in when the session id is missing or holds none.
+ */
+export function sessionSid(raw: unknown, fallback: string): string {
+  const clean = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, SID_LENGTH)
+  const sid = typeof raw === 'string' ? clean(raw) : ''
+  return sid === '' ? clean(fallback).padEnd(SID_LENGTH, '0') : sid
+}
+
+/** Project file over option over default is the base; the session's handle is `<base>.<sid>`, the name `<name> · <sid>`. */
+export function resolveIdentity(options: Options, cwd: string, project: ProjectOverrides, sid: string): Parsed<Identity> {
+  const baseId = project.participantId ?? (options.participantId || defaultParticipantId(cwd))
+  if (!ID.test(baseId)) return fail('participantId must be 1-128 letters, digits, . _ -')
+  // The handle has to fit the id rule: a long base gives way to the suffix.
+  const participantId = `${baseId.slice(0, MAX_ID - sid.length - 1)}.${sid}`
+  const name = plain(project.name ?? (options.name || defaultName(cwd)), MAX_NAME - sid.length - 3)
+  return ok({ participantId, baseId, name: `${name === '' ? 'Claude' : name} · ${sid}` })
 }
