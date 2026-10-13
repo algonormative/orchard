@@ -3,7 +3,6 @@
 // store from growing a record for every workspace ever joined. Pure functions, no `$`.
 import { WAIT_SECONDS, storeKey } from './alerts'
 import { participationKey, settingsKey } from './classify'
-import { POOL_SUFFIX } from './handles'
 
 /** A lease no heartbeat has renewed for this long (three polls) is dead; another session may take it. */
 export const LEASE_STALE_MS = 3 * WAIT_SECONDS * 1000
@@ -82,10 +81,7 @@ function refOfKey(key: string): RecordRef | undefined {
   if (prefix === undefined) return undefined
   const rest = key.slice(prefix.length)
   const at = rest.lastIndexOf(' ')
-  if (at <= 0) return undefined
-  const participantId = rest.slice(at + 1)
-  // A subagent slot keeps only its lease, and a lease another session holds must never be evicted to make room.
-  return POOL_SUFFIX.test(participantId) ? undefined : { endpoint: rest.slice(0, at), participantId }
+  return at <= 0 ? undefined : { endpoint: rest.slice(0, at), participantId: rest.slice(at + 1) }
 }
 
 export function parseRecent(value: unknown): Recent[] {

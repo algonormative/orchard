@@ -7,7 +7,7 @@ import type { Engine } from 'claude-code/testing'
 import { CWD, ENDPOINT, ME, OPTIONS } from './fake-orchard'
 import type { FakeMessage } from './fake-orchard'
 import { leaseKey } from './lease'
-import { begin, callTool, resumes, typed, world } from './test-world'
+import { bandText, begin, callTool, resumes, typed, world } from './test-world'
 import type { World } from './test-world'
 import type { OrchardActivityEntry, OrchardAgents, OrchardPlugins, OrchardWorkspaceActivity } from '../types'
 
@@ -305,8 +305,8 @@ test('the pane lists the agents with what each last did, and the activity feed, 
     const all = [...(await ui.findAll({ type: 'Text' })).map(t => String(t.text)), ...(await ui.findAll({ type: 'Svg' })).map(v => String(v.props.alt))].join('\n')
     expect(all, surface).toContain('AGENTS')
     expect(all, surface).toContain('Write the notes')
-    // the subagent used Orchard, so it acts as a handle of its own (the pane draws what the agents table holds)
-    expect(all, surface).toContain(`running · ${ME}.sub1 · Sent to Nick: notes are up`)
+    // the subagent used the mod's tools, which act as the session's participant (the pane draws what the agents table holds)
+    expect(all, surface).toContain(`running · ${ME} · Sent to Nick: notes are up`)
     expect(all, surface).toContain('ACTIVITY')
     expect(all.indexOf('← Other Claude (DM): Thanks, one more thing'), surface).toBeGreaterThan(-1)
     expect(all.indexOf('← Other Claude (DM)'), surface).toBeLessThan(all.indexOf('→ Sent to Nick: notes are up'))
@@ -519,6 +519,94 @@ test('a disconnect is the session\'s own: a new session connects as usual, and t
   await w.clock.settle()
   expect(w.state.latest.status).toEqual({ kind: 'connected' })
   expect(w.store.data.has(leaseKey(ENDPOINT, ME))).toBe(true)
+})
+
+// ---- the session's participant signs off ----
+
+test('the main agent signing off with mail_leave stops the session as a Disconnect does, as "signed off"; /orchard connect signs it on again', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  await begin($, w)
+  const lease = leaseKey(ENDPOINT, ME)
+  expect(w.store.data.has(lease)).toBe(true)
+  expect(table(w).main?.signedOn).toBe(true)
+
+  // an alert is pending, inside its batch window
+  w.fake.push(direct('d1'), { reasons: ['direct'] })
+  await w.clock.settle()
+  expect(w.state.latest.counts).toMatchObject({ unread: 1, forYou: 1 })
+
+  const left = await callTool($, 'orchard_call', { name: 'mail_leave', arguments: {} })
+  expect(left.deny).toBeUndefined()
+  // it went out as the session's participant, with a request id of its own
+  const leaves = calls(w, 'mail_leave').map(c => JSON.parse(c.stdin ?? '{}') as Record<string, unknown>)
+  expect(leaves).toHaveLength(1)
+  expect(leaves[0]).toMatchObject({ participant_id: ME })
+  expect(String(leaves[0]?.request_id)).toMatch(/^orchard-mail-leave-/)
+  expect(w.fake.isKnown).toBe(false)
+
+  // the session is out of the workspace, with a status of its own; Orchard has it signed off
+  expect(w.state.latest.status).toEqual({ kind: 'signed-off' })
+  expect(await bandText($)).toBe('◆ claude-fruit-stand in Fruit Stand · signed off')
+  expect(w.store.data.has(lease)).toBe(false)
+  expect(table(w).main).toMatchObject({ handle: ME, signedOn: false })
+
+  // nothing listens, retries, refreshes or wakes
+  await w.clock.advance(61_000) // the call in flight when it happened comes back and is dropped
+  const alerts = calls(w, 'alerts').length
+  const everything = w.fake.calls.length
+  w.fake.push(direct('d2'), { reasons: ['direct'] })
+  await w.clock.advance(10 * 60_000)
+  expect(calls(w, 'alerts').length).toBe(alerts)
+  expect(w.fake.calls.length).toBe(everything)
+  expect(w.submits).toEqual([])
+  expect(w.fake.acks).toEqual([])
+  expect(w.state.latest.status).toEqual({ kind: 'signed-off' })
+
+  // the model's tools say so and make no call; a turn ending restarts nothing
+  const denied = await callTool($, 'orchard_send', { body: 'hi', direct: 'owner' })
+  expect(String(denied.deny)).toContain('signed off from Orchard')
+  expect(String(denied.deny)).toContain('/orchard connect')
+  await turnEnds($)
+  await w.clock.settle()
+  expect(w.fake.calls.length).toBe(everything)
+  expect(w.state.latest.status).toEqual({ kind: 'signed-off' })
+
+  // Connect signs the participant on again (it is not registered: resume fails, join follows) and listens
+  const joins = w.fake.calls.filter(c => c.cmd === 'join').length
+  expect((await $.command.run(RUN('connect'))).text).toBe('Connecting to Orchard…')
+  await w.clock.advance(15_000)
+  expect(w.fake.calls.filter(c => c.cmd === 'join').length).toBe(joins + 1)
+  expect(w.fake.isKnown).toBe(true)
+  expect(w.state.latest.status).toEqual({ kind: 'connected' })
+  expect(w.store.data.has(lease)).toBe(true)
+  expect(table(w).main?.signedOn).toBe(true)
+  expect(calls(w, 'alerts').length).toBeGreaterThan(alerts)
+  expect(w.submits.some(x => x.origin !== undefined && JSON.stringify(x).includes('body of d1'))).toBe(true)
+  expect(calls(w, 'mail_send')).toHaveLength(0)
+})
+
+test('mail_leave through orchard_call is the session participant\'s alone: another participant, a subagent and a refused call leave the session connected', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  await begin($, w)
+  const { agentId } = await spawn($, 'Helper')
+
+  const other = await callTool($, 'orchard_call', { name: 'mail_leave', arguments: { participant_id: 'claude-other' } })
+  expect(other.deny).toContain("participant_id must be this session's own participant")
+  const sub = await callTool($, 'orchard_call', { name: 'mail_leave', arguments: {}, agentId })
+  expect(sub.deny).toContain('only the main agent may call it')
+  expect(calls(w, 'mail_leave')).toHaveLength(0)
+  expect(w.state.latest.status).toEqual({ kind: 'connected' })
+
+  // the workspace refuses it (the participant is not registered): the session stays as it was
+  w.fake.script = call => (call.tool === 'mail_leave' ? { exitCode: 4, stderr: 'Orchard agent: tool error\n' } : undefined)
+  const refused = await callTool($, 'orchard_call', { name: 'mail_leave', arguments: {} })
+  expect(refused.deny).toContain('Orchard:')
+  expect(calls(w, 'mail_leave')).toHaveLength(1)
+  expect(w.state.latest.status).toEqual({ kind: 'connected' })
+  expect(w.store.data.has(leaseKey(ENDPOINT, ME))).toBe(true)
+  expect(table(w).main?.signedOn).toBe(true)
+  // and it still works as the session's participant
+  expect((await callTool($, 'orchard_send', { body: 'still here', direct: 'owner' })).deny).toBeUndefined()
 })
 
 // ---- old data ----

@@ -44,9 +44,9 @@ import { bandLine } from './band'
 import type { BandTone } from './band'
 import { CLAIM_RECHECK_MS, LEASE_BEAT_MS, LEASE_RECHECK_MS, RECENT_KEY, inflightKey, isHeldByOther, leaseKey, liveClaims, parseClaims, parseLease, parseRecent, planEviction, withoutIds } from './lease'
 import { DEFAULT_SETTINGS, addParticipation, classify, parseParticipation, parseSettings, participationKey, settingsKey } from './classify'
-import { checkConn, parseProjectFile, PROJECT_FILE, PROJECT_ID_PREFIX, RESERVED_IDS, readOptions, resolveIdentity } from './config'
+import { checkConn, parseProjectFile, PROJECT_FILE, readOptions, resolveIdentity } from './config'
 import type { Options, Parsed, ProjectOverrides } from './config'
-import { backoffDelay, connectOnce, createRuntime, enterOnce, track } from './connect'
+import { backoffDelay, connectOnce, createRuntime, track } from './connect'
 import type { Runtime } from './connect'
 import {
   ACTIVITY_KEEP,
@@ -60,7 +60,7 @@ import {
   callNote,
   declaredRoles,
   inboundText,
-  isEnded,
+  newlyEnded,
   nextAgentLook,
   pruned,
   pushActivity,
@@ -72,7 +72,7 @@ import {
   taskRows,
   taskStoreIds,
   touchesPlugins,
-  withHandle,
+  withHandles,
   withLastAction,
   withMain,
   withSpawned,
@@ -81,8 +81,7 @@ import {
 import type { Names, Note } from './feed'
 import { frameData, frameMessages, newNonce } from './frame'
 import type { FrameMessage } from './frame'
-import { POOL_SUFFIX, SHARE_RETRY_MS, actorOf, enteringOf, finished, freeSlots, joinedAs, lingering, markReleased, observe, ownHandles, shareNote, shown, stanceOf, subHandle, subName, touch } from './handles'
-import type { ShareReason } from './handles'
+import { hasObserved, observe, observedAs, ownHandles, shownBy, signOnOf, succeeded, useTools } from './handles'
 import { HISTORY_WINDOW, openDecisions, parseHistory, parseHistoryMessage, parentsOf, participationFrom, rootOf } from './history'
 import type { HistoryMessage } from './history'
 import { RETRY_ID_TTL_MS, createListenerState, deliveryNote, heldNotice, heldStatusLine, stopLoop, toFrameMessage } from './listener'
@@ -269,7 +268,7 @@ async function putCountsShown($: EngineInterface, app: App, change: (current: Or
 
 async function setStatus($: EngineInterface, app: App, next: OrchardStatus) {
   // A disconnected session stays so: an attempt that was already under way must not paint it connected.
-  if (app.ls.isDisconnected && next.kind !== 'disconnected') return
+  if (app.ls.isDisconnected && next.kind !== 'disconnected' && next.kind !== 'signed-off') return
   await putStatusShown($, app, () => next)
 }
 
@@ -363,8 +362,6 @@ async function start($: EngineInterface, app: App, cwd: string) {
   ls.leaseTimer?.cancel()
   ls.leaseTimer = undefined
   stopLoop(ls, 'superseded')
-  // The subagent handles are derived from the identity this start may change: they are claimed again at the next call.
-  await releaseHandles($, app)
   // What the workspace-wide counts are built from lives in memory: they begin again with it.
   ls.othersAt = []
   ls.lastOtherAt = undefined
@@ -428,8 +425,8 @@ async function storeGet($: EngineInterface, key: string): Promise<unknown> {
 
 const connectedStatus = (ls: ListenerState): OrchardStatus => (ls.isStoreFailing ? { kind: 'connected', isStoreFailing: true } : { kind: 'connected' })
 
-/** Writes to `$.store`; false when the store refused. A failure does not stop delivery (the store is a backstop against replay) but the band says so. */
-async function storeSet($: EngineInterface, app: App, key: string, value: unknown): Promise<boolean> {
+/** Writes to `$.store`. A failure does not stop delivery (the store is a backstop against replay) but the band says so. */
+async function storeSet($: EngineInterface, app: App, key: string, value: unknown) {
   let isFailing = false
   try {
     await $.store.set(key, value)
@@ -437,11 +434,9 @@ async function storeSet($: EngineInterface, app: App, key: string, value: unknow
     isFailing = true
   }
   const { ls } = app
-  if (isFailing !== ls.isStoreFailing) {
-    ls.isStoreFailing = isFailing
-    await putStatusShown($, app, current => (current?.kind === 'connected' ? connectedStatus(ls) : current))
-  }
-  return !isFailing
+  if (isFailing === ls.isStoreFailing) return
+  ls.isStoreFailing = isFailing
+  await putStatusShown($, app, current => (current?.kind === 'connected' ? connectedStatus(ls) : current))
 }
 
 /** Reads the lease of this connection. */
@@ -631,13 +626,13 @@ async function readWindow($: EngineInterface, app: App): Promise<Window> {
 }
 
 /**
- * The decisions that any of `handles` (the session's participant, the handles its subagents act as)
- * raised and the owner has not answered, as the host lists them over the whole history
- * (`workspace_decisions`). The host narrows its list to one sender at most: asking it per handle
- * would be a call for each of up to a few dozen, so it is asked once, for every sender, and the
- * list kept to `handles` here. Undefined when the host cannot say (it has no such tool, or the call
- * failed): the caller then reconstructs from the history window. A tool error is taken to mean an
- * older host and remembered for the connection; a lost connection is not.
+ * The decisions that any of `handles` (the session's participant and the ones its agents signed on
+ * as) raised and the owner has not answered, as the host lists them over the whole history
+ * (`workspace_decisions`). The host narrows its list to one sender at most, and a call for each
+ * handle is more than the list is worth: it is asked once, for every sender, and the list kept to
+ * `handles` here. Undefined when the host cannot say (it has no such tool, or the call failed): the
+ * caller then reconstructs from the history window. A tool error is taken to mean an older host and
+ * remembered for the connection; a lost connection is not.
  */
 async function listedDecisions($: EngineInterface, app: App, handles: readonly string[]): Promise<unknown[] | undefined> {
   const { ls } = app
@@ -1273,15 +1268,10 @@ async function runNotify($: EngineInterface, app: App, rest: string): Promise<st
 
 // ---- what this session's agents do in Orchard, and what the workspace does around it ----
 
-/** The participants this session acts as: the connection's own, the handles its subagents hold, the ones they joined as themselves. */
+/** The participants of this session: the connection's own, and every one its agents were seen signing on as. */
 function myHandles(app: App): string[] {
   const me = app.rt.current?.identity.participantId
-  return me === undefined ? [] : ownHandles(me, app.ls.subs)
-}
-
-/** The participant an agent of this session acts as: its pooled handle once it has one, else the session's own. */
-function handleOf(app: App, agentId: string | undefined): string {
-  return actorOf(app.rt.current?.identity.participantId ?? '', app.ls.subs, agentId)
+  return me === undefined ? [] : ownHandles(me, app.ls.handles)
 }
 
 /** Names for the sentences of the feed: the directory's where it knows one, the id where it does not. */
@@ -1311,8 +1301,7 @@ function refHref(endpoint: string, ref: NonNullable<Note['ref']>): string | null
 async function logOutbound(
   $: EngineInterface,
   app: App,
-  agentId: string | undefined,
-  handle: string,
+  caller: Caller,
   make: (names: Names) => Note | undefined,
   wanted: { people?: readonly string[]; channel?: string } = {},
 ) {
@@ -1324,12 +1313,11 @@ async function logOutbound(
     if (wanted.channel !== undefined && !ls.channels.some(c => c.id === wanted.channel)) await loadChannels($, app)
     const note = make(namesOf(app))
     if (note === undefined) return
-    const actor = agentId ?? MAIN
     const href = note.ref === undefined ? null : refHref(here.conn.endpoint, note.ref)
     await recordActivity($, app, {
       at: await $.clock.now(),
-      agentId: actor,
-      handle,
+      agentId: caller.agentId ?? MAIN,
+      handle: caller.as,
       direction: 'out',
       kind: note.kind,
       text: note.text,
@@ -1355,8 +1343,7 @@ async function noteArrivals($: EngineInterface, app: App, alerts: readonly Orcha
   const fresh = alerts.filter(a => !done.has(a.id))
   if (fresh.length === 0) return
   ls.seenAlerts = remember(ls.seenAlerts, fresh.map(a => a.id))
-  // A handle given back a moment ago may still have a message on its way in.
-  const mine = new Set([...myHandles(app), ...lingering(app.ls.subs, await $.clock.now())])
+  const mine = new Set(myHandles(app))
   const others = fresh.filter(a => !mine.has(a.senderId) && !isReceipt(a))
   await followOthers($, app, others.map(a => a.arrivedAt))
   const reaching = new Set(kept.map(a => a.id))
@@ -1366,7 +1353,7 @@ async function noteArrivals($: EngineInterface, app: App, alerts: readonly Orcha
     await recordActivity($, app, {
       at: alert.arrivedAt,
       agentId: MAIN,
-      handle: handleOf(app, MAIN),
+      handle: here.identity.participantId,
       direction: 'in',
       kind: alert.kind,
       text: inboundText(alert),
@@ -1411,11 +1398,14 @@ async function lookAtAgents($: EngineInterface, app: App, isForced = false) {
   ls.agentTimer?.cancel()
   ls.agentTimer = undefined
   try {
-    const listed = isForced || anyMoving(await read($, agents)) ? await $.agent.list() : undefined
+    const before = await read($, agents)
+    const listed = isForced || anyMoving(before) ? await $.agent.list() : undefined
     const now = await $.clock.now()
     await putAgents($, held => (listed === undefined ? pruned(held, now) : reconciled(held, listed, now)))
-    // An agent that ended gives its handle back.
-    await sweepHandles($, app)
+    // A row the table has only now carries what the book knows of its agent.
+    await showHandles($, app)
+    // An agent that signed on as itself may have signed off before it ended: Orchard says which, soon.
+    if (newlyEnded(before, await read($, agents)).some(id => hasObserved(app.ls.handles, id))) detach(askRefresh($, app, 'soon'))
   } catch {
     // A list that will not come is asked for again at the next look.
   }
@@ -1442,293 +1432,57 @@ async function setMainStatus($: EngineInterface, app: App, status: 'running' | '
   await putAgents($, held => withMain(held, { status }, now))
 }
 
-// ---- the participants this session's subagents act as ----
+// ---- the participants this session's agents act as ----
+
+/** The agents table shows what each agent was seen acting as, and whether Orchard has it signed on. */
+async function showHandles($: EngineInterface, app: App) {
+  const base = app.rt.current?.identity.participantId
+  if (base === undefined) return
+  const { handles } = app.ls
+  await putAgents($, held => withHandles(held, shownBy(base, handles), handles.signOn))
+}
 
 /**
- * The participant a call acts as, for the agent making it. The main loop acts as the session. A
- * subagent gets a handle of its own at its first Orchard call and keeps it until it ends (handles.ts
- * has the rules). Nothing here may fail the call: whatever goes wrong with the handle, the agent
- * acts as the session.
+ * A Bash command of an agent that signed on or acted as a participant through the Orchard CLI (the
+ * orchard skill does), seen once it has run and succeeded. The mod registers nothing for that
+ * participant, holds no lease for it and pins no call to it: it shows it as the agent's and counts it
+ * as the session's. Only Claude-style ids are taken (handles.ts).
  */
-async function actorFor($: EngineInterface, app: App, agentId: string | undefined): Promise<string> {
-  const { ls } = app
-  const base = app.rt.current?.identity.participantId ?? ''
-  if (agentId === undefined || agentId === MAIN || base === '') return base
+async function noteObserved($: EngineInterface, app: App, agentId: string, command: string) {
   try {
-    // A claim that ends stale (the session started over under it) has given back what it took, and the session is
-    // still connected: the call claims once more, once, rather than act as the session for the rest of the call.
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const now = await $.clock.now()
-      if (stanceOf(touch(ls.subs, agentId, now), now) !== 'try') break
-      const epoch = ls.subs.epoch
-      await claimOnce($, app, agentId)
-      if (ls.subs.epoch === epoch || ls.isDisconnected) break
-    }
+    const base = app.rt.current?.identity.participantId
+    if (base === undefined) return
+    let isNews = false
+    for (const id of observedAs(command)) isNews = observe(app.ls.handles, agentId, id, base) || isNews
+    if (!isNews) return
+    await showHandles($, app)
+    // A participant new to the session: what it holds, and whether it is signed on, are read soon.
+    detach(askRefresh($, app, 'soon'))
   } catch {
-    // The handle is bookkeeping; the call goes on as the session.
+    // Watching is a courtesy; the command has run either way.
   }
-  return handleOf(app, agentId)
 }
 
-/**
- * One claim per agent at a time: a second call of an agent whose claim is running waits for it and gets its answer.
- * releaseHandles forgets the claims running, so a call after a restart of the pool starts a claim of its own.
- */
-function claimOnce($: EngineInterface, app: App, agentId: string): Promise<void> {
-  const { subClaims } = app.ls
-  const running = subClaims.get(agentId)
-  if (running !== undefined) return running
-  const work: Promise<void> = claimHandle($, app, agentId)
-    .catch(() => undefined)
-    .finally(() => {
-      // Not a claim that took this one's place after the pool was restarted.
-      if (subClaims.get(agentId) === work) subClaims.delete(agentId)
-    })
-  subClaims.set(agentId, work)
-  return work
-}
-
-/**
- * Takes a pooled handle for the agent: a slot no other session holds, its lease, then resume (join
- * the first time). Any failure, or a full pool, leaves the agent acting as the session.
- */
-async function claimHandle($: EngineInterface, app: App, agentId: string) {
-  const { rt, ls } = app
-  const here = rt.current
-  const book = ls.subs
-  if (here === undefined || ls.isDisconnected) return
-  const epoch = book.epoch
-  // Disconnected or started over while this ran: whatever it took is given back.
-  const isStale = () => book.epoch !== epoch || ls.isDisconnected
-  let held: { slot: number; handle: string } | undefined
+/** A subagent used the mod's tools, which act as the session's own participant: the table says it shares it. */
+async function noteSharing($: EngineInterface, app: App, agentId: string) {
   try {
-    // An agent the table does not know yet (a forked skill's), or whose row says it ended (a message may have resumed it),
-    // is looked for in the engine's list once, so its end, or its running again, is seen.
-    const row = (await read($, agents))[agentId]
-    if (row === undefined || isEnded(row.status)) await lookAtAgents($, app, true)
-    const slot = await takeSlot($, app, agentId)
-    if (typeof slot !== 'number') return await fallBack($, app, agentId, slot)
-    held = { slot, handle: subHandle(here.identity.participantId, slot) }
-    const identity = { participantId: held.handle, name: subName(here.identity.name, slot) }
-    const entered = await enterOnce(runner($), enteringOf(book, held.handle), here.conn, identity)
-    const entry = book.agents.get(agentId)
-    if (entered.exitCode !== EXIT_OK || entry === undefined || isStale()) {
-      await giveBack($, app, held, true)
-      held = undefined
-      if (entered.exitCode !== EXIT_OK) await fallBack($, app, agentId, 'failed')
-      return
-    }
-    entry.pooled = held
-    entry.sharedUntil = undefined
-    entry.isNoted = false
-    held = undefined
-    ls.names.set(identity.participantId, identity.name)
-    armHandles($, app)
-    try {
-      await showHandle($, app, agentId)
-    } catch {
-      // The table is a courtesy; the handle is held.
-    }
+    if (useTools(app.ls.handles, agentId)) await showHandles($, app)
   } catch {
-    try {
-      if (held !== undefined) await giveBack($, app, held, true)
-      await fallBack($, app, agentId, 'failed')
-    } catch {
-      // The agent acts as the session either way.
-    }
+    // The table is a courtesy; the call has been answered.
   }
 }
 
 /**
- * Reserves the lowest slot no other session holds and takes its lease, true to lease.ts: a lease
- * another session beat recently keeps the slot; this session's own, or a stale one, does not. The
- * write is read back, because two sessions can write together and the store is the only thing they
- * share; one that lost the race is found at the next beat (beatHandles). Otherwise why there is none:
- * `full` when no slot is free, `failed` when the store would not keep a lease.
+ * What Orchard says of the participants of this session (`mail_participants`): signed on or not, and
+ * when each last made contact. One read; a read that fails keeps what was known.
  */
-async function takeSlot($: EngineInterface, app: App, agentId: string): Promise<number | 'full' | 'failed'> {
-  const { rt, ls } = app
-  const here = rt.current
-  if (here === undefined) return 'full'
-  const { endpoint } = here.conn
-  const book = ls.subs
-  let isRefused = false
-  for (const slot of freeSlots(book)) {
-    if (book.slots.has(slot)) continue
-    // Reserved before anything is awaited: an agent racing for the same slot passes it by.
-    book.slots.set(slot, agentId)
-    let isTaken = false
-    try {
-      const key = leaseKey(endpoint, subHandle(here.identity.participantId, slot))
-      const now = await $.clock.now()
-      const holder = await leaseHolder($, ls)
-      if (isHeldByOther(parseLease(await storeGet($, key)), holder, now)) continue
-      if (!(await storeSet($, app, key, { session: holder, at: now }))) isRefused = true
-      if (parseLease(await storeGet($, key))?.session !== holder) continue
-      isTaken = true
-      return slot
-    } finally {
-      if (!isTaken) book.slots.delete(slot)
-    }
-  }
-  return isRefused ? 'failed' : 'full'
-}
-
-/**
- * A handle goes back to the pool: its lease is deleted if it is still this session's, and only then
- * is the slot free for another agent here (one that took it sooner would have its fresh lease deleted).
- */
-async function giveBack($: EngineInterface, app: App, held: { slot: number; handle: string }, isOurs: boolean) {
-  const { rt, ls } = app
-  try {
-    const here = rt.current
-    if (isOurs && here !== undefined) {
-      const key = leaseKey(here.conn.endpoint, held.handle)
-      if (parseLease(await storeGet($, key))?.session === (await leaseHolder($, ls))) {
-        try {
-          await $.store.delete(key)
-        } catch {
-          // The lease then goes stale on its own.
-        }
-      }
-    }
-  } finally {
-    ls.subs.slots.delete(held.slot)
-  }
-}
-
-/** The agent acts as the session for now, and asks for a handle again no sooner than a minute from now. The feed says so once. */
-async function fallBack($: EngineInterface, app: App, agentId: string, reason: ShareReason) {
-  const entry = app.ls.subs.agents.get(agentId)
-  if (entry === undefined) return
-  const now = await $.clock.now()
-  entry.sharedUntil = now + SHARE_RETRY_MS
-  const isFirst = !entry.isNoted
-  entry.isNoted = true
-  await showHandle($, app, agentId)
-  if (!isFirst) return
-  // Not through recordActivity: this is the mod's note, not the agent's last action.
-  const text = shareNote(reason)
-  await putActivity($, feed => pushActivity(feed, { at: now, agentId, handle: app.rt.current?.identity.participantId ?? '', direction: 'out', kind: 'handle', text }, ACTIVITY_KEEP))
-}
-
-/** The agents table shows the participant the agent acts as. */
-async function showHandle($: EngineInterface, app: App, agentId: string) {
-  const entry = app.ls.subs.agents.get(agentId)
-  const as = entry === undefined ? undefined : shown(app.rt.current?.identity.participantId ?? '', entry)
-  if (as !== undefined) await putAgents($, held => withHandle(held, agentId, as))
-}
-
-/** An agent that ended (or that nothing will ever say ended) gives its handle back. */
-async function sweepHandles($: EngineInterface, app: App) {
-  const book = app.ls.subs
-  if (book.agents.size === 0) return
-  for (const agentId of finished(book, await read($, agents), await $.clock.now())) await forgetAgent($, app, agentId)
-}
-
-async function forgetAgent($: EngineInterface, app: App, agentId: string) {
-  const book = app.ls.subs
-  const entry = book.agents.get(agentId)
-  if (entry === undefined) return
-  const held = entry.pooled
-  entry.pooled = undefined
-  book.agents.delete(agentId)
-  markReleased(book, [...(held === undefined ? [] : [held.handle]), ...entry.observed], await $.clock.now())
-  if (held === undefined) return
-  await giveBack($, app, held, true)
-  // The tasks and roles it held no longer count as this session's.
-  detach(askRefresh($, app, 'soon'))
-}
-
-/**
- * session.end, Disconnect, a start over: every handle goes back, and a claim still running undoes itself.
- * Nothing is awaited before no call is pinned to a handle and no beat may renew its lease any more.
- */
-async function releaseHandles($: EngineInterface, app: App) {
-  const { ls } = app
-  const book = ls.subs
-  book.epoch += 1
-  ls.subTimer?.cancel()
-  ls.subTimer = undefined
-  const held: { slot: number; handle: string }[] = []
-  const joined: string[] = []
-  for (const entry of book.agents.values()) {
-    if (entry.pooled !== undefined) held.push(entry.pooled)
-    joined.push(...entry.observed)
-    entry.pooled = undefined
-  }
-  book.agents.clear()
-  // A claim that began before this is not joined by a call after it: that call claims on its own.
-  ls.subClaims.clear()
-  markReleased(book, [...held.map(h => h.handle), ...joined], await $.clock.now())
-  for (const handle of held) await giveBack($, app, handle, true)
-}
-
-/** Keeps the timer going while the book holds anything: one beat of the leases, then the next. */
-function armHandles($: EngineInterface, app: App) {
-  const { ls } = app
-  if (ls.subTimer !== undefined || ls.isDisconnected || ls.subs.agents.size === 0) return
-  ls.subTimer = $.clock.after(LEASE_BEAT_MS, () => {
-    detach(beatHandles($, app))
-  })
-}
-
-/**
- * Renews the held leases the way the session's own is renewed, and lets go of the handles of agents
- * that ended. A lease another session now holds (two wrote together) is not renewed: its agent goes
- * back to acting as the session, as a listener that finds another's lease stands down.
- */
-async function beatHandles($: EngineInterface, app: App) {
-  const { rt, ls } = app
-  ls.subTimer = undefined
-  try {
-    const here = rt.current
-    if (here === undefined || ls.isDisconnected) return
-    await sweepHandles($, app)
-    const holder = await leaseHolder($, ls)
-    const now = await $.clock.now()
-    for (const [agentId, entry] of [...ls.subs.agents]) {
-      const held = entry.pooled
-      if (held === undefined) continue
-      const key = leaseKey(here.conn.endpoint, held.handle)
-      const lease = parseLease(await storeGet($, key))
-      // Given back while the lease was read (its agent ended, the session did): not renewed, or it would outlive the slot.
-      if (entry.pooled !== held || ls.isDisconnected) continue
-      if (isHeldByOther(lease, holder, now)) {
-        entry.pooled = undefined
-        markReleased(ls.subs, [held.handle], now)
-        await giveBack($, app, held, false)
-        // Not for an agent let go, or a new one in its place, while the slot was given back.
-        if (ls.subs.agents.get(agentId) === entry) await fallBack($, app, agentId, 'taken')
-      } else {
-        await storeSet($, app, key, { session: holder, at: now })
-      }
-    }
-  } catch {
-    // The next beat tries again.
-  } finally {
-    armHandles($, app)
-  }
-}
-
-/**
- * A subagent's Bash command that joins or resumes as a participant through the Orchard CLI (the
- * orchard skill does): that participant is shown as the agent's and counted as the session's.
- * Nothing is registered, leased or pinned for it. Like a participantId in .orchard.json, a name the
- * model wrote must not be a human's: only Claude-style ids are taken, never the owner's or a pooled one.
- */
-async function noteJoined($: EngineInterface, app: App, agentId: string, command: unknown) {
-  try {
-    const me = app.rt.current?.identity.participantId
-    const id = typeof command === 'string' ? joinedAs(command) : undefined
-    if (me === undefined || id === undefined || agentId === MAIN || app.ls.isDisconnected || id === me) return
-    if (!id.startsWith(PROJECT_ID_PREFIX) || RESERVED_IDS.includes(id.toLowerCase()) || POOL_SUFFIX.test(id)) return
-    if (!observe(app.ls.subs, agentId, id, await $.clock.now())) return
-    await showHandle($, app, agentId)
-    armHandles($, app)
-  } catch {
-    // Watching is a courtesy; the command runs either way.
-  }
+async function readSignOn($: EngineInterface, app: App) {
+  const result = await tool($, app.rt, 'mail_participants', {})
+  if (result.exitCode !== EXIT_OK) return
+  const known = signOnOf(result.json, myHandles(app))
+  if (known === undefined) return
+  app.ls.handles.signOn = known
+  await showHandles($, app)
 }
 
 // ---- tasks and plugins, kept current ----
@@ -1865,6 +1619,7 @@ async function refreshWorkspace($: EngineInterface, app: App, known?: unknown) {
       if (answer.exitCode !== EXIT_OK) return
       info = answer.json
     }
+    await readSignOn($, app)
     const handles = myHandles(app)
     const storeIds = taskStoreIds(info)
     const attached = attachedPluginIds(info)
@@ -1927,9 +1682,10 @@ async function openInOrchard($: EngineInterface, href: string) {
 /**
  * Disconnect: this session stops listening, lets go of the lease and wakes for nothing, until
  * Connect. Everything that would call the workspace on its own goes: the loop and its watchdog, the
- * retry, the flush and hold timers, the refresh timers. Memory only; the next session connects as usual.
+ * retry, the flush and hold timers, the refresh timers. Memory only; the next session connects as
+ * usual. `to` is the status it stops in: `signed-off` when its participant left the workspace itself.
  */
-async function disconnect($: EngineInterface, app: App) {
+async function disconnect($: EngineInterface, app: App, to: OrchardStatus = { kind: 'disconnected' }) {
   const { rt, ls } = app
   if (ls.isDisconnected) return
   ls.isDisconnected = true
@@ -1949,9 +1705,8 @@ async function disconnect($: EngineInterface, app: App) {
   ls.lastOtherAt = undefined
   endHold($, app)
   await releaseLease($, app)
-  await releaseHandles($, app)
   await putWorkspaceActivity($, () => EMPTY_WORKSPACE_ACTIVITY)
-  await setStatus($, app, { kind: 'disconnected' })
+  await setStatus($, app, to)
 }
 
 /** Connect: a disconnected session starts again as at session start. False when it was not disconnected. */
@@ -1973,9 +1728,13 @@ function paneHandlers($: EngineInterface, app: App): PaneHandlers {
 
 type ToolAnswer = { result: string } | { deny: string }
 
+/** Who a tool call is for: the agent making it (undefined: the main loop) and the participant it acts as, which for every agent is the session's own. */
+type Caller = { agentId: string | undefined; as: string }
+
 const denied = (message: string): ToolAnswer => ({ deny: `Orchard: ${message}` })
 
 const DISCONNECTED = 'this session is disconnected from Orchard; /orchard connect puts it back'
+const SIGNED_OFF = 'this session signed off from Orchard; /orchard connect signs it on again'
 
 /** The secrets of this connection, for scrubbing anything the model is about to read. */
 function secretsOf(app: App): string[] {
@@ -2025,17 +1784,17 @@ const messageIdOf = (result: CliResult): string | undefined => {
   return typeof id === 'string' ? id : undefined
 }
 
-/** `as` is the participant the message is sent as: the caller's handle, so two agents sending the same words are two messages. */
+/** The message goes out as the caller's participant. The caller is part of what makes a retry "the same call", so two agents sending the same words are two messages. */
 async function sendMessage(
   $: EngineInterface,
   app: App,
   label: string,
-  as: string,
+  caller: Caller,
   identity: unknown,
   message: Record<string, unknown>,
 ): Promise<{ result: CliResult; id: string | undefined }> {
-  const result = await mutate($, app, label, { as, identity }, requestId =>
-    tool($, app.rt, 'mail_send', { ...message, request_id: requestId, sender_id: as }, { scrub: [requestId, as] }),
+  const result = await mutate($, app, label, { caller, identity }, requestId =>
+    tool($, app.rt, 'mail_send', { ...message, request_id: requestId, sender_id: caller.as }, { scrub: [requestId] }),
   )
   return { result, id: messageIdOf(result) }
 }
@@ -2043,22 +1802,22 @@ async function sendMessage(
 /** The destination's participant, when it is a direct message: the name to look up for the feed. */
 const directTo = (destination: { kind: string; id?: string }): string[] => (destination.kind === 'direct' && destination.id !== undefined ? [destination.id] : [])
 
-async function answerSend($: EngineInterface, app: App, input: unknown, agentId: string | undefined, as: string): Promise<ToolAnswer> {
+async function answerSend($: EngineInterface, app: App, input: unknown, caller: Caller): Promise<ToolAnswer> {
   const parsed = parseSend(input)
   if (!parsed.ok) return denied(parsed.message)
   const { destination, body } = parsed.value
-  const { result, id } = await sendMessage($, app, 'send', as, parsed.value, { destination, body })
+  const { result, id } = await sendMessage($, app, 'send', caller, parsed.value, { destination, body })
   if (result.exitCode !== EXIT_OK) return failureAnswer(app, result)
-  // A message the session starts is a thread it is in: the listener is the session's, whichever of its agents sent it.
+  // A message this participant starts is a thread it is in.
   if (id !== undefined) await noteParticipation($, app, [id])
-  await logOutbound($, app, agentId, as, names => sendNote(destination, body, names, id), {
+  await logOutbound($, app, caller, names => sendNote(destination, body, names, id), {
     people: directTo(destination),
     ...(destination.kind === 'channel' ? { channel: destination.id } : {}),
   })
   return { result: `Sent${id === undefined ? '' : `. message_id: ${id}`}` }
 }
 
-async function answerReply($: EngineInterface, app: App, input: unknown, agentId: string | undefined, as: string): Promise<ToolAnswer> {
+async function answerReply($: EngineInterface, app: App, input: unknown, caller: Caller): Promise<ToolAnswer> {
   const parsed = parseReply(input)
   if (!parsed.ok) return denied(parsed.message)
   const window = await readWindow($, app)
@@ -2066,36 +1825,35 @@ async function answerReply($: EngineInterface, app: App, input: unknown, agentId
   if (window.kind === 'failed') return denied(clean(app, window.message))
   const target = window.messages.find(m => m.id === parsed.value.messageId)
   if (target === undefined) return denied('that message is not among the recent messages; send with orchard_send instead')
-  // A message this agent sent goes where it went; one from anyone else, the session's own participant included, is answered directly to its sender.
-  const destination = replyDestination(target, as)
+  const destination = replyDestination(target, caller.as)
   if (destination === undefined) return denied('that message has no one to reply to; send with orchard_send instead')
 
-  const { result, id } = await sendMessage($, app, 'reply', as, parsed.value, {
+  const { result, id } = await sendMessage($, app, 'reply', caller, parsed.value, {
     destination,
     body: parsed.value.body,
     thread_id: target.id,
   })
   if (result.exitCode !== EXIT_OK) return failureAnswer(app, result)
-  // Posting in a thread makes it one the session is in: everything in the window under the same root.
+  // Posting in a thread makes it one this participant is in: everything in the window under the same root.
   const parents = parentsOf(window.messages)
   const root = rootOf(target.id, parents)
   const thread = window.messages.filter(m => rootOf(m.id, parents) === root).map(m => m.id)
   await noteParticipation($, app, id === undefined ? thread : [...thread, id])
-  await logOutbound($, app, agentId, as, names => replyNote(names.person(target.senderId), parsed.value.body, id, target.id), { people: [target.senderId] })
+  await logOutbound($, app, caller, names => replyNote(names.person(target.senderId), parsed.value.body, id, target.id), { people: [target.senderId] })
   return { result: `Replied${id === undefined ? '' : `. message_id: ${id}`}` }
 }
 
-async function answerAck($: EngineInterface, app: App, input: unknown, agentId: string | undefined, as: string): Promise<ToolAnswer> {
+async function answerAck($: EngineInterface, app: App, input: unknown, caller: Caller): Promise<ToolAnswer> {
   const parsed = parseAck(input)
   if (!parsed.ok) return denied(parsed.message)
-  const result = await mutate($, app, 'ack', { as, ...parsed.value }, requestId => {
-    const args = ['ack', '--participant-id', as]
+  const result = await mutate($, app, 'ack', { caller, ...parsed.value }, requestId => {
+    const args = ['ack', '--participant-id', caller.as]
     for (const id of parsed.value.messageIds) args.push('--message-id', id)
     args.push('--request-id', requestId)
-    return cli($, app.rt, args, { scrub: [requestId, as] })
+    return cli($, app.rt, args, { scrub: [requestId] })
   })
   if (result.exitCode !== EXIT_OK) return failureAnswer(app, result)
-  await logOutbound($, app, agentId, as, () => ackNote(parsed.value.messageIds.length))
+  await logOutbound($, app, caller, () => ackNote(parsed.value.messageIds.length))
   return { result: `Acknowledged ${parsed.value.messageIds.length} message${parsed.value.messageIds.length === 1 ? '' : 's'}` }
 }
 
@@ -2126,21 +1884,25 @@ async function answerHistory($: EngineInterface, app: App, input: unknown): Prom
   return { result: clean(app, text) }
 }
 
-async function answerCall($: EngineInterface, app: App, input: unknown, agentId: string | undefined, as: string): Promise<ToolAnswer> {
+async function answerCall($: EngineInterface, app: App, input: unknown, caller: Caller): Promise<ToolAnswer> {
   const parsed = parseCall(input)
   if (!parsed.ok) return denied(parsed.message)
   const { tool: name } = parsed.value
   const isMutating = MUTATING_CALLS.has(name)
-  // A mutation acts as the caller's participant (its handle, or the session's), whatever the model
-  // wrote: the server trusts the id it is given.
-  const pinned = pinActor(name, parsed.value.args, as)
+  // The session's participant is the main agent's to sign off; a subagent signs off the participant it signed on as, through the CLI.
+  if (name === 'mail_leave' && caller.agentId !== undefined && caller.agentId !== MAIN) {
+    return denied('mail_leave signs off the participant of this whole session, so only the main agent may call it; a subagent signs off a participant of its own through the Orchard CLI')
+  }
+  // A mutation acts as this session's participant, whatever the model wrote: the server trusts
+  // the id it is given.
+  const pinned = pinActor(name, parsed.value.args, caller.as)
   if (!pinned.ok) return denied(pinned.message)
   const args = pinned.value
   // The model's own request_id is honoured; otherwise one is generated and kept across a retry.
   const hasOwnId = typeof args.request_id === 'string' && args.request_id.trim() !== ''
   const result =
     isMutating && !hasOwnId
-      ? await mutate($, app, name, args, requestId => tool($, app.rt, name, { ...args, request_id: requestId }, { scrub: [requestId] }))
+      ? await mutate($, app, name, { caller, args }, requestId => tool($, app.rt, name, { ...args, request_id: requestId }, { scrub: [requestId] }))
       : await tool($, app.rt, name, args)
   if (result.exitCode !== EXIT_OK) return failureAnswer(app, result, !isMutating ? 'read' : hasOwnId ? 'mutation-own-id' : 'mutation')
   if (name === 'mail_send') {
@@ -2149,37 +1911,52 @@ async function answerCall($: EngineInterface, app: App, input: unknown, agentId:
   }
   if (isMutating || name === 'plugin_call') {
     const destination = name === 'mail_send' ? (args.destination as { kind: string; id?: string } | undefined) : undefined
-    await logOutbound($, app, agentId, as, names => callNote(name, args, result.json, names), {
+    await logOutbound($, app, caller, names => callNote(name, args, result.json, names), {
       people: destination === undefined ? [] : directTo(destination),
       ...(destination?.kind === 'channel' && destination.id !== undefined ? { channel: destination.id } : {}),
     })
   }
-  return { result: clean(app, frameData(`orchard_call ${name}`, withoutJoiningPrompt(result.json ?? null), newNonce())) }
+  const answer: ToolAnswer = { result: clean(app, frameData(`orchard_call ${name}`, withoutJoiningPrompt(result.json ?? null), newNonce())) }
+  // The participant left the workspace: this session is out of it too, as after a Disconnect, until Connect signs it on again.
+  if (name === 'mail_leave') await signOff($, app, caller.as)
+  return answer
+}
+
+/** The session's own participant signed off (`mail_leave`): Orchard no longer lists it as signed on, and the session stops as it does on Disconnect. */
+async function signOff($: EngineInterface, app: App, participantId: string) {
+  const { handles } = app.ls
+  handles.signOn.set(participantId, { ...handles.signOn.get(participantId), registered: false })
+  await disconnect($, app, { kind: 'signed-off' })
+  await showHandles($, app)
 }
 
 async function answerTool($: EngineInterface, app: App, name: string, input: unknown, agentId: string | undefined): Promise<ToolAnswer> {
   // A disconnected session is out of the workspace: nothing the model asks reaches it.
-  if (app.ls.isDisconnected) return denied(DISCONNECTED)
-  // The participant this call acts as, settled once at the start: a handle given back mid-call does not change who sent it.
-  const as = await actorFor($, app, agentId)
-  // Disconnected while the handle was being set up (the lease, resume, join take a while): the call must not go out as anyone.
-  if (app.ls.isDisconnected) return denied(DISCONNECTED)
+  if (app.ls.isDisconnected) return denied((await read($, status))?.kind === 'signed-off' ? SIGNED_OFF : DISCONNECTED)
+  // Every agent of the session acts as its own participant through these tools; a subagent that wants one of its own signs on through the CLI.
+  const caller: Caller = { agentId, as: app.rt.current?.identity.participantId ?? '' }
   try {
-    switch (name) {
-      case 'orchard_send':
-        return await answerSend($, app, input, agentId, as)
-      case 'orchard_reply':
-        return await answerReply($, app, input, agentId, as)
-      case 'orchard_ack':
-        return await answerAck($, app, input, agentId, as)
-      case 'orchard_history':
-        // A read: it names no acting participant, so there is nothing to pin.
-        return await answerHistory($, app, input)
-      default:
-        return await answerCall($, app, input, agentId, as)
-    }
+    const answer = await answerFor($, app, name, input, caller)
+    if ('result' in answer && agentId !== undefined && agentId !== MAIN) detach(noteSharing($, app, agentId))
+    return answer
   } catch {
     return denied('the request could not be completed')
+  }
+}
+
+function answerFor($: EngineInterface, app: App, name: string, input: unknown, caller: Caller): Promise<ToolAnswer> {
+  switch (name) {
+    case 'orchard_send':
+      return answerSend($, app, input, caller)
+    case 'orchard_reply':
+      return answerReply($, app, input, caller)
+    case 'orchard_ack':
+      return answerAck($, app, input, caller)
+    case 'orchard_history':
+      // A read: it names no acting participant, so there is nothing to pin.
+      return answerHistory($, app, input)
+    default:
+      return answerCall($, app, input, caller)
   }
 }
 
@@ -2254,10 +2031,7 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     // /clear keeps this process, its loop and its lease holder id; every other end is a session that will not beat again.
-    if (e.reason !== 'clear') {
-      await releaseLease($, app)
-      await releaseHandles($, app)
-    }
+    if (e.reason !== 'clear') await releaseLease($, app)
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -2344,11 +2118,17 @@ export const register: Register = (on, options) => {
     return { text: opened.isPlaced ? 'Orchard pane opened.' : 'Orchard pane: widen the terminal to see it.' }
   })
 
-  // A subagent that joins Orchard on its own is seen here. The hook only watches: the command runs as it was,
-  // and a hook that fails is skipped by the engine, so there is no `.catch` that could run it twice.
+  // An agent that signs on through the Orchard CLI is seen here, once its command has run and succeeded. The hook only
+  // watches: the command is never held or changed, `next` runs once, and a hook that fails is skipped by the engine,
+  // so there is no `.catch` that could run it twice.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    if (e.agentId !== undefined) detach(noteJoined($, app, e.agentId, e.command))
-    return next(e)
+    const result = await next(e)
+    try {
+      if (succeeded(result)) detach(noteObserved($, app, e.agentId ?? MAIN, e.command))
+    } catch {
+      // Watching is a courtesy; the command has run either way.
+    }
+    return result
   })
 
   on('tool.call', { tool: 'mcp__orchard__orchard_send' }, ($, e) => answerTool($, app, 'orchard_send', e, e.agentId))

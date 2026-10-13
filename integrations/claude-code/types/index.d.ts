@@ -22,6 +22,8 @@ export type OrchardStatus =
   | { kind: 'error'; message: string }
   /** The person disconnected this session (`/orchard disconnect`): no listening, no lease, no wakes, until `/orchard connect`. Never kept across sessions. */
   | { kind: 'disconnected' }
+  /** The session's own participant signed off (the main agent called `mail_leave`): out of the workspace, no listening, no lease, no wakes, until `/orchard connect` signs it on again. Never kept across sessions. */
+  | { kind: 'signed-off' }
 
 /** Cached from the workspace when the session connected. `name` is what the band shows. */
 export type OrchardWorkspace = { name: string | null; ownerId: string | null }
@@ -122,7 +124,7 @@ export type OrchardActivityEntry = {
   /** The participant id the entry belongs to: who acted (out) or who was written to (in). */
   handle: string
   direction: 'in' | 'out'
-  /** `send`, `reply`, `ack`, `task`, `role`, `state`, `call` for what the agent did; `handle` for the mod's note that a subagent shares the session's participant; the alert's own kind (`message`, `decision`, ...) for what it was told. */
+  /** `send`, `reply`, `ack`, `task`, `role`, `state`, `call` for what the agent did; the alert's own kind (`message`, `decision`, ...) for what it was told. */
   kind: string
   text: string
   /** Where it opens in the browser UI. */
@@ -141,14 +143,22 @@ export type OrchardAgent = {
   startedAt: number
   endedAt?: number
   /**
-   * The participant it acts as in Orchard. The main loop's is the session's; a subagent has a pooled one
-   * (`<session's id>.sub1` ...) once it uses Orchard, and keeps showing it after it ends.
+   * The participant it was seen acting as in Orchard. The main loop's is the session's; a subagent has one
+   * once it signed on through the Orchard CLI (`observed`) or used the mod's tools (`sharesBase`), and
+   * keeps showing it after it ends. None: the mod has not seen it use Orchard.
    */
   handle?: string
-  /** The handle is one the agent joined as itself, through the Orchard CLI. The mod registered nothing for it and its tool calls do not act as it. */
+  /** The handle is a participant the agent signed on as itself, through the Orchard CLI. The mod registered nothing for it and its tool calls do not act as it. */
   observed?: true
-  /** The agent acts as the session's own participant: no pooled handle was free, or setting one up failed. */
+  /** The agent used the mod's tools, which act as the session's own participant: its handle is the session's. */
   sharesBase?: true
+  /**
+   * Whether Orchard says the handle is signed on, as of the last read of the participant list (a
+   * refresh of the workspace, or just after an agent ended). Undefined: not known, or the agent has no handle.
+   */
+  signedOn?: boolean
+  /** When Orchard last heard from the handle (clock ms), as of the same read. */
+  lastContactAt?: number
   /** What it last did in Orchard, as the activity feed words it. */
   lastAction?: string
 }

@@ -145,6 +145,31 @@ test('the pane\'s Disconnect button disconnects the session and turns into Conne
   await ui.unmount()
 })
 
+test('a pane over a session whose participant signed off says so and offers Connect', { options: OPTIONS }, async ($, on) => {
+  const w = world(on)
+  await begin($, w)
+  await openPane($, w)
+  const ui = await mountPane($, 'terminal')
+
+  expect((await callTool($, 'orchard_call', { name: 'mail_leave', arguments: {} })).deny).toBeUndefined()
+  await w.clock.settle()
+  expect(w.state.latest.status).toEqual({ kind: 'signed-off' })
+  expect(await ui.find({ type: 'Button', key: 'disconnect' })).toBeUndefined()
+  expect((await ui.find({ type: 'Button', key: 'connect' }))?.props.label).toBe('Connect')
+  const all = (await drawnText(ui)).join('\n')
+  expect(all).toContain('● signed off')
+  expect(all).toContain('Signed off: this session left Orchard')
+  expect(all.includes('Disconnected:')).toBe(false)
+  expect(all.includes('Nothing is going on yet')).toBe(false)
+  expect(await bandText($)).toBe('◆ claude-fruit-stand in Fruit Stand · signed off')
+
+  await ui.press({ key: 'connect' })
+  await w.clock.advance(15_000)
+  expect(w.state.latest.status).toEqual({ kind: 'connected' })
+  expect((await ui.find({ type: 'Button', key: 'disconnect' }))?.props.label).toBe('Disconnect')
+  await ui.unmount()
+})
+
 // ---- /orchard notify ----
 
 test('a changed level applies at once: do-not-disturb stops the wake of a message already pending', { options: OPTIONS }, async ($, on) => {
@@ -277,7 +302,7 @@ test('the pane draws a header and a footer: as Svg where a surface has one, as T
   }
 })
 
-test('the status chip: green listening, amber waiting for you, red offline or error, grey another session or disconnected', () => {
+test('the status chip: green listening, amber waiting for you, red offline or error, grey another session, disconnected or signed off', () => {
   const quiet = { unread: 0, forYou: 0, needsYou: 0 }
   expect(chipOf({ kind: 'connected' }, quiet)).toEqual({ kind: 'listening', label: 'listening' })
   expect(chipOf({ kind: 'connected' }, { ...quiet, needsYou: 1 })).toEqual({ kind: 'waiting', label: 'waiting for you' })
@@ -286,6 +311,7 @@ test('the status chip: green listening, amber waiting for you, red offline or er
   expect(chipOf({ kind: 'error', message: 'x' }, quiet).kind).toBe('error')
   expect(chipOf({ kind: 'shared' }, quiet)).toEqual({ kind: 'shared', label: 'another session is listening' })
   expect(chipOf({ kind: 'disconnected' }, quiet)).toEqual({ kind: 'disconnected', label: 'disconnected' })
+  expect(chipOf({ kind: 'signed-off' }, quiet)).toEqual({ kind: 'signed-off', label: 'signed off' })
   expect(chipOf({ kind: 'connecting' }, quiet).kind).toBe('connecting')
   expect(chipOf(null, null).kind).toBe('connecting')
 })
@@ -310,6 +336,8 @@ test('the header chip follows the connection on the pane', { options: OPTIONS },
   expect(await header('desktop')).toMatch(/class="mono dim" font-size="10.5">another session is listening</)
   w.state.override.status = { kind: 'disconnected' }
   expect(await header('desktop')).toMatch(/class="mono dim" font-size="10.5">disconnected</)
+  w.state.override.status = { kind: 'signed-off' }
+  expect(await header('desktop')).toMatch(/class="mono dim" font-size="10.5">signed off</)
 })
 
 test('drawings are sized from the pane width and clipped to it', () => {

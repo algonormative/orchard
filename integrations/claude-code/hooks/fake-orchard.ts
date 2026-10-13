@@ -57,10 +57,12 @@ export type Fake = {
   calls: Call[]
   /** Addresses the mod asked the system to open (`open URL`); kept apart from `calls`, which are the Orchard CLI's. */
   opened: string[]
-  /** Whether the participant is registered: `resume` fails with not-found until a `join`. */
+  /** Whether the participant is registered: `resume` fails with not-found until a `join`, and after a `mail_leave`. */
   isKnown: boolean
-  /** The other participants a `join` registered (a subagent's handle); `resume` of any id not here, and not the participant itself, fails with not-found. */
+  /** Who is registered (signed on), by participant id: `mail_participants` reports it, `mail_leave` removes from it. `isKnown` is ME's. A test adds the participants its agents signed on as. */
   registered: Set<string>
+  /** When the workspace last heard from a participant (`last_contact_at` in `mail_participants`); a participant not here has no recorded contact. */
+  lastContact: Record<string, string>
   workspaceName: string
   ownerId: string
   /** Every message in the workspace, oldest first. `push` adds to it. */
@@ -94,10 +96,10 @@ export type Fake = {
 
 const json = (value: unknown): Reply => ({ exitCode: 0, stdout: JSON.stringify(value, null, 2) })
 
-const notRegistered = (id: string): Reply => ({
+const NOT_REGISTERED: Reply = {
   exitCode: 4,
-  stderr: `Orchard agent: MCP tool "mail_resume" returned an error: {"error":"not found: registered participant ${id}"}\n`,
-})
+  stderr: `Orchard agent: MCP tool "mail_resume" returned an error: {"error":"not found: registered participant ${ME}"}\n`,
+}
 
 function flag(argv: readonly string[], name: string): string | undefined {
   const at = argv.indexOf(name)
@@ -128,17 +130,11 @@ function alertsPage(fake: Fake, argv: readonly string[]): { exitCode: 0; stdout:
 async function answer(fake: Fake, call: Call, sleep: (ms: number) => Promise<void>, signal: () => Promise<void>): Promise<Reply> {
   const argv = call.argv
   if (call.cmd === 'resume') {
-    const id = flag(argv, '--participant-id') ?? ME
-    return (id === ME ? fake.isKnown : fake.registered.has(id)) ? json({ participant: { id, registered: true } }) : notRegistered(id)
+    return fake.isKnown ? json({ participant: { id: ME, registered: true } }) : NOT_REGISTERED
   }
   if (call.cmd === 'join') {
-    const id = flag(argv, '--participant-id') ?? ME
-    if (id === ME) fake.isKnown = true
-    else {
-      fake.registered.add(id)
-      fake.participants.push({ id, name: flag(argv, '--name') ?? id })
-    }
-    return json({ participant: { id, registered: true } })
+    fake.isKnown = true
+    return json({ participant: { id: ME, registered: true } })
   }
   if (call.cmd === 'alerts') {
     const wait = Number(flag(argv, '--wait') ?? 0)
@@ -182,7 +178,18 @@ async function answer(fake: Fake, call: Call, sleep: (ms: number) => Promise<voi
       case 'mail_channels':
         return json({ channels: fake.channels })
       case 'mail_participants':
-        return json({ participants: fake.participants.map(p => ({ ...p, registered: true })) })
+        return json({
+          participants: fake.participants.map(p => ({
+            ...p,
+            registered: fake.registered.has(p.id),
+            ...(fake.lastContact[p.id] === undefined ? {} : { last_contact_at: fake.lastContact[p.id] }),
+          })),
+        })
+      case 'mail_leave': {
+        const id = String(args.participant_id ?? '')
+        if (!fake.registered.delete(id)) return { exitCode: 4, stderr: `Orchard agent: MCP tool "mail_leave" returned an error: {"error":"not found: registered participant ${id}"}\n` }
+        return json({ participant: { id, registered: false } })
+      }
       case 'mail_history': {
         let list = fake.messages
         if (typeof args.sender_id === 'string') list = list.filter(m => m.sender_id === args.sender_id)
@@ -268,8 +275,15 @@ export function fakeOrchard(on: On, now: () => number, sleep: (ms: number) => Pr
   const fake: Fake = {
     calls: [],
     opened: [],
-    isKnown: true,
-    registered: new Set(),
+    get isKnown() {
+      return fake.registered.has(ME)
+    },
+    set isKnown(isKnown: boolean) {
+      if (isKnown) fake.registered.add(ME)
+      else fake.registered.delete(ME)
+    },
+    registered: new Set([ME, 'owner', 'claude-other']),
+    lastContact: {},
     workspaceName: 'Fruit Stand',
     ownerId: 'owner',
     messages: [],
@@ -363,34 +377,16 @@ export function stubFiles(on: On, files: Record<string, string>): { reads: strin
 }
 
 /** The plugin's `$.store` in memory, readable and writable by the test; `writes` records every set. */
-export function stubStore(
-  on: On,
-  entries: Record<string, unknown> = {},
-): {
-  data: Map<string, unknown>
-  writes: { key: string; value: unknown }[]
-  fail: { set: boolean }
-  after: { set: ((key: string) => void) | undefined }
-  before: { get: ((key: string) => Promise<void> | undefined) | undefined }
-} {
+export function stubStore(on: On, entries: Record<string, unknown> = {}): { data: Map<string, unknown>; writes: { key: string; value: unknown }[]; fail: { set: boolean } } {
   const data = new Map<string, unknown>(Object.entries(entries))
   const writes: { key: string; value: unknown }[] = []
   const clone = (value: unknown) => (value === undefined ? undefined : (JSON.parse(JSON.stringify(value)) as unknown))
-  // Holds a read after it has seen the value, as a read in flight does: what it answers is what was there when it began.
-  const before: { get: ((key: string) => Promise<void> | undefined) | undefined } = { get: undefined }
-  on('store.get', async (_$, e) => {
-    const value = clone(data.get(e.key))
-    await before.get?.(e.key)
-    return { value } as never
-  })
+  on('store.get', async (_$, e) => ({ value: clone(data.get(e.key)) }) as never)
   const fail = { set: false }
-  // Runs right after a write lands: another session writing in the same moment.
-  const after: { set: ((key: string) => void) | undefined } = { set: undefined }
   on('store.set', async (_$, e) => {
     if (fail.set) throw new Error('the store is full')
     data.set(e.key, clone(e.value))
     writes.push({ key: e.key, value: clone(e.value) })
-    after.set?.(e.key)
     return { value: undefined } as never
   })
   on('store.delete', async (_$, e) => {
@@ -398,7 +394,7 @@ export function stubStore(
     return { value: undefined } as never
   })
   on('store.keys', async () => ({ value: [...data.keys()] }) as never)
-  return { data, writes, fail, after, before }
+  return { data, writes, fail }
 }
 
 /** How `$.ui.notify` answers in a test: sent by a channel, or refused for the reason named (`denied`: it rejects). */

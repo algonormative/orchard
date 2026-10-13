@@ -339,7 +339,7 @@ test('orchard_call acts as this session\'s participant: naming another is refuse
   for (const [name, args] of impostors) {
     const answer = await callTool($, 'orchard_call', { name, arguments: args })
     expect(answer.deny, name).toContain('Orchard:')
-    expect(answer.deny, name).toContain('must be this agent\'s own participant')
+    expect(answer.deny, name).toContain('must be this session\'s own participant')
     // the answer does not hand the participant id back, and the refusal came before any call
     expect(answer.deny?.includes(ME)).toBe(false)
   }
@@ -377,13 +377,11 @@ test('orchard_call keeps read filters: a sender_id or participant_id on a read n
   expect(stdinOf(toolCalls(w, 'mail_inbox')[0])).toEqual({ participant_id: 'owner' })
 })
 
-test('orchard_call refuses mail_register, mail_leave and every plugin_call that is not a read, and says why', { options: OPTIONS }, async ($, on) => {
+test('orchard_call refuses mail_register and every plugin_call that is not a read, and says why', { options: OPTIONS }, async ($, on) => {
   const w = await start($, on)
   const before = w.fake.calls.length
   const register = await callTool($, 'orchard_call', { name: 'mail_register', arguments: { participant_id: 'owner', name: 'Nick', request_id: 'r1' } })
   expect(register.deny).toContain('mail_register is not available here')
-  const leave = await callTool($, 'orchard_call', { name: 'mail_leave', arguments: { participant_id: ME, request_id: 'r2' } })
-  expect(leave.deny).toContain('mail_leave is not available here')
 
   const writes: Record<string, unknown>[] = [
     { plugin_id: 'tasks', operation: 'task_claim', arguments: { store_id: 's', task_id: 't', participant_id: 'owner', request_id: 'r4' } },
@@ -425,7 +423,7 @@ test('orchard_call plugin_call role_declare acts as this participant: filled in 
 
   const before = w.fake.calls.length
   const other = await declare({ participant_id: 'owner', request_id: 'r5', roles: ['reviewer'], skills: [] })
-  expect(other.deny).toContain("participant_id must be this agent's own participant")
+  expect(other.deny).toContain("participant_id must be this session's own participant")
   expect(w.fake.calls).toHaveLength(before)
 })
 

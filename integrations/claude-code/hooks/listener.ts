@@ -102,7 +102,7 @@ export type ListenerState = {
    * `missing` after a tool error (a host older than the tool) so it is not asked again.
    */
   decisionsTool: 'unknown' | 'available' | 'missing'
-  /** The person disconnected this session: nothing listens, no lease is held, nothing wakes. Memory only, never kept across sessions. */
+  /** The person disconnected this session, or its participant signed off: nothing listens, no lease is held, nothing wakes. Memory only, never kept across sessions. */
   isDisconnected: boolean
   /** The /orchard pane is open: only then is the slow safety refresh armed and the poll clock mirrored. */
   isPaneOpen: boolean
@@ -127,12 +127,8 @@ export type ListenerState = {
   decayTimer: Cancelable | undefined
   /** The one timer that looks at the session's agents again: every 2 s while one is live, else when a finished one is due to go. */
   agentTimer: Cancelable | undefined
-  /** The participants this session's subagents act as: who holds which slot of the pool. */
-  subs: HandleBook
-  /** Handle claims in flight, by agent: a second call of the same agent waits for the first's. */
-  subClaims: Map<string, Promise<void>>
-  /** Beats the held subagent leases and lets go of the handles of agents that ended. One at most, armed while any handle is held. */
-  subTimer: Cancelable | undefined
+  /** The participants this session's agents were seen acting as, and what Orchard says of each. */
+  handles: HandleBook
 }
 
 export function createListenerState(): ListenerState {
@@ -185,9 +181,7 @@ export function createListenerState(): ListenerState {
     lastOtherAt: undefined,
     decayTimer: undefined,
     agentTimer: undefined,
-    subs: createBook(),
-    subClaims: new Map(),
-    subTimer: undefined,
+    handles: createBook(),
   }
 }
 

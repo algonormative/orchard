@@ -1,215 +1,210 @@
-// Subagent handles, as pure functions: the pool of ids a session's subagents act as in Orchard, the
-// book of who holds which slot, and the rules for taking, sharing and giving one back. A subagent that
-// uses Orchard gets a participant of its own (`<base>.sub1` ...) at its first Orchard tool call, so the
-// workspace's participant list and the pane can line agents up. No `$` here: register.tsx reads the
-// store, makes the CLI calls and keeps the timers; this module decides.
-//
-// A slot, from this session's side (the lease is lease.ts's, one per slot's participant id):
-//
-//   FREE         no agent here has it. Its lease may be absent, stale, or this session's own (all usable),
-//                or fresh and another session's (skipped).
-//   RESERVED     an agent claimed it, before anything was awaited; its lease is checked, written, read back.
-//   ENTERING     the lease is this session's; resume, and join the first time.
-//   HELD         the agent's calls are pinned to it; the beat renews the lease.
-//   GIVING BACK  `pooled` is already cleared (no call is pinned to the slot any more); the lease is deleted
-//                if it is still this session's; only then is the slot FREE for another agent here, since one
-//                that took it sooner would have its fresh lease deleted.
-//
-//   FREE -> RESERVED         a claim; slots already reserved here are passed over
-//   RESERVED -> FREE         a fresh lease of another session, or a write that did not read back as ours
-//   RESERVED -> ENTERING     the lease is verified
-//   ENTERING -> HELD         resume (join first if never registered) succeeded
-//   ENTERING -> GIVING BACK  it failed, or the session started over / disconnected meanwhile
-//   HELD -> GIVING BACK      its agent ended (or went quiet, if the table does not know it), session.end
-//                            (not after /clear), Disconnect, a start over
-//   HELD -> FREE             a beat finds a fresh lease of another session (two wrote together): that lease
-//                            is left alone and the agent acts as the session's own participant
-//   GIVING BACK -> FREE
-//
-// An agent, from the book's side:
-//
-//   (none) -> CLAIMING       its first Orchard tool call
-//   CLAIMING -> HELD         a slot was entered
-//   CLAIMING -> SHARING      no slot was free, or entering it failed: it acts as the session's participant
-//   HELD -> SHARING          its lease was lost to another session
-//   SHARING -> CLAIMING      a call after SHARE_RETRY_MS, never sooner
-//   any -> forgotten         it ended in the agents table (but not while its last Orchard call is newer than the
-//                            row's end: it ran again and nothing has listed it since), or the table never knew it
-//                            and it was quiet for UNTRACKED_IDLE_MS
-import type { OrchardAgent, OrchardAgents } from '../types'
-import { MAX_NAME, plain } from './config'
-import { isEnded } from './feed'
+// What a session's agents are seen acting as in Orchard, as pure functions. The mod creates no
+// identity for an agent and keeps no lease or timer for one: an agent signs itself on and off (the
+// orchard skill, through the Orchard CLI), or uses this mod's tools, which act as the session's own
+// participant. The mod writes down what it saw and shows it beside what Orchard says of each
+// participant (signed on or not). No `$` here: register.tsx watches the calls and reads Orchard's
+// participant list; this module decides what they mean.
+import { PROJECT_ID_PREFIX, RESERVED_IDS } from './config'
 
-/** How many subagent handles a session can hold at once. */
-export const POOL_SIZE = 8
-/** An agent that fell back to the session's own participant tries for a handle again no sooner than this. */
-export const SHARE_RETRY_MS = 60_000
-/** An agent the table does not list (a workflow's, an engine fork) is let go this long after its last Orchard call. */
-export const UNTRACKED_IDLE_MS = 60_000
-/** Handles a subagent joined as on its own that the book remembers per agent. */
+/** How many agents the book remembers; the oldest are forgotten past it. */
+const MAX_AGENTS = 64
+/** How many participants it remembers for one agent. */
 export const MAX_OBSERVED = 4
-/** A handle that was given back still counts as this session's for this long: its last message may still be arriving. */
-export const RELEASED_LINGER_MS = 2 * 60_000
-/** How many given-back handles the book remembers. */
-const RELEASED_KEEP = 32
 
-/** Orchard's limit on a participant id. */
-const MAX_ID = 128
-/** What a pooled id ends in. lease.ts keeps these keys out of its record eviction: a slot another session holds must never be forgotten. */
-export const POOL_SUFFIX = /\.sub[1-9]\d*$/
+/** What Orchard says of a participant: whether it is signed on, and when it last made contact (clock ms). */
+export type SignOn = { registered: boolean; lastContactAt?: number }
 
-/** Slot `n`'s participant id. The base is cut when the whole would pass Orchard's limit. */
-export function subHandle(base: string, n: number): string {
-  const suffix = `.sub${n}`
-  return `${base.slice(0, MAX_ID - suffix.length)}${suffix}`
-}
-
-/** Slot `n`'s display name: the session's, then which subagent. */
-export function subName(name: string, n: number): string {
-  const tail = ` · subagent ${n}`
-  return `${plain(name, MAX_NAME - tail.length)}${tail}`
-}
-
-/** What entering a handle keeps between attempts: a join that ended in exit 3 is retried as the same request (connect.ts). */
-export type Entering = { failures: number; joinRequestId: string | undefined }
-
-/** What the book knows of one agent that has used Orchard. */
-export type AgentHandle = {
-  /** The pooled handle this session owns for it (its lease is held). */
-  pooled: { slot: number; handle: string } | undefined
-  /** Handles it joined as on its own through the CLI (seen in a Bash command). Nothing is registered or leased for them. */
+/** What the book knows of one agent that used Orchard. */
+export type AgentHandles = {
+  /** Participants it signed on as or acted as through the Orchard CLI, oldest first. */
   observed: string[]
-  /** It acts as the session's own participant; no new attempt for a handle before this time. */
-  sharedUntil: number | undefined
-  /** The note that it shares the session's participant is written once per stretch of sharing. */
-  isNoted: boolean
-  /** Its last Orchard call. */
-  lastCallAt: number
+  /** It used this mod's tools, which act as the session's own participant. */
+  usedTools: boolean
 }
 
 export type HandleBook = {
-  agents: Map<string, AgentHandle>
-  /** Slots this session has reserved or holds, by the agent they are for. */
-  slots: Map<number, string>
-  /** Handles given back, newest last. */
-  released: { handle: string; at: number }[]
-  /** The join of each handle this session entered, by handle. */
-  entering: Map<string, Entering>
-  /** Bumped when every handle is let go (a reconnect, the end of the session): a claim that started before it undoes itself. */
-  epoch: number
+  /** By agent id (`main` for the session's own loop). */
+  agents: Map<string, AgentHandles>
+  /** Orchard's word on each participant of the session, from the last participant list. */
+  signOn: Map<string, SignOn>
 }
 
-export const createBook = (): HandleBook => ({ agents: new Map(), slots: new Map(), released: [], entering: new Map(), epoch: 0 })
+export const createBook = (): HandleBook => ({ agents: new Map(), signOn: new Map() })
 
-export function enteringOf(book: HandleBook, handle: string): Entering {
-  const have = book.entering.get(handle)
-  const entering = have ?? { failures: 0, joinRequestId: undefined }
-  book.entering.set(handle, entering)
-  return entering
-}
-
-/** The agent's entry, made at its first call; its last call is now. */
-export function touch(book: HandleBook, agentId: string, now: number): AgentHandle {
+function entryOf(book: HandleBook, agentId: string): AgentHandles {
   const have = book.agents.get(agentId)
-  const entry = have ?? { pooled: undefined, observed: [], sharedUntil: undefined, isNoted: false, lastCallAt: now }
-  entry.lastCallAt = now
+  if (have !== undefined) return have
+  const entry: AgentHandles = { observed: [], usedTools: false }
   book.agents.set(agentId, entry)
+  for (const old of [...book.agents.keys()].slice(0, Math.max(0, book.agents.size - MAX_AGENTS))) book.agents.delete(old)
   return entry
 }
 
 /**
- * What a call of this agent does about its handle: it has one, it shares the session's for now, or it
- * should try for one. A clock that moved back does not extend the wait past SHARE_RETRY_MS.
+ * A name a command carries counts as this session's only when it is Claude-style: like a
+ * participantId in .orchard.json, never a human's or the system's, so a command cannot make
+ * someone else's activity the session's.
  */
-export function stanceOf(entry: AgentHandle, now: number): 'have' | 'share' | 'try' {
-  if (entry.pooled !== undefined) return 'have'
-  const wait = entry.sharedUntil === undefined ? 0 : entry.sharedUntil - now
-  return wait > 0 && wait <= SHARE_RETRY_MS ? 'share' : 'try'
-}
-
-/** The participant an agent acts as: its pooled handle, else the session's own. A handle it only joined as on its own is not pinned to. */
-export function actorOf(base: string, book: HandleBook, agentId: string | undefined): string {
-  return (agentId === undefined ? undefined : book.agents.get(agentId)?.pooled?.handle) ?? base
-}
-
-/** Every participant that is this session's: its own, the pooled handles held, the ones agents joined as. */
-export function ownHandles(base: string, book: HandleBook): string[] {
-  const all = [base]
-  for (const entry of book.agents.values()) {
-    if (entry.pooled !== undefined) all.push(entry.pooled.handle)
-    all.push(...entry.observed)
-  }
-  return [...new Set(all)]
-}
-
-/** Handles given back at `now`. */
-export function markReleased(book: HandleBook, handles: readonly string[], now: number): void {
-  book.released = [...book.released, ...handles.map(handle => ({ handle, at: now }))].slice(-RELEASED_KEEP)
-}
-
-/** The handles given back not long ago: still this session's for what is in flight. Forgets the older ones. */
-export function lingering(book: HandleBook, now: number): string[] {
-  book.released = book.released.filter(r => Math.abs(now - r.at) < RELEASED_LINGER_MS)
-  return book.released.map(r => r.handle)
-}
-
-/** The slots nobody in this session has, lowest first. */
-export function freeSlots(book: HandleBook): number[] {
-  return Array.from({ length: POOL_SIZE }, (_, i) => i + 1).filter(n => !book.slots.has(n))
-}
-
-/** What the agents table shows for the agent's handle; undefined when it has nothing to show. */
-export function shown(base: string, entry: AgentHandle): { handle: string; observed?: true; sharesBase?: true } | undefined {
-  if (entry.pooled !== undefined) return { handle: entry.pooled.handle }
-  const seen = entry.observed.at(-1)
-  if (seen !== undefined) return { handle: seen, observed: true }
-  return entry.sharedUntil === undefined ? undefined : { handle: base, sharesBase: true }
-}
+export const isClaudeId = (id: string): boolean => id.startsWith(PROJECT_ID_PREFIX) && !RESERVED_IDS.includes(id.toLowerCase())
 
 /**
- * Which agents of the book to let go: those the table says have ended (completed, failed, killed, or
- * `lost` once they left `$.agent.list()`), and those the table does not know at all once they have been
- * quiet for UNTRACKED_IDLE_MS (nothing will ever say such an agent ended). A row that ended before the
- * agent's last Orchard call is no news: a message resumed the agent and the table has not been listed
- * since, so it is treated like an agent the table does not know.
+ * Records that `agentId` signed on as, or acted as, `id` through the Orchard CLI. The session's own
+ * participant (`base`) is the one this mod's tools act as. True when the book learned something.
  */
-export function finished(book: HandleBook, table: OrchardAgents, now: number): string[] {
-  return [...book.agents.entries()]
-    .filter(([id, entry]) => {
-      const listed: OrchardAgent | undefined = table[id]
-      const isQuiet = Math.abs(now - entry.lastCallAt) >= UNTRACKED_IDLE_MS
-      if (listed === undefined) return isQuiet
-      if (!isEnded(listed.status)) return false
-      return listed.endedAt !== undefined && entry.lastCallAt > listed.endedAt ? isQuiet : true
-    })
-    .map(([id]) => id)
-}
-
-/** Records that the agent joined as `handle` on its own. False when it was known, or the book is full for this agent. */
-export function observe(book: HandleBook, agentId: string, handle: string, now: number): boolean {
-  const entry = touch(book, agentId, now)
-  if (entry.observed.includes(handle)) return false
-  if (entry.observed.length >= MAX_OBSERVED) entry.observed.shift()
-  entry.observed.push(handle)
+export function observe(book: HandleBook, agentId: string, id: string, base: string): boolean {
+  if (id === base) return useTools(book, agentId)
+  if (!isClaudeId(id)) return false
+  const entry = entryOf(book, agentId)
+  if (entry.observed.includes(id)) return false
+  entry.observed.push(id)
+  if (entry.observed.length > MAX_OBSERVED) entry.observed.shift()
   return true
 }
 
-/** Why an agent shares the session's participant, in words for the feed. */
-export type ShareReason = 'full' | 'failed' | 'taken'
+/** Records that `agentId` used this mod's tools, which act as the session's own participant. True when that was not known. */
+export function useTools(book: HandleBook, agentId: string): boolean {
+  const entry = entryOf(book, agentId)
+  if (entry.usedTools) return false
+  entry.usedTools = true
+  return true
+}
 
-export function shareNote(reason: ShareReason): string {
-  const why =
-    reason === 'full' ? 'no subagent handle was free' : reason === 'failed' ? 'its own handle could not be set up' : 'another session took its handle'
-  return `Shares this session's Orchard identity: ${why}`
+/** The agent was seen acting as a participant of its own through the CLI. */
+export const hasObserved = (book: HandleBook, agentId: string): boolean => (book.agents.get(agentId)?.observed.length ?? 0) > 0
+
+/** Every participant of this session: its own, and each one its agents were seen acting as. */
+export function ownHandles(base: string, book: HandleBook): string[] {
+  const all = [base]
+  for (const entry of book.agents.values()) all.push(...entry.observed)
+  return [...new Set(all)]
+}
+
+/** What the agents table shows an agent acting as: the participant, and which way it was seen. */
+export type Shown = { handle: string; observed?: true; sharesBase?: true }
+
+/**
+ * The participant the table shows for each agent: the one it was last seen signing on as through the
+ * CLI, else the session's own when it used this mod's tools. An agent seen doing neither has none.
+ */
+export function shownBy(base: string, book: HandleBook): Map<string, Shown> {
+  const shown = new Map<string, Shown>()
+  for (const [agentId, entry] of book.agents) {
+    const seen = entry.observed.at(-1)
+    if (seen !== undefined) shown.set(agentId, { handle: seen, observed: true })
+    else if (entry.usedTools) shown.set(agentId, { handle: base, sharesBase: true })
+  }
+  return shown
 }
 
 /**
- * The participant a Bash command joins or resumes as through the Orchard CLI
- * (`Orchard agent join|resume ... --participant-id X`); undefined for any other command. Global
- * options may stand between `agent` and the subcommand; the match stays inside one shell segment.
+ * What a `mail_participants` answer says of each of `handles`: signed on (`registered`) or not, and
+ * its last contact. A participant the list does not carry has no entry. Undefined when the answer is
+ * not a participant list.
  */
-export function joinedAs(command: string): string | undefined {
-  const flat = command.slice(0, 20_000).replace(/\\\r?\n/g, ' ')
-  const found = /\bOrchard["']?\s+agent\b[^\n;&|]{0,400}?\s(?:join|resume)\s[^\n;&|]{0,400}?--participant-id(?:=|\s+)["']?([A-Za-z0-9._-]{1,128})["']?(?=$|[\s;&|)])/i.exec(flat)
-  return found?.[1]
+export function signOnOf(json: unknown, handles: readonly string[]): Map<string, SignOn> | undefined {
+  const list = json !== null && typeof json === 'object' ? (json as { participants?: unknown }).participants : undefined
+  if (!Array.isArray(list)) return undefined
+  const known = new Map<string, SignOn>()
+  for (const item of list as unknown[]) {
+    const p = item !== null && typeof item === 'object' ? (item as { id?: unknown; registered?: unknown; last_contact_at?: unknown }) : {}
+    if (typeof p.id !== 'string' || !handles.includes(p.id) || typeof p.registered !== 'boolean') continue
+    const at = typeof p.last_contact_at === 'string' ? Date.parse(p.last_contact_at) : Number.NaN
+    known.set(p.id, { registered: p.registered, ...(Number.isFinite(at) ? { lastContactAt: at } : {}) })
+  }
+  return known
+}
+
+/** The Bash call finished and succeeded: the tool answered, reported no error (a non-zero exit is one), and was neither interrupted nor moved to the background, where its exit is not yet known. */
+export function succeeded(call: { deny?: string; isError?: boolean; result?: unknown }): boolean {
+  if (call.deny !== undefined || call.isError === true) return false
+  const out = call.result !== null && typeof call.result === 'object' ? (call.result as { interrupted?: unknown; backgroundTaskId?: unknown }) : {}
+  return out.interrupted !== true && out.backgroundTaskId === undefined
+}
+
+// ---- reading a Bash command ----
+
+/** Only the start of a command is read. */
+const MAX_COMMAND = 20_000
+/** What may stand before the executable of a command and not change what it runs. */
+const PREFIXES = new Set(['exec', 'command', 'env', 'sudo', 'time', 'nice', 'nohup'])
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+/** The CLI's commands that name the participant they are for. */
+const AS_PARTICIPANT = new Set(['join', 'resume', 'call', 'ack', 'alerts'])
+const PARTICIPANT_ID = /^[A-Za-z0-9._-]{1,128}$/
+
+/**
+ * A command line as the simple commands it runs, each a list of words. Quotes group a word and are
+ * dropped; `;` `&` `|` `(` `)` `{` `}` a backtick and a newline end a command. Nothing is expanded, so
+ * a word with a `$` in it stays as written.
+ */
+function simpleCommands(command: string): string[][] {
+  const text = command.slice(0, MAX_COMMAND).replace(/\\\r?\n/g, ' ')
+  const commands: string[][] = []
+  let words: string[] = []
+  let word = ''
+  let isWord = false
+  let quote: string | undefined
+  const endWord = () => {
+    if (isWord) words.push(word)
+    word = ''
+    isWord = false
+  }
+  const endCommand = () => {
+    endWord()
+    if (words.length > 0) commands.push(words)
+    words = []
+  }
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text.charAt(i)
+    if (quote !== undefined) {
+      if (c === quote) quote = undefined
+      else if (c === '\\' && quote === '"' && i + 1 < text.length) word += text.charAt(++i)
+      else word += c
+    } else if (c === '"' || c === "'") {
+      quote = c
+      isWord = true
+    } else if (c === '\\' && i + 1 < text.length) {
+      word += text.charAt(++i)
+      isWord = true
+    } else if (c === ' ' || c === '\t' || c === '\r') {
+      endWord()
+    } else if (';&|(){}`\n'.includes(c)) {
+      endCommand()
+    } else {
+      word += c
+      isWord = true
+    }
+  }
+  endCommand()
+  return commands
+}
+
+/** The participants one simple command names, when it runs `Orchard agent <command> --participant-id X`. */
+function participantsOf(words: readonly string[]): string[] {
+  let at = 0
+  while (at < words.length && (PREFIXES.has(words[at] as string) || ASSIGNMENT.test(words[at] as string))) at += 1
+  // The executable itself, not text that mentions it: `echo "Orchard agent join ..."` runs echo.
+  if ((words[at] ?? '').split('/').at(-1)?.toLowerCase() !== 'orchard' || words[at + 1] !== 'agent') return []
+  at += 2
+  // Global options stand between `agent` and its command.
+  while (words[at] === '--endpoint' || words[at] === '--credential-file') at += 2
+  while ((words[at] ?? '').startsWith('--endpoint=') || (words[at] ?? '').startsWith('--credential-file=')) at += 1
+  if (!AS_PARTICIPANT.has(words[at] ?? '')) return []
+  const ids: string[] = []
+  for (let i = at + 1; i < words.length; i += 1) {
+    const word = words[i] as string
+    const id = word === '--participant-id' ? words[i + 1] : word.startsWith('--participant-id=') ? word.slice('--participant-id='.length) : undefined
+    if (id !== undefined && PARTICIPANT_ID.test(id)) ids.push(id)
+  }
+  return ids
+}
+
+/**
+ * The participants a Bash command signs on or acts as through the Orchard CLI
+ * (`Orchard agent join|resume|call|ack|alerts ... --participant-id X`), in order, once each. Only a
+ * command that is that program counts; text that merely contains the words does not. Best effort: a
+ * program run through a variable or `bash -c` is not seen.
+ */
+export function observedAs(command: string): string[] {
+  return [...new Set(simpleCommands(command).flatMap(participantsOf))]
 }

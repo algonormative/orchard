@@ -129,6 +129,8 @@ test('the band is the session\'s own line: its participant in the workspace, off
   expect(line({ kind: 'connected' }, { name: null, ownerId: null }, quiet)?.text).toBe('◆ claude-fruit-stand · ● listening')
   expect(line({ kind: 'connected' }, { name: null, ownerId: null }, { unread: 1, forYou: 0, needsYou: 0 })?.text).toBe('◆ claude-fruit-stand · 1 new')
   expect(line({ kind: 'offline', failures: 3 }, ws, quiet)).toMatchObject({ text: '◆ claude-fruit-stand in Fruit Stand · ○ offline', tone: 'warning' })
+  expect(line({ kind: 'disconnected' }, ws, quiet)).toMatchObject({ text: '◆ claude-fruit-stand in Fruit Stand · disconnected', tone: 'quiet' })
+  expect(line({ kind: 'signed-off' }, ws, quiet)).toMatchObject({ text: '◆ claude-fruit-stand in Fruit Stand · signed off', tone: 'quiet' })
   expect(line({ kind: 'error', message: 'nope' }, ws, quiet)).toMatchObject({ text: '◆ claude-fruit-stand in Fruit Stand · error: nope', tone: 'error' })
   expect(line({ kind: 'connected' }, ws, { unread: 3, forYou: 0, needsYou: 0 })?.text).toBe('◆ claude-fruit-stand in Fruit Stand · 3 new')
   expect(line({ kind: 'connected' }, ws, { unread: 2, forYou: 1, needsYou: 1 })?.text).toBe('◆ claude-fruit-stand in Fruit Stand · 2 new · 1 for you · needs you 1')
