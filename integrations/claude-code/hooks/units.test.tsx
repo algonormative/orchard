@@ -2,10 +2,13 @@ import { expect, test } from 'claude-code/testing'
 
 import { bandLine } from './band'
 import { agentColor, agentState, handlingText, howOf, nowOf, shortHandle } from './feed'
+import { storeKey } from './alerts'
+import { settingsKey } from './classify'
+import { planEviction } from './lease'
 import { statusLine } from './statusline'
 import type { BandInput } from './band'
 import type { OrchardAgent } from '../types'
-import { checkConn, defaultName, defaultParticipantId, parseProjectFile, readOptions, resolveIdentity } from './config'
+import { checkConn, defaultName, defaultParticipantId, parseProjectFile, readOptions, resolveIdentity, sessionSid } from './config'
 import { BACKOFF_MAX_MS, backoffDelay, parseWorkspace } from './connect'
 import { CLI_TIMEOUT_MS, DEFAULT_BIN, runOrchard, sanitizeMessage } from './orchard-cli'
 import type { Conn, Run } from './orchard-cli'
@@ -89,19 +92,56 @@ test('the default participant id is claude- plus a safe slug of the folder name'
   expect(defaultName('/')).toBe('Claude')
 })
 
-test('identity: project file over option over default', () => {
+test('identity: project file over option over default is the base; the handle is <base>.<sid>', () => {
   const options = readOptions({ endpoint: CONN.endpoint, credentialFile: CONN.credentialFile })
-  expect(resolveIdentity(options, '/work/vault', {})).toEqual({
+  expect(resolveIdentity(options, '/work/vault', {}, 'a1b2c3')).toEqual({
     ok: true,
-    value: { participantId: 'claude-vault', name: 'Claude (vault)' },
+    value: { participantId: 'claude-vault.a1b2c3', baseId: 'claude-vault', name: 'Claude (vault) · a1b2c3' },
   })
   const configured = { ...options, participantId: 'from-options', name: 'From Options' }
-  expect(resolveIdentity(configured, '/work/vault', {})).toEqual({ ok: true, value: { participantId: 'from-options', name: 'From Options' } })
-  expect(resolveIdentity(configured, '/work/vault', { participantId: 'from-file' })).toEqual({
+  expect(resolveIdentity(configured, '/work/vault', {}, 'a1b2c3')).toEqual({
     ok: true,
-    value: { participantId: 'from-file', name: 'From Options' },
+    value: { participantId: 'from-options.a1b2c3', baseId: 'from-options', name: 'From Options · a1b2c3' },
   })
-  expect(resolveIdentity({ ...options, participantId: 'bad id' }, '/work/vault', {}).ok).toBe(false)
+  expect(resolveIdentity(configured, '/work/vault', { participantId: 'from-file' }, 'a1b2c3')).toEqual({
+    ok: true,
+    value: { participantId: 'from-file.a1b2c3', baseId: 'from-file', name: 'From Options · a1b2c3' },
+  })
+  expect(resolveIdentity({ ...options, participantId: 'bad id' }, '/work/vault', {}, 'a1b2c3').ok).toBe(false)
+})
+
+test('the handle stays within the id rule: a long base gives way to the suffix, a long name to the sid', () => {
+  const options = readOptions({ endpoint: CONN.endpoint, credentialFile: CONN.credentialFile, participantId: 'b'.repeat(128), name: 'n'.repeat(200) })
+  const identity = resolveIdentity(options, '/work/vault', {}, 'a1b2c3')
+  expect(identity.ok).toBe(true)
+  if (!identity.ok) return
+  expect(identity.value.participantId).toMatch(/^[A-Za-z0-9._-]{1,128}$/)
+  expect(identity.value.participantId.length).toBe(128)
+  expect(identity.value.participantId.endsWith('.a1b2c3')).toBe(true)
+  expect(identity.value.baseId).toBe('b'.repeat(128))
+  expect(identity.value.name.length).toBeLessThanOrEqual(80)
+  expect(identity.value.name.endsWith(' · a1b2c3')).toBe(true)
+})
+
+test('the sid is the first six letters and digits of the session id, lowercase; a missing id falls back to the random one', () => {
+  expect(sessionSid('3F9A1C0E-7b2d-4c8e-9a51-0d6e2f4b8a17', 'zzzzzz')).toBe('3f9a1c')
+  expect(sessionSid('--ab--cd--ef--gh', 'zzzzzz')).toBe('abcdef')
+  expect(sessionSid('ab', 'zzzzzz')).toBe('ab')
+  expect(sessionSid(undefined, 'Q1W2E3R4')).toBe('q1w2e3')
+  expect(sessionSid('---', 'Q1W2E3R4')).toBe('q1w2e3')
+  expect(sessionSid(42, '9f8e7d6c')).toBe('9f8e7d')
+})
+
+test('settings are kept per base id, so sessions of one project share them; the rest of a record is per handle', () => {
+  expect(settingsKey('e', 'claude-vault')).toBe('settings e claude-vault')
+  expect(storeKey('e', 'claude-vault.a1b2c3')).toBe('inbox e claude-vault.a1b2c3')
+})
+
+test('eviction keeps the handle\'s record and the base\'s, and forgets an old lease with its record', () => {
+  const keys = ['lease e old', 'inbox e old', 'settings e claude-vault', 'inbox e claude-vault.a1b2c3']
+  const plan = planEviction(keys, [{ endpoint: 'e', participantId: 'old', at: 1 }], [{ endpoint: 'e', participantId: 'claude-vault.a1b2c3' }, { endpoint: 'e', participantId: 'claude-vault' }], 100, 2)
+  expect(plan.evict.sort()).toEqual(['inbox e old', 'lease e old'])
+  expect(plan.index.map(r => r.participantId).sort()).toEqual(['claude-vault', 'claude-vault.a1b2c3'])
 })
 
 test('the project file is read for participantId and name and nothing else', () => {
@@ -141,7 +181,6 @@ test('the band is the session\'s one line: connected, busy, with subagents, left
   expect(line({ kind: 'connected' }, ws, { unread: -1, forYou: Number.NaN, needsYou: 0 })?.text).toBe('◆ Claude is connected to Fruit Stand')
   expect(line({ kind: 'connected', isStoreFailing: true }, ws, quiet)).toMatchObject({ tone: 'warning' })
   expect(line({ kind: 'connected' }, { name: 'Line one\nline two', ownerId: null }, { unread: 1, forYou: 0, needsYou: 0 })?.text).toBe('◆ Claude in Line one line two · 1 queued')
-  expect(line({ kind: 'shared' }, ws, quiet)?.text).toBe('◆ Claude in Fruit Stand · another session is listening')
 
   // What it is handling now, and what waits behind it.
   const one = { at: 0, total: 1, items: [{ sender: 'Ada', how: 'DM', snippet: 'hi' }] }

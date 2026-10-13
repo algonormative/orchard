@@ -13,8 +13,13 @@ export const ENDPOINT = 'http://127.0.0.1:4312/workspaces/ws_0123456789abcdef/mc
 export const CREDENTIAL = '/Users/tester/.secrets/orchard-credential-7f3a'
 export const CWD = '/work/Fruit Stand'
 export const OPTIONS = { endpoint: ENDPOINT, credentialFile: CREDENTIAL, orchardBin: BIN }
-/** The participant the mod connects as in CWD. */
-export const ME = 'claude-fruit-stand'
+/** The configured id for CWD: the base every session of the folder shares (and the key of its settings). */
+export const BASE = 'claude-fruit-stand'
+/** The test session's id, and the six characters of it that end up in its handle. */
+export const SESSION_ID = '3F9A1C0E-7b2d-4c8e-9a51-0d6e2f4b8a17'
+export const SID = '3f9a1c'
+/** The participant the mod connects as in CWD: this session's own handle. */
+export const ME = `${BASE}.${SID}`
 
 /** Strings that must never reach anything the model can read. */
 export const SECRETS = [CREDENTIAL, '.secrets', 'orchard-credential', ENDPOINT, '127.0.0.1', 'ws_0123456789abcdef']
@@ -291,7 +296,7 @@ export function fakeOrchard(on: On, now: () => number, sleep: (ms: number) => Pr
     participants: [
       { id: 'owner', name: 'Nick' },
       { id: 'claude-other', name: 'Other Claude' },
-      { id: ME, name: 'Claude (Fruit Stand)' },
+      { id: ME, name: `Claude (Fruit Stand) · ${SID}` },
     ],
     acks: [],
     sent: [],

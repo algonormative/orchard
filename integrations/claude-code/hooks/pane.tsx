@@ -65,7 +65,7 @@ export type PaneHandlers = {
 export const ACTIVITY_SHOWN = 15
 
 /** Theme keys the Text rows paint with; they follow the person's light/dark theme. */
-const CHIP_TOKEN = { listening: 'success', working: 'success', waiting: 'warning', offline: 'error', error: 'error', shared: undefined, connecting: undefined, disconnected: undefined, 'signed-off': undefined } as const
+const CHIP_TOKEN = { listening: 'success', working: 'success', waiting: 'warning', offline: 'error', error: 'error', connecting: undefined, disconnected: undefined, 'signed-off': undefined } as const
 const TONE = { ok: 'success', warn: 'warning', dim: undefined } as const
 
 /** "now", "3m", "2h": how long before `nowMs` an entry happened. */
@@ -182,13 +182,11 @@ export function renderPane(ui: Table, view: PaneView, on: PaneHandlers) {
           ? [`Claude cannot reach ${name}`, 'Retrying. Nothing is lost while it is away.']
           : view.status?.kind === 'error'
             ? ['Claude could not connect to Orchard', view.status.message]
-            : kind === 'shared'
-              ? [`Another session is listening as ${me}`, 'This one does not listen, so nothing wakes it.']
-              : kind === 'connecting' || view.status === null
-                ? [`Connecting to ${name}…`]
-                : isQuietView
-                  ? [`Claude is connected to ${name}`, `as ${me} · nothing in flight · steer from the prompt box`]
-                  : []
+            : kind === 'connecting' || view.status === null
+              ? [`Connecting to ${name}…`]
+              : isQuietView
+                ? [`Claude is connected to ${name}`, `as ${me} · nothing in flight · steer from the prompt box`]
+                : []
 
   const buttons = (
     <Box key="header-actions" flexDirection="row" flexWrap="wrap" columnGap={1}>

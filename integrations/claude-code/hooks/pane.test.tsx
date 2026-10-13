@@ -7,12 +7,12 @@ import type { Engine } from 'claude-code/testing'
 import type { OrchardActivityEntry, OrchardAgent } from '../types'
 import { storeKey } from './alerts'
 import { settingsKey } from './classify'
-import { ENDPOINT, ME, OPTIONS } from './fake-orchard'
+import { BASE, ENDPOINT, ME, OPTIONS } from './fake-orchard'
 import { chipOf, widthOf } from './svg'
 import { begin, bandText, callTool, expectNoSecrets, typed, visible, world, BAND_PROPS } from './test-world'
 import type { World } from './test-world'
 
-const SETTINGS = settingsKey(ENDPOINT, ME)
+const SETTINGS = settingsKey(ENDPOINT, BASE)
 const PANE_PROPS = { title: 'Orchard', isFocused: false } as never
 const RUN = (args: string) => ({ command: 'orchard', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 160 } })
 // Orchard's browser UI answers any Host but the exact loopback address with a 403, `localhost` included.
@@ -669,7 +669,7 @@ test('the pane draws its header and footer as Svg where a surface has one, as Te
   }
 })
 
-test('the status chip: green listening or working, amber waiting for you, red offline or error, grey another session, disconnected or signed off', () => {
+test('the status chip: green listening or working, amber waiting for you, red offline or error, grey disconnected or signed off', () => {
   const quiet = { unread: 0, forYou: 0, needsYou: 0 }
   expect(chipOf({ kind: 'connected' }, quiet)).toEqual({ kind: 'listening', label: 'listening' })
   expect(chipOf({ kind: 'connected' }, quiet, true)).toEqual({ kind: 'working', label: 'working' })
@@ -677,7 +677,6 @@ test('the status chip: green listening or working, amber waiting for you, red of
   expect(chipOf({ kind: 'connected' }, { ...quiet, unread: 1, forYou: 1, isHeld: true }, true)).toEqual({ kind: 'waiting', label: 'waiting for you' })
   expect(chipOf({ kind: 'offline', failures: 2 }, quiet)).toEqual({ kind: 'offline', label: 'offline' })
   expect(chipOf({ kind: 'error', message: 'x' }, quiet).kind).toBe('error')
-  expect(chipOf({ kind: 'shared' }, quiet)).toEqual({ kind: 'shared', label: 'another session is listening' })
   expect(chipOf({ kind: 'disconnected' }, quiet)).toEqual({ kind: 'disconnected', label: 'disconnected' })
   expect(chipOf({ kind: 'signed-off' }, quiet)).toEqual({ kind: 'signed-off', label: 'signed off' })
   expect(chipOf({ kind: 'connecting' }, quiet).kind).toBe('connecting')
@@ -702,8 +701,6 @@ test('the header chip follows the connection on the pane', { options: OPTIONS },
   expect(await header('terminal')).toContain('● waiting for you')
   w.state.override.status = { kind: 'offline', failures: 1 }
   expect(await header('desktop')).toMatch(/class="mono err" font-size="10.5">offline</)
-  w.state.override.status = { kind: 'shared' }
-  expect(await header('desktop')).toMatch(/class="mono dim" font-size="10.5">another session is listening</)
   w.state.override.status = { kind: 'disconnected' }
   expect(await header('desktop')).toMatch(/class="mono dim" font-size="10.5">disconnected</)
   w.state.override.status = { kind: 'signed-off' }

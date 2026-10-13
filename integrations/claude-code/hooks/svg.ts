@@ -47,7 +47,7 @@ function svg(width: number, height: number, body: string): string {
 
 // ---- the status chip ----
 
-export type ChipKind = 'listening' | 'working' | 'waiting' | 'offline' | 'shared' | 'connecting' | 'error' | 'disconnected' | 'signed-off'
+export type ChipKind = 'listening' | 'working' | 'waiting' | 'offline' | 'connecting' | 'error' | 'disconnected' | 'signed-off'
 export type Chip = { kind: ChipKind; label: string }
 
 /** green listening or working / amber waiting for you / red offline (or error) / grey another session is listening, disconnected, signed off, or connecting. `isBusy`: a message is being handled or a subagent runs. */
@@ -60,8 +60,6 @@ export function chipOf(status: OrchardStatus | null, counts: OrchardCounts | nul
       return { kind: 'offline', label: 'offline' }
     case 'error':
       return { kind: 'error', label: 'error' }
-    case 'shared':
-      return { kind: 'shared', label: 'another session is listening' }
     case 'disconnected':
       return { kind: 'disconnected', label: 'disconnected' }
     case 'signed-off':
@@ -77,7 +75,6 @@ const CHIP_CLASS: Record<ChipKind, { bg: string; fg: string }> = {
   waiting: { bg: 'warnbg', fg: 'warn' },
   offline: { bg: 'errbg', fg: 'err' },
   error: { bg: 'errbg', fg: 'err' },
-  shared: { bg: 'chip', fg: 'dim' },
   connecting: { bg: 'chip', fg: 'dim' },
   disconnected: { bg: 'chip', fg: 'dim' },
   'signed-off': { bg: 'chip', fg: 'dim' },

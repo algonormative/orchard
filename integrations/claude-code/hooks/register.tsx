@@ -45,9 +45,9 @@ import type { AlertsPage } from './alerts'
 import { bandLine } from './band'
 import { statusLine } from './statusline'
 import type { BandTone } from './band'
-import { CLAIM_RECHECK_MS, LEASE_BEAT_MS, LEASE_RECHECK_MS, RECENT_KEY, inflightKey, isHeldByOther, leaseKey, liveClaims, parseClaims, parseLease, parseRecent, planEviction, withoutIds } from './lease'
+import { CLAIM_RECHECK_MS, RECENT_KEY, inflightKey, liveClaims, parseClaims, parseRecent, planEviction, withoutIds } from './lease'
 import { DEFAULT_SETTINGS, addParticipation, classify, parseParticipation, parseSettings, participationKey, settingsKey } from './classify'
-import { checkConn, parseProjectFile, PROJECT_FILE, readOptions, resolveIdentity } from './config'
+import { checkConn, parseProjectFile, PROJECT_FILE, readOptions, resolveIdentity, sessionSid } from './config'
 import type { Options, Parsed, ProjectOverrides } from './config'
 import { backoffDelay, connectOnce, createRuntime, track } from './connect'
 import type { Runtime } from './connect'
@@ -164,6 +164,9 @@ const HELD_RECHECK_MS = 15_000
 
 /** A receipt waits this long for a burst of them (one task action writes two) before the workspace is read again. */
 const WORK_DEBOUNCE_MS = 1_000
+
+/** The sign-off at session end waits this long for the workspace; the session is closing. */
+const SIGN_OFF_TIMEOUT_MS = 5_000
 
 /** While the pane is open, the tasks and plugins are read again this often, whatever the alerts said. */
 const SAFETY_REFRESH_MS = 60_000
@@ -415,8 +418,6 @@ async function start($: EngineInterface, app: App, cwd: string) {
   rt.timer?.cancel()
   rt.timer = undefined
   rt.failures = 0
-  ls.leaseTimer?.cancel()
-  ls.leaseTimer = undefined
   stopLoop(ls, 'superseded')
   // What the workspace-wide counts are built from lives in memory: they begin again with it.
   ls.othersAt = []
@@ -436,7 +437,7 @@ async function start($: EngineInterface, app: App, cwd: string) {
     $.ui.toast('Orchard: the participantId in .orchard.json must start with "claude-", so it was ignored')
   }
 
-  const identity = resolveIdentity(options, cwd, project.value)
+  const identity = resolveIdentity(options, cwd, project.value, await sessionSidOf($, ls))
   if (!identity.ok) return setStatus($, app, { kind: 'error', message: identity.message })
 
   rt.current = { conn: conn.value, identity: identity.value }
@@ -495,74 +496,22 @@ async function storeSet($: EngineInterface, app: App, key: string, value: unknow
   await putStatusShown($, app, current => (current?.kind === 'connected' ? connectedStatus(ls) : current))
 }
 
-/** Reads the lease of this connection. */
-async function readLease($: EngineInterface, endpoint: string, me: string) {
-  return parseLease(await storeGet($, leaseKey(endpoint, me)))
-}
-
-/** The id this session holds the lease under: its session id, so a reload of the mod is still the same holder. */
-async function leaseHolder($: EngineInterface, ls: ListenerState): Promise<string> {
-  if (ls.leaseId === undefined) {
-    try {
-      ls.leaseId = await $.session.id()
-    } catch {
-      ls.leaseId = crypto.randomUUID()
-    }
-  }
-  return ls.leaseId
-}
-
 /**
- * Takes or renews the lease for this (endpoint, participant). False: another session beat it
- * recently, so this one must not listen. Two sessions starting together can both write; the one
- * whose write lands first finds the other's at its next heartbeat and stands down.
+ * The short id in this session's handle: the first six letters and digits of its session id, so a
+ * resume of the conversation or a reload of the mod is the same participant. Without a session id
+ * a random one stands in, kept for the life of the process.
  */
-async function holdLease($: EngineInterface, app: App, isForced: boolean): Promise<boolean> {
-  const { rt, ls } = app
-  const here = rt.current
-  if (here === undefined) return true
-  const now = await $.clock.now()
-  if (!isForced && now - ls.leaseBeatAt < LEASE_BEAT_MS) return true
-  const { endpoint } = here.conn
-  const me = here.identity.participantId
-  const holder = await leaseHolder($, ls)
-  if (isHeldByOther(await readLease($, endpoint, me), holder, now)) return false
-  ls.leaseBeatAt = now
-  await storeSet($, app, leaseKey(endpoint, me), { session: holder, at: now })
-  return true
-}
-
-/** This session does not listen: another one does. The band says so, and a timer looks whether that session went away. */
-async function standDown($: EngineInterface, app: App, loop: Loop) {
-  const { ls } = app
-  loop.isStopped = true
-  loop.stopReason = 'shared'
-  loop.timer?.cancel()
-  loop.timer = undefined
-  ls.watchdog?.cancel()
-  ls.watchdog = undefined
-  await setStatus($, app, { kind: 'shared' })
-  ls.leaseTimer?.cancel()
-  ls.leaseTimer = $.clock.after(LEASE_RECHECK_MS, () => {
-    detach(recheckLease($, app))
-  })
-}
-
-/** A read-only session looks again: once the other session's lease is stale, this one listens. */
-async function recheckLease($: EngineInterface, app: App) {
-  const { rt, ls } = app
-  ls.leaseTimer = undefined
-  const here = rt.current
-  if (here === undefined || (await read($, status))?.kind !== 'shared') return
-  const holder = await leaseHolder($, ls)
-  if (isHeldByOther(await readLease($, here.conn.endpoint, here.identity.participantId), holder, await $.clock.now())) {
-    ls.leaseTimer = $.clock.after(LEASE_RECHECK_MS, () => {
-      detach(recheckLease($, app))
-    })
-    return
+async function sessionSidOf($: EngineInterface, ls: ListenerState): Promise<string> {
+  if (ls.sid === undefined) {
+    let raw: unknown
+    try {
+      raw = await $.session.id()
+    } catch {
+      raw = undefined
+    }
+    ls.sid = sessionSid(raw, crypto.randomUUID())
   }
-  await setStatus($, app, connectedStatus(ls))
-  detach(startListener($, app))
+  return ls.sid
 }
 
 /**
@@ -612,30 +561,33 @@ async function setClaim($: EngineInterface, app: App, ids: readonly string[], is
   await storeSet($, app, key, next)
 }
 
-/** session.end: let go of the lease so the next session of this participant listens at once, not after it goes stale. */
-async function releaseLease($: EngineInterface, app: App) {
+/**
+ * session.end: the session's handle signs off (`mail_leave`), so Orchard does not list a session that
+ * is gone as signed on. Best effort and short: a workspace that is down, or a handle already signed
+ * off, is nothing to raise. The loop and its timers stop either way.
+ */
+async function signOffAtEnd($: EngineInterface, app: App) {
   const { rt, ls } = app
   const here = rt.current
-  if (here === undefined || ls.leaseId === undefined) return
-  const key = leaseKey(here.conn.endpoint, here.identity.participantId)
-  const held = parseLease(await storeGet($, key))
-  if (held?.session !== ls.leaseId) return
   stopLoop(ls, 'offline')
   ls.watchdog?.cancel()
   ls.watchdog = undefined
-  ls.leaseTimer?.cancel()
-  ls.leaseTimer = undefined
+  if (here === undefined) return
+  // Already out of the workspace: signed off by the model, or by an earlier end.
+  if ((await read($, status))?.kind === 'signed-off') return
   try {
-    await $.store.delete(key)
+    await tool($, rt, 'mail_leave', { participant_id: here.identity.participantId, request_id: `orchard-leave-${crypto.randomUUID()}` }, { timeoutMs: SIGN_OFF_TIMEOUT_MS })
   } catch {
-    // The lease then goes stale on its own.
+    // The session is ending: Orchard times the handle out on its own.
   }
 }
 
 /** Marks this record used and forgets the least recently used ones past the cap. */
-async function touchRecords($: EngineInterface, app: App, endpoint: string, me: string) {
+async function touchRecords($: EngineInterface, app: App, endpoint: string, me: string, baseId: string) {
   try {
-    const plan = planEviction(await $.store.keys(), parseRecent(await storeGet($, RECENT_KEY)), { endpoint, participantId: me }, await $.clock.now())
+    // The handle's record and the base's (the settings every session of the project shares) are both in use.
+    const current = [{ endpoint, participantId: me }, { endpoint, participantId: baseId }]
+    const plan = planEviction(await $.store.keys(), parseRecent(await storeGet($, RECENT_KEY)), current, await $.clock.now())
     for (const key of plan.evict) await $.store.delete(key)
     await storeSet($, app, RECENT_KEY, plan.index)
   } catch {
@@ -837,21 +789,13 @@ async function prepare($: EngineInterface, app: App, loop: Loop): Promise<boolea
   // A new connection may be a different host: ask again whether it has `workspace_decisions`.
   ls.decisionsTool = 'unknown'
 
-  // One session at a time listens as a participant: a second would wake on the same message,
-  // answer it twice, and overwrite the first one's cursor.
-  if (!(await holdLease($, app, true))) {
-    await standDown($, app, loop)
-    return false
-  }
-  // Disconnected while the lease was being taken: give it back.
-  if (ls.isDisconnected) {
-    await releaseLease($, app)
-    return false
-  }
-  await touchRecords($, app, endpoint, me)
+  // Disconnected while the connection was being made: nothing listens.
+  if (ls.isDisconnected) return false
+  const { baseId } = here.identity
+  await touchRecords($, app, endpoint, me, baseId)
 
   const stored = parseStoreRecord(await storeGet($, storeKey(endpoint, me)))
-  ls.settings = parseSettings(await storeGet($, settingsKey(endpoint, me)))
+  ls.settings = parseSettings(await storeGet($, settingsKey(endpoint, baseId)))
   await update($, settings, () => ls.settings)
   ls.participation = parseParticipation(await storeGet($, participationKey(endpoint, me)))
   ls.participationSet = new Set(ls.participation)
@@ -913,10 +857,6 @@ async function tick($: EngineInterface, app: App, loop: Loop) {
   loop.isPolling = true
   try {
     loop.expectedBy = (await $.clock.now()) + ALERTS_TIMEOUT_MS + GUARD_SLACK_MS
-    if (!(await holdLease($, app, false))) {
-      await standDown($, app, loop)
-      return
-    }
     await retryAcks($, app)
     // A queue full of alerts that all wake a session has nowhere to put more: leave them on the
     // server (the cursor does not move) and look again once a delivery has made room.
@@ -1293,7 +1233,7 @@ async function saveSettings($: EngineInterface, app: App, next: OrchardSettings)
   const { rt, ls } = app
   const here = rt.current
   ls.settings = next
-  if (here !== undefined) await storeSet($, app, settingsKey(here.conn.endpoint, here.identity.participantId), next)
+  if (here !== undefined) await storeSet($, app, settingsKey(here.conn.endpoint, here.identity.baseId), next)
   await update($, settings, () => next)
   // What is already pending was classified under the old settings: what the new ones would drop
   // goes (as it would have at the door), what changes between wake and quiet is counted afresh.
@@ -1502,7 +1442,7 @@ async function showHandles($: EngineInterface, app: App) {
 /**
  * A Bash command of an agent that signed on or acted as a participant through the Orchard CLI (the
  * orchard skill does), seen once it has run and succeeded. The mod registers nothing for that
- * participant, holds no lease for it and pins no call to it: it shows it as the agent's and counts it
+ * participant, keeps nothing for it and pins no call to it: it shows it as the agent's and counts it
  * as the session's. Only Claude-style ids are taken (handles.ts).
  */
 async function noteObserved($: EngineInterface, app: App, agentId: string, command: string) {
@@ -1762,7 +1702,7 @@ async function openInOrchard($: EngineInterface, href: string) {
 }
 
 /**
- * Disconnect: this session stops listening, lets go of the lease and wakes for nothing, until
+ * Disconnect: this session stops listening and wakes for nothing, until
  * Connect. Everything that would call the workspace on its own goes: the loop and its watchdog, the
  * retry, the flush and hold timers, the refresh timers. Memory only; the next session connects as
  * usual. `to` is the status it stops in: `signed-off` when its participant left the workspace itself.
@@ -1778,9 +1718,8 @@ async function disconnect($: EngineInterface, app: App, to: OrchardStatus = { ki
   stopLoop(ls, 'disconnected')
   rt.timer?.cancel()
   rt.timer = undefined
-  for (const timer of [ls.watchdog, ls.leaseTimer, ls.flushTimer, ls.workTimer, ls.safetyTimer, ls.decayTimer]) timer?.cancel()
+  for (const timer of [ls.watchdog, ls.flushTimer, ls.workTimer, ls.safetyTimer, ls.decayTimer]) timer?.cancel()
   ls.watchdog = undefined
-  ls.leaseTimer = undefined
   ls.flushTimer = undefined
   ls.workTimer = undefined
   ls.workDueAt = undefined
@@ -1790,7 +1729,6 @@ async function disconnect($: EngineInterface, app: App, to: OrchardStatus = { ki
   ls.othersAt = []
   ls.lastOtherAt = undefined
   endHold($, app)
-  await releaseLease($, app)
   await putWorkspaceActivity($, app, () => EMPTY_WORKSPACE_ACTIVITY)
   await setStatus($, app, to)
 }
@@ -2149,9 +2087,9 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
-    // /clear keeps this process, its loop and its lease holder id; every other end is a session that will not beat again.
+    // /clear keeps this process, its loop and its handle; every other end is a session that will not come back.
     if (e.reason !== 'clear') {
-      await releaseLease($, app)
+      await signOffAtEnd($, app)
       // The status line is this session's: it goes with it.
       app.ls.statusShown = null
       pin($, undefined)

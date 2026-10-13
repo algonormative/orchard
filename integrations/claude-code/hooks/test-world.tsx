@@ -4,7 +4,7 @@ import type { AgentInfo, On } from 'claude-code'
 import { expect, mock } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { CWD, SECRETS, fakeOrchard, stubFiles, stubStore, watchSinks } from './fake-orchard'
+import { CWD, SECRETS, SESSION_ID, fakeOrchard, stubFiles, stubStore, watchSinks } from './fake-orchard'
 
 /** How often a held wake looks at the prompt box again (the mod's own constant, written out: a test should not follow it). */
 export const HELD_RECHECK_MS = 15_000
@@ -62,6 +62,8 @@ export type WorldOptions = {
   files?: Record<string, string>
   /** What `$.store` holds at the start. */
   store?: Record<string, unknown>
+  /** What `$.session.id()` answers (default SESSION_ID); `null` makes it fail. */
+  sessionId?: string | null
 }
 
 /** Everything a test needs around the plugin: clock, fake CLI, files, store, sinks, the prompt queue and box. */
@@ -109,6 +111,10 @@ export function world(on: On, options: WorldOptions = {}) {
     return { text: e.text, context: e.context }
   })
   on('session.cwd', async () => ({ value: CWD }) as never)
+  on('session.id', async () => {
+    if (options.sessionId === null) throw new Error('no session id')
+    return { value: options.sessionId ?? SESSION_ID } as never
+  })
   // The tools the plugin registers, the panes it opens and the drafts it fills.
   const registered: { name: string; description: string; inputSchema: unknown; isDeferred?: boolean }[] = []
   on('tool.register', async (_$, e) => {
